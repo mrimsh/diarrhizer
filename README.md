@@ -1,20 +1,28 @@
 # Diarrhizer
 
 A local (on-prem) Windows tool for processing call recordings:
-input audio/video file → speech recognition (WhisperX) → speaker diarization (pyannote via WhisperX) → export of a structured protocol (`.md/.txt`) and machine-readable output (`.json`).
-
-The project is intended for personal use and iterative development (future plans include a GUI, additional formats, and post-processing features).
+input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker diarization (pyannote via WhisperX) → export (`.md/.txt/.json`).
 
 ---
 
-## MVP Features
+## Current Status
+
+| Component | Status |
+|-----------|--------|
+| `doctor` command | ✅ Implemented |
+| `run` command | ⚠️ Stub (pipeline not yet wired) |
+| Pipeline stages | ⏳ Planned |
+| Adapters (FFmpeg/WhisperX/diarization) | ⏳ Planned |
+
+---
+
+## MVP Features (Planned)
 
 * Supported input formats: `.mp3`, `.wav`, `.m4a`, `.mp4`, `.mkv`, `.webm`, etc.
 * Audio normalization via FFmpeg (typically: WAV mono 16 kHz)
 * WhisperX transcription with word-level timestamps (alignment)
 * Speaker diarization (`Speaker_00`, `Speaker_01`, …) with text-to-speaker assignment
 * Export:
-
   * Human-readable `.md/.txt` (segments + timestamps + speaker)
   * Structured `.json` (for further processing without recomputing ASR/diarization)
 
@@ -29,7 +37,7 @@ Voice enrollment or automatic speaker identification may be added later.
 ## Requirements
 
 * Windows 10/11
-* Python 3.11/3.12 (recommended for stable Torch stack on Windows)
+* Python 3.11+ (recommended for stable Torch stack on Windows)
 * FFmpeg available in `PATH` (also important for decoding via torchcodec/pyannote on Windows)
 * For diarization: Hugging Face token + acceptance of gated model terms
 * (Optional) NVIDIA GPU + CUDA-compatible Torch wheels
@@ -97,26 +105,59 @@ HF_TOKEN=hf_xxx
 python -m diarrhizer doctor
 ```
 
-Diagnostics should verify:
+The `doctor` command performs 5 diagnostic checks:
 
-* Python and Torch versions, CUDA availability
-* FFmpeg availability
-* Presence of HF token
-* (If applicable) torchcodec import
+1. **Python version** — verifies Python 3.11+
+2. **FFmpeg** — checks availability in PATH
+3. **PyTorch/Torchaudio** — verifies installation and reports version
+4. **CUDA** — checks GPU availability
+5. **Hugging Face token** — verifies `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN` is set
 
 ---
 
-### Run Processing
+### Run Processing (Not Yet Implemented)
 
 ```powershell
 python -m diarrhizer run "D:\records\meeting.mp4" --out ".\out" --min-speakers 2 --max-speakers 6 --lang ru --device cuda
 ```
 
+> **Note:** The `run` command is currently a stub. The pipeline stages are not yet implemented.
+
 ---
 
-## Output Structure (Artifacts Directory)
+## Planned Pipeline
 
-Each run creates a job-specific folder inside `--out`, containing artifacts by stage:
+The processing pipeline consists of 5 stages:
+
+```
+[Input media file]
+      |
+      v
+(1) Convert (FFmpeg)  
+    -> artifacts/audio/normalized.wav
+      |
+      v
+(2) Transcribe (WhisperX ASR + alignment)  
+    -> artifacts/asr/transcript.json
+      |
+      v
+(3) Diarize (pyannote via WhisperX)  
+    -> artifacts/diar/diarization.json
+      |
+      v
+(4) Merge (speaker ↔ words/segments)  
+    -> artifacts/merged/segments.json
+      |
+      v
+(5) Export  
+    -> artifacts/export/result.md + result.txt + result.json
+```
+
+---
+
+## Output Structure (Planned Artifacts)
+
+Each run will create a job-specific folder inside `--out`, containing artifacts by stage:
 
 * `audio/` — normalized WAV
 * `asr/` — WhisperX transcript (timestamps/words)
@@ -148,17 +189,21 @@ See `docs/troubleshooting.md` (to be expanded during development).
 
 ## Development
 
-* CLI entry point: `src/diarrhizer/cli.py`
-* Pipeline stages: `src/diarrhizer/pipeline/stages/`
-* External integrations (adapters): `src/diarrhizer/adapters/`
+* CLI entry point: [`src/diarrhizer/cli.py`](src/diarrhizer/cli.py)
+* Pipeline runner: [`src/diarrhizer/pipeline/runner.py`](src/diarrhizer/pipeline/runner.py) (to be implemented)
+* Pipeline stages: [`src/diarrhizer/pipeline/stages/`](src/diarrhizer/pipeline/stages/) (to be implemented)
+* External integrations (adapters): [`src/diarrhizer/adapters/`](src/diarrhizer/adapters/) (to be implemented)
+* Diagnostics: [`src/diarrhizer/diagnostics/doctor.py`](src/diarrhizer/diagnostics/doctor.py)
 
 ---
 
-## Roadmap (Very Brief)
+## Roadmap
 
-1. Stable CLI + caching + environment diagnostics
-2. UX improvements: speaker name mapping, protocol formatting
-3. GUI + additional features
+1. Implement pipeline stages (convert, transcribe, diarize, merge, export)
+2. Implement adapters (FFmpeg, WhisperX, diarization)
+3. Stable CLI + caching + environment diagnostics
+4. UX improvements: speaker name mapping, protocol formatting
+5. GUI + additional features
 
 ---
 
