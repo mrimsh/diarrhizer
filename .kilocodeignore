@@ -1,0 +1,57 @@
+# Kilo Code file access ignore list
+# Uses .gitignore-style patterns (affects Kilo Code access only).
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Python caches
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build artifacts
+build/
+dist/
+**/*.egg-info/
+
+# Local outputs / artifacts (can be huge)
+out/
+artifacts/
+checkpoints/
+**/*.log
+
+# Media inputs (private / large)
+**/*.wav
+**/*.mp3
+**/*.m4a
+**/*.flac
+**/*.mp4
+**/*.mkv
+**/*.webm
+**/*.avi
+**/*.mov
+
+# Model weights / large binaries (avoid indexing huge files)
+**/*.bin
+**/*.pt
+**/*.pth
+**/*.safetensors
+**/*.onnx
+
+# Local caches
+.cache/
+.hf/
+.huggingface/
+
+# Secrets
+.env
+.env.*
+**/*.key
+**/*.pem
+**/*secret*

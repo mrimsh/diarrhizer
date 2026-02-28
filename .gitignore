@@ -1,0 +1,64 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.Python
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Testing / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ===== Virtual environments =====
+.venv/
+venv/
+ENV/
+
+# ===== IDE =====
+.vscode/
+.idea/
+
+# ===== Environment / secrets =====
+.env
+.env.*
+!.env.example
+
+# ===== Outputs / artifacts =====
+out/
+artifacts/
+checkpoints/
+*.log
+
+# ===== Media (private & large) =====
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.mp4
+*.mkv
+*.webm
+*.avi
+*.mov
+
+# ===== Large model files (avoid committing) =====
+*.bin
+*.pt
+*.pth
+*.safetensors
+*.onnx
+
+# ===== Local caches =====
+.cache/
+.hf/
+.huggingface/
