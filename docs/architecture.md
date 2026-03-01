@@ -21,7 +21,7 @@ This document is intentionally concise. It defines the "skeleton" so the project
 | FFmpeg adapter | ✅ Implemented | [`src/diarrhizer/adapters/ffmpeg.py`](src/diarrhizer/adapters/ffmpeg.py) |
 | Diarize stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/diarize.py`](src/diarrhizer/pipeline/stages/diarize.py) |
 | Merge stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/merge.py`](src/diarrhizer/pipeline/stages/merge.py) |
-| Export modules | ⏳ Planned | [`src/diarrhizer/export/`](src/diarrhizer/export/) |
+| Export modules | ✅ Implemented | [`src/diarrhizer/export/`](src/diarrhizer/export/) |
 
 ---
 
@@ -68,7 +68,7 @@ Planned high-level flow:
       |
       v
 (5) Export  
-    -> artifacts/export/result.md + result.txt + result.json
+    -> artifacts/export/result.md + result.json
 ```
 
 Supported inputs: various audio/video formats (`.mp3`, `.wav`, `.m4a`, `.mp4`, `.mkv`, `.webm`).  
@@ -256,7 +256,7 @@ python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 
 | `--lang` | string | `"auto"` | Language code or `"auto"` for detection |
 | `--device` | choice | `"cuda"` | Device: `cuda` or `cpu` |
 
-> **Note:** Pipeline runs: convert → transcribe → diarize → merge.
+> **Note:** Pipeline runs: convert → transcribe → diarize → merge → export.
 
 ---
 
@@ -309,12 +309,12 @@ src/diarrhizer/
 │       ├── convert.py      # FFmpeg normalization
 │       ├── transcribe.py   # WhisperX ASR + alignment
 │       ├── diarize.py      # Speaker diarization (pyannote)
-│       └── merge.py        # Merge ASR with speaker labels
+│       ├── merge.py        # Merge ASR with speaker labels
+│       └── export.py       # Export to MD/JSON
 ├── adapters/               # External library wrappers
 │   ├── ffmpeg.py
 │   └── whisperx.py
-└── export/                 # Export formatters (planned)
-    ├── markdown.py
-    ├── text.py
-    └── json.py
+└── export/                 # Export formatters
+    ├── markdown_export.py  # Markdown exporter
+    └── json_export.py     # JSON exporter
 ```
