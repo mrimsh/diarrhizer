@@ -8,7 +8,7 @@ from typing import List, Tuple
 
 # [SEMANTIC-BEGIN] DIAGNOSTICS:DOCTOR
 # @purpose: Run environment diagnostics to verify Diarrhizer dependencies
-# @description: Checks for Python version, FFmpeg, torch/torchaudio, CUDA, and HF token
+# @description: Checks for Python version, FFmpeg, torch/torchaudio, CUDA, torchcodec, and HF token
 # @sideEffects: Reads environment variables, imports optional modules
 # @errors: Prints warnings for missing dependencies
 # @see: CLI:ENTRY
@@ -23,6 +23,7 @@ def run_doctor_checks() -> None:
         check_ffmpeg,
         check_torch,
         check_cuda,
+        check_torchcodec,
         check_hf_token,
     ]
     
@@ -70,16 +71,23 @@ def check_ffmpeg() -> Tuple[str, bool, str]:
 
 
 def check_torch() -> Tuple[str, bool, str]:
-    """Check torch and torchaudio are installed."""
+    """Check torch and torchaudio are installed with version info."""
     try:
         import torch
         import torchaudio
         torch_version = torch.__version__
+        torchaudio_version = torchaudio.__version__
         has_cuda = torch.cuda.is_available()
         
-        info = f"torch {torch_version}"
+        info = f"torch {torch_version}, torchaudio {torchaudio_version}"
         if has_cuda:
-            info += " (with CUDA)"
+            # Check for CPU-only build mismatch
+            cuda_version = torch.version.cuda
+            info += f" (CUDA {cuda_version})"
+            
+            # Heuristic: if CUDA available but device count is 0, likely CPU-only build
+            if torch.cuda.device_count() == 0:
+                info += " - WARNING: CUDA available but no devices. CPU-only build?"
         else:
             info += " (CPU only)"
         
@@ -89,15 +97,18 @@ def check_torch() -> Tuple[str, bool, str]:
 
 
 def check_cuda() -> Tuple[str, bool, str]:
-    """Check CUDA availability."""
+    """Check CUDA availability and device count."""
     try:
         import torch
-        if torch.cuda.is_available():
-            device_count = torch.cuda.device_count()
-            device_name = torch.cuda.get_device_name(0) if device_count > 0 else "Unknown"
-            return ("CUDA", True, f"{device_count} device(s): {device_name}")
-        else:
+        if not torch.cuda.is_available():
+            return ("CUDA", False, "CUDA not available (torch compiled without CUDA)")
+        
+        device_count = torch.cuda.device_count()
+        if device_count == 0:
             return ("CUDA", False, "CUDA available but no devices found")
+        
+        device_name = torch.cuda.get_device_name(0)
+        return ("CUDA", True, f"{device_count} device(s): {device_name}")
     except ImportError:
         return ("CUDA", False, "torch not installed, cannot check CUDA")
 
@@ -110,6 +121,16 @@ def check_hf_token() -> Tuple[str, bool, str]:
         return ("HF Token", True, "Found in environment")
     else:
         return ("HF Token", False, "Not found. Set HF_TOKEN or HUGGINGFACE_HUB_TOKEN")
+
+
+def check_torchcodec() -> Tuple[str, bool, str]:
+    """Check torchcodec is available for audio decoding."""
+    try:
+        import torchcodec
+        return ("torchcodec", True, "Available (fast decoding)")
+    except ImportError:
+        msg = "Not installed. Will fallback to waveform preload (slower)."
+        return ("torchcodec", False, msg)
 
 
 if __name__ == "__main__":

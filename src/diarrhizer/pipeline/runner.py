@@ -86,6 +86,7 @@ def run_pipeline(
     device: str = "cuda",
     force: bool = False,
     force_stage: str | None = None,
+    speakers: dict | None = None,
 ) -> dict:
     """Run the processing pipeline for a media file.
 
@@ -99,6 +100,7 @@ def run_pipeline(
         device: Device to use ("cuda" or "cpu")
         force: If True, recompute all stages regardless of cache
         force_stage: If set, only force a specific stage to recompute
+        speakers: Optional speaker name mapping {speaker_id: display_name}
 
     Returns:
         Dictionary with pipeline execution results
@@ -141,6 +143,9 @@ def run_pipeline(
         "force": force,
         "force_stage": force_stage,
     }
+    # Only add speakers to config if explicitly provided
+    if speakers is not None:
+        config["speakers"] = speakers
 
     # Create job context
     job = JobContext(

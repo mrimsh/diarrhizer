@@ -4,11 +4,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from diarrhizer.export.speakers import resolve_speaker_name
+
 
 # [SEMANTIC-BEGIN] EXPORT:MARKDOWN
 # @purpose: Export merged segments to human-readable Markdown format
-# @description: Creates a transcript with timecodes and speaker labels
-# @inputs: segments data from merge stage, config metadata
+# @description: Creates a transcript with timecodes and speaker labels. Supports speaker name mapping via config.speakers
+# @inputs: segments data from merge stage, config metadata (including optional speakers mapping)
 # @outputs: Markdown-formatted string
 # @sideEffects: None (pure function)
 # @errors: None
@@ -33,6 +35,7 @@ def export_to_markdown(
     Returns:
         Markdown-formatted transcript string
     """
+    speakers = config.get("speakers")
     lines: list[str] = []
 
     # Header with metadata
@@ -48,11 +51,12 @@ def export_to_markdown(
     for seg in segments:
         start_time = _format_timestamp(seg.get("start", 0))
         end_time = _format_timestamp(seg.get("end", 0))
-        speaker = seg.get("speaker_id", "Speaker_00")
+        speaker_id = seg.get("speaker_id", "Speaker_00")
+        speaker_name = resolve_speaker_name(speaker_id, speakers)
         text = seg.get("text", "")
 
         # Main segment line
-        lines.append(f"[{start_time} → {end_time}] **{speaker}:** {text}")
+        lines.append(f"[{start_time} → {end_time}] **{speaker_name}:** {text}")
 
         # Word-level details if available
         words = seg.get("words")
@@ -60,9 +64,10 @@ def export_to_markdown(
             for word in words:
                 word_start = _format_timestamp(word.get("start", 0))
                 word_text = word.get("word", "")
-                word_speaker = word.get("speaker_id", speaker)
-                if word_speaker != speaker:
-                    lines.append(f"    - [{word_start}] {word_text} ({word_speaker})")
+                word_speaker_id = word.get("speaker_id", speaker_id)
+                word_speaker_name = resolve_speaker_name(word_speaker_id, speakers)
+                if word_speaker_id != speaker_id:
+                    lines.append(f"    - [{word_start}] {word_text} ({word_speaker_name})")
                 else:
                     lines.append(f"    - [{word_start}] {word_text}")
 

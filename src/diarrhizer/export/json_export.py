@@ -5,11 +5,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from diarrhizer.export.speakers import resolve_speaker_name
+
 
 # [SEMANTIC-BEGIN] EXPORT:JSON
 # @purpose: Export merged segments to structured JSON format
-# @description: Creates machine-readable JSON with metadata and segments
-# @inputs: segments data from merge stage, config metadata
+# @description: Creates machine-readable JSON with metadata and segments. Adds speaker_name field when config.speakers mapping is provided
+# @inputs: segments data from merge stage, config metadata (including optional speakers mapping)
 # @outputs: JSON-formatted string
 # @sideEffects: None (pure function)
 # @errors: None
@@ -33,10 +35,11 @@ def export_to_json(
                 "start": 0.0,
                 "end": 5.0,
                 "speaker_id": "Speaker_00",
+                "speaker_name": "Ivan",
                 "text": "Hello world",
                 "words": [
-                    {"start": 0.0, "end": 0.5, "word": "Hello", "speaker_id": "Speaker_00"},
-                    {"start": 0.5, "end": 1.0, "word": "world", "speaker_id": "Speaker_00"}
+                    {"start": 0.0, "end": 0.5, "word": "Hello", "speaker_id": "Speaker_00", "speaker_name": "Ivan"},
+                    {"start": 0.5, "end": 1.0, "word": "world", "speaker_id": "Speaker_00", "speaker_name": "Ivan"}
                 ]
             }
         ]
@@ -50,6 +53,27 @@ def export_to_json(
     Returns:
         JSON-formatted transcript string
     """
+    speakers = config.get("speakers")
+
+    # Enrich segments with speaker_name
+    enriched_segments = []
+    for seg in segments:
+        enriched_seg = dict(seg)
+        speaker_id = seg.get("speaker_id", "Speaker_00")
+        enriched_seg["speaker_name"] = resolve_speaker_name(speaker_id, speakers)
+
+        # Also enrich word-level details
+        if "words" in seg and seg["words"]:
+            enriched_words = []
+            for word in seg["words"]:
+                enriched_word = dict(word)
+                word_speaker_id = word.get("speaker_id", speaker_id)
+                enriched_word["speaker_name"] = resolve_speaker_name(word_speaker_id, speakers)
+                enriched_words.append(enriched_word)
+            enriched_seg["words"] = enriched_words
+
+        enriched_segments.append(enriched_seg)
+
     # Build output structure
     output_data = {
         "metadata": {
@@ -62,7 +86,7 @@ def export_to_json(
                 "max_speakers": config.get("max_speakers", 10),
             },
         },
-        "segments": segments,
+        "segments": enriched_segments,
     }
 
     return json.dumps(output_data, indent=2, ensure_ascii=False)

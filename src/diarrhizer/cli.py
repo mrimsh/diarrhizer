@@ -1,6 +1,7 @@
 """CLI entry point for Diarrhizer."""
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -82,6 +83,12 @@ def main() -> int:
         choices=["convert", "transcribe", "diarize", "merge", "export"],
         help="Force recompute a specific stage (convert, transcribe, diarize, merge, export)"
     )
+    run_parser.add_argument(
+        "--speakers",
+        type=str,
+        default=None,
+        help="Path to JSON file with speaker name mapping (e.g., {\"Speaker_00\": \"Ivan\", \"Speaker_01\": \"Maria\"})"
+    )
     
     args = parser.parse_args()
     
@@ -92,11 +99,38 @@ def main() -> int:
         # [SEMANTIC-BEGIN] CLI:RUN
         # @purpose: Run the processing pipeline for a media file
         # @description: Orchestrates FFmpeg conversion, ASR, diarization, and export
-        # @inputs: args.input, args.out, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage
+        # @inputs: args.input, args.out, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.speakers
         # @outputs: Artifacts in out/ directory
         # @sideEffects: Creates job directory, writes artifacts to disk
         # @errors: Exits with code 1 on failure
         # @see: PIPELINE:RUNNER, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, STAGE:MERGE, STAGE:EXPORT
+
+        # [SEMANTIC-BEGIN] CONFIG:SPEAKERS_MAP
+        # @purpose: Load speaker name mapping from JSON file
+        # @description: Reads a JSON file that maps diarization IDs to display names
+        # @inputs: args.speakers (file path)
+        # @outputs: speakers dict or None
+        # @sideEffects: File I/O, error handling for missing/invalid files
+        # @errors: FileNotFoundError, json.JSONDecodeError
+        # @see: CLI:RUN, EXPORT:MARKDOWN, EXPORT:JSON
+        speakers = None
+        if args.speakers:
+            speakers_path = Path(args.speakers)
+            if not speakers_path.exists():
+                print(f"Error: Speakers file not found: {speakers_path}", file=sys.stderr)
+                return 1
+            with open(speakers_path, "r", encoding="utf-8") as f:
+                speakers = json.load(f)
+            # Validate speakers structure
+            if not isinstance(speakers, dict):
+                print(f"Error: Speakers file must contain a JSON object (dictionary)", file=sys.stderr)
+                return 1
+            if not all(isinstance(k, str) and isinstance(v, str) for k, v in speakers.items()):
+                print(f"Error: Speakers mapping must have string keys and string values", file=sys.stderr)
+                return 1
+            print(f"[CLI] Loaded speaker mapping: {speakers}")
+        # [SEMANTIC-END] CONFIG:SPEAKERS_MAP
+
         try:
             # Wire pipeline: convert -> transcribe -> diarize -> merge -> export
             result = run_pipeline(
@@ -109,6 +143,7 @@ def main() -> int:
                 device=args.device,
                 force=args.force,
                 force_stage=args.force_stage,
+                speakers=speakers,
             )
             print(f"\nPipeline completed successfully!")
             print(f"Job ID: {result['job_id']}")

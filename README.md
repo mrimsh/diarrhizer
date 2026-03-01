@@ -10,9 +10,10 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 | Component | Status |
 |-----------|--------|
 | `doctor` command | ✅ Implemented |
-| `run` command | ⚠️ Stub (pipeline not yet wired) |
-| Pipeline stages | ⏳ Planned |
-| Adapters (FFmpeg/WhisperX/diarization) | ⏳ Planned |
+| `run` command | ✅ Implemented |
+| Pipeline stages | ✅ Implemented |
+| Adapters (FFmpeg/WhisperX/diarization) | ✅ Implemented |
+| Speaker name mapping | ✅ Implemented |
 
 ---
 
@@ -29,8 +30,23 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 ### Important About Speakers
 
 Diarization returns **speaker identifiers** (`Speaker_00...`), not real names.
-Real names are expected to be provided via **manual mapping** (a mapping file).
-Voice enrollment or automatic speaker identification may be added later.
+You can provide real names using the `--speakers` option (see below).
+
+### Speaker Name Mapping
+
+You can map diarization IDs to real names using a JSON file:
+
+```json
+{
+    "Speaker_00": "Ivan",
+    "Speaker_01": "Maria",
+    "Speaker_02": "John"
+}
+```
+
+Then run with `--speakers <path_to_json>`. The mapping will be applied at export time:
+- `result.md` will show real names instead of Speaker_XX
+- `result.json` will include both `speaker_id` (original) and `speaker_name` (mapped)
 
 ---
 
@@ -115,13 +131,33 @@ The `doctor` command performs 5 diagnostic checks:
 
 ---
 
-### Run Processing (Not Yet Implemented)
+### Run Processing
+
+Basic usage:
 
 ```powershell
 python -m diarrhizer run "D:\records\meeting.mp4" --out ".\out" --min-speakers 2 --max-speakers 6 --lang ru --device cuda
 ```
 
-> **Note:** The `run` command is currently a stub. The pipeline stages are not yet implemented.
+With speaker name mapping:
+
+```powershell
+python -m diarrhizer run "D:\records\meeting.mp4" --out ".\out" --speakers ".\speakers.json"
+```
+
+All options:
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `input` | Path to input media file | (required) |
+| `--out` | Output directory | `./out` |
+| `--min-speakers` | Minimum number of speakers | 1 |
+| `--max-speakers` | Maximum number of speakers | 10 |
+| `--lang` | Language code or `auto` | `auto` |
+| `--device` | Device to use (`cuda` or `cpu`) | `cuda` |
+| `--force` | Force recompute all stages | false |
+| `--force-stage` | Force recompute specific stage | none |
+| `--speakers` | Path to JSON speaker mapping file | none |
 
 ---
 
