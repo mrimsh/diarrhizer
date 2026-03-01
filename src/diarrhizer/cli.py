@@ -9,6 +9,7 @@ from diarrhizer.pipeline.runner import run_pipeline
 from diarrhizer.pipeline.stages.convert import ConvertStage
 from diarrhizer.pipeline.stages.transcribe import TranscribeStage
 from diarrhizer.pipeline.stages.diarize import DiarizeStage
+from diarrhizer.pipeline.stages.merge import MergeStage
 
 
 # [SEMANTIC-BEGIN] CLI:ENTRY
@@ -83,13 +84,13 @@ def main() -> int:
         # @outputs: Artifacts in out/ directory
         # @sideEffects: Creates job directory, writes artifacts to disk
         # @errors: Exits with code 1 on failure
-        # @see: PIPELINE:RUNNER, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE
+        # @see: PIPELINE:RUNNER, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, STAGE:MERGE
         try:
-            # Wire pipeline: convert -> transcribe -> diarize
+            # Wire pipeline: convert -> transcribe -> diarize -> merge
             result = run_pipeline(
                 input_path=args.input,
                 out_dir=args.out,
-                stages=[ConvertStage(), TranscribeStage(), DiarizeStage()],
+                stages=[ConvertStage(), TranscribeStage(), DiarizeStage(), MergeStage()],
                 min_speakers=args.min_speakers,
                 max_speakers=args.max_speakers,
                 language=args.lang,

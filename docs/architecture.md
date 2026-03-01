@@ -20,7 +20,7 @@ This document is intentionally concise. It defines the "skeleton" so the project
 | WhisperX adapter | ✅ Implemented | [`src/diarrhizer/adapters/whisperx.py`](src/diarrhizer/adapters/whisperx.py) |
 | FFmpeg adapter | ✅ Implemented | [`src/diarrhizer/adapters/ffmpeg.py`](src/diarrhizer/adapters/ffmpeg.py) |
 | Diarize stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/diarize.py`](src/diarrhizer/pipeline/stages/diarize.py) |
-| Merge stage | ⏳ Planned | [`src/diarrhizer/pipeline/stages/`](src/diarrhizer/pipeline/stages/) |
+| Merge stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/merge.py`](src/diarrhizer/pipeline/stages/merge.py) |
 | Export modules | ⏳ Planned | [`src/diarrhizer/export/`](src/diarrhizer/export/) |
 
 ---
@@ -152,6 +152,33 @@ Real names are applied through a separate mapping layer.
 
 The "stitched" result: text + timestamps + speaker at segment (and/or word) level.
 
+```json
+{
+  "stage": "merge",
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 5.0,
+      "speaker_id": "Speaker_00",
+      "text": "Hello world",
+      "words": [
+        {"start": 0.0, "end": 0.5, "word": "Hello", "speaker_id": "Speaker_00"},
+        {"start": 0.5, "end": 1.0, "word": "world", "speaker_id": "Speaker_00"}
+      ]
+    }
+  ],
+  "num_segments": 1,
+  "metadata": {...}
+}
+```
+
+**Algorithm:** For each transcript segment, the speaker with maximum time overlap is chosen. Word-level speakers are assigned similarly if word timestamps are available.
+
+**Edge cases:**
+- No diarization data: defaults to "Speaker_00"
+- Gaps in diarization: uses closest segment by time
+- Overlapping speakers: chooses speaker with most overlap
+
 **Important:** Speaker names are identifiers only.  
 Name mapping is a separate layer on top.
 
@@ -229,7 +256,7 @@ python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 
 | `--lang` | string | `"auto"` | Language code or `"auto"` for detection |
 | `--device` | choice | `"cuda"` | Device: `cuda` or `cpu` |
 
-> **Note:** Pipeline runs: convert → transcribe → diarize.
+> **Note:** Pipeline runs: convert → transcribe → diarize → merge.
 
 ---
 
@@ -281,7 +308,8 @@ src/diarrhizer/
 │   └── stages/             # Individual processing stages
 │       ├── convert.py      # FFmpeg normalization
 │       ├── transcribe.py   # WhisperX ASR + alignment
-│       └── diarize.py      # Speaker diarization (pyannote)
+│       ├── diarize.py      # Speaker diarization (pyannote)
+│       └── merge.py        # Merge ASR with speaker labels
 ├── adapters/               # External library wrappers
 │   ├── ffmpeg.py
 │   └── whisperx.py
