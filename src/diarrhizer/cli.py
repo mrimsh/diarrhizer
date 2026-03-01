@@ -2,8 +2,11 @@
 
 import argparse
 import sys
+from pathlib import Path
 
 from diarrhizer.diagnostics.doctor import run_doctor_checks
+from diarrhizer.pipeline.runner import run_pipeline
+from diarrhizer.pipeline.stages.convert import ConvertStage
 
 
 # [SEMANTIC-BEGIN] CLI:ENTRY
@@ -71,10 +74,35 @@ def main() -> int:
         run_doctor_checks()
         return 0
     elif args.command == "run":
-        print("Processing not implemented yet")
-        print(f"Input: {args.input}")
-        print(f"Output: {args.out}")
-        return 0
+        # [SEMANTIC-BEGIN] CLI:RUN
+        # @purpose: Run the processing pipeline for a media file
+        # @description: Orchestrates FFmpeg conversion, ASR, diarization, and export
+        # @inputs: args.input, args.out, args.min_speakers, args.max_speakers, args.lang, args.device
+        # @outputs: Artifacts in out/ directory
+        # @sideEffects: Creates job directory, writes artifacts to disk
+        # @errors: Exits with code 1 on failure
+        # @see: PIPELINE:RUNNER, STAGE:CONVERT
+        try:
+            result = run_pipeline(
+                input_path=args.input,
+                out_dir=args.out,
+                stages=[ConvertStage()],
+                min_speakers=args.min_speakers,
+                max_speakers=args.max_speakers,
+                language=args.lang,
+                device=args.device,
+            )
+            print(f"\nPipeline completed successfully!")
+            print(f"Job ID: {result['job_id']}")
+            print(f"Output: {result['job_dir']}")
+            return 0
+        except FileNotFoundError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        # [SEMANTIC-END] CLI:RUN
     else:
         parser.print_help()
         return 1
