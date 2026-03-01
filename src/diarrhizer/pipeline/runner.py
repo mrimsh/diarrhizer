@@ -14,7 +14,7 @@ from typing import Any, Protocol, Sequence
 # @outputs: Artifacts on disk per stage definitions
 # @sideEffects: Creates job directory, writes artifacts to disk
 # @errors: RuntimeError, FileNotFoundError
-# @see: STAGE:CONVERT, ARTIFACTS:LAYOUT
+# @see: STAGE:CONVERT, STAGE:TRANSCRIBE, ARTIFACTS:LAYOUT
 class StageProtocol(Protocol):
     """Protocol for pipeline stages."""
 

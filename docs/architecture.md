@@ -13,10 +13,14 @@ This document is intentionally concise. It defines the "skeleton" so the project
 |-----------|--------|----------|
 | CLI entry point | ✅ Implemented | [`src/diarrhizer/cli.py`](src/diarrhizer/cli.py) |
 | `doctor` command | ✅ Implemented | [`src/diarrhizer/diagnostics/doctor.py`](src/diarrhizer/diagnostics/doctor.py) |
-| `run` command | ⚠️ Stub | [`src/diarrhizer/cli.py`](src/diarrhizer/cli.py) (lines 73-77) |
-| Pipeline runner | ⏳ Planned | [`src/diarrhizer/pipeline/runner.py`](src/diarrhizer/pipeline/runner.py) |
-| Pipeline stages | ⏳ Planned | [`src/diarrhizer/pipeline/stages/`](src/diarrhizer/pipeline/stages/) |
-| Adapters | ⏳ Planned | [`src/diarrhizer/adapters/`](src/diarrhizer/adapters/) |
+| `run` command | ✅ Implemented | [`src/diarrhizer/cli.py`](src/diarrhizer/cli.py) (lines 77-107) |
+| Pipeline runner | ✅ Implemented | [`src/diarrhizer/pipeline/runner.py`](src/diarrhizer/pipeline/runner.py) |
+| Convert stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/convert.py`](src/diarrhizer/pipeline/stages/convert.py) |
+| Transcribe stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/transcribe.py`](src/diarrhizer/pipeline/stages/transcribe.py) |
+| WhisperX adapter | ✅ Implemented | [`src/diarrhizer/adapters/whisperx.py`](src/diarrhizer/adapters/whisperx.py) |
+| FFmpeg adapter | ✅ Implemented | [`src/diarrhizer/adapters/ffmpeg.py`](src/diarrhizer/adapters/ffmpeg.py) |
+| Diarize stage | ⏳ Planned | [`src/diarrhizer/pipeline/stages/`](src/diarrhizer/pipeline/stages/) |
+| Merge stage | ⏳ Planned | [`src/diarrhizer/pipeline/stages/`](src/diarrhizer/pipeline/stages/) |
 | Export modules | ⏳ Planned | [`src/diarrhizer/export/`](src/diarrhizer/export/) |
 
 ---
@@ -191,7 +195,7 @@ python -m diarrhizer doctor
 
 Runs environment diagnostics. See [Section 5](#5-environment-diagnostics-doctor) for details.
 
-### `run` (Stub)
+### `run`
 
 ```powershell
 python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 6 --lang ru --device cuda
@@ -208,7 +212,7 @@ python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 
 | `--lang` | string | `"auto"` | Language code or `"auto"` for detection |
 | `--device` | choice | `"cuda"` | Device: `cuda` or `cpu` |
 
-> **Note:** Currently a stub. Pipeline stages are not yet implemented.
+> **Note:** Pipeline runs: convert → transcribe (WhisperX ASR + alignment).
 
 ---
 
@@ -259,15 +263,11 @@ src/diarrhizer/
 │   ├── runner.py           # Pipeline orchestration
 │   └── stages/             # Individual processing stages
 │       ├── convert.py      # FFmpeg normalization
-│       ├── transcribe.py   # WhisperX ASR + alignment
-│       ├── diarize.py      # pyannote diarization
-│       ├── merge.py        # Speaker + words merge
-│       └── export.py       # MD/TXT/JSON export
+│       └── transcribe.py  # WhisperX ASR + alignment
 ├── adapters/               # External library wrappers
 │   ├── ffmpeg.py
-│   ├── whisperx.py
-│   └── diarization.py
-└── export/                 # Export formatters
+│   └── whisperx.py
+└── export/                 # Export formatters (planned)
     ├── markdown.py
     ├── text.py
     └── json.py

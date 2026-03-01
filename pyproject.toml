@@ -13,10 +13,11 @@ authors = [
     {name = "Diarrhizer Team"}
 ]
 dependencies = [
-    # Core dependencies - to be added later
-    # "torch",
-    # "torchaudio",
-    # "whisperx",
+    # PyTorch (install CUDA version separately for GPU support)
+    "torch>=2.0.0",
+    "torchaudio>=2.0.0",
+    # WhisperX for ASR and alignment
+    "whisperx>=3.0",
 ]
 
 [project.optional-dependencies]
