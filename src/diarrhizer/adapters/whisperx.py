@@ -1,11 +1,11 @@
-"""WhisperX adapter for ASR and word-level alignment."""
+"""WhisperX adapter for ASR, alignment, and diarization."""
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Optional
 
 import torch
-
 
 # [SEMANTIC-BEGIN] ADAPTER:WHISPERX_ASR
 # @purpose: Wrap WhisperX for ASR transcription and word-level alignment
@@ -207,3 +207,253 @@ def transcribe_audio(
     """
     adapter = WhisperXAdapter(model=model, device=device, language=language)
     return adapter.transcribe(audio_path, language=language)
+
+
+# [SEMANTIC-BEGIN] ADAPTER:WHISPERX_DIARIZE
+# @purpose: Wrap WhisperX for speaker diarization using pyannote
+# @description: Provides diarization capability via WhisperX's integration with pyannote
+# @inputs: audio_path, min_speakers, max_speakers, device
+# @outputs: Diarization result with speaker segments and timestamps
+# @sideEffects: Loads pyannote model, accesses HF_TOKEN for gated models
+# @errors: RuntimeError if HF_TOKEN missing, model fails, audio decoding fails
+# @see: STAGE:DIARIZE
+class WhisperXDiarizeAdapter:
+    """Adapter for WhisperX diarization operations."""
+
+    def __init__(
+        self,
+        device: str = "cuda",
+        min_speakers: int = 1,
+        max_speakers: int = 10,
+    ) -> None:
+        """Initialize the WhisperX diarization adapter.
+
+        Args:
+            device: Device to use ("cuda" or "cpu")
+            min_speakers: Minimum number of expected speakers (currently unused)
+            max_speakers: Maximum number of expected speakers (currently unused)
+
+        Raises:
+            RuntimeError: If HF_TOKEN is not set or CUDA requested but unavailable
+        """
+        # TODO: Implement min_speakers/max_speakers filtering in diarize()
+        # Currently WhisperX/pyannote determines speaker count automatically.
+        # These parameters could be used to post-filter results or constrain the model.
+        self._device = self._validate_device(device)
+        self._min_speakers = min_speakers
+        self._max_speakers = max_speakers
+        self._hf_token: str | None = None
+        self._diarize_model: Any = None
+
+    def _validate_device(self, device: str) -> str:
+        """Validate and return the device to use."""
+        if device == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA requested but not available. "
+                "Please install PyTorch with CUDA support or use --device cpu"
+            )
+        return device
+
+    def _check_hf_token(self) -> str:
+        """Check and return HuggingFace token.
+
+        Returns:
+            HF token string
+
+        Raises:
+            RuntimeError: If token is not set
+        """
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+        if not token:
+            raise RuntimeError(
+                "HuggingFace token is required for diarization.\n"
+                "Please set HF_TOKEN or HUGGINGFACE_HUB_TOKEN environment variable.\n"
+                "You can get a token from: https://huggingface.co/settings/tokens"
+            )
+        return token
+
+    def _load_diarization_model(self) -> None:
+        """Load WhisperX diarization model."""
+        if self._diarize_model is not None:
+            return
+
+        try:
+            import whisperx
+        except ImportError as e:
+            raise RuntimeError(
+                "WhisperX not installed. Please install it with:\n"
+                "pip install whisperx\n"
+                f"Import error: {e}"
+            ) from e
+
+        # Check HF token first
+        self._hf_token = self._check_hf_token()
+
+        try:
+            # Load diarization model (pyannote via WhisperX)
+            self._diarize_model = whisperx.load_model(
+                "pyannote",
+                device=self._device,
+                huggingface_token=self._hf_token,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load diarization model: {e}"
+            ) from e
+
+    def _load_audio_fallback(self, audio_path: str | Path) -> Any:
+        """Fallback audio loading using torchaudio.
+
+        This is used when the default WhisperX audio loading fails
+        (e.g., due to torchcodec/FFmpeg compatibility issues on Windows).
+
+        Args:
+            audio_path: Path to audio file
+
+        Returns:
+            Audio array compatible with diarization
+        """
+        import torchaudio
+
+        logging.warning(
+            "Using fallback audio loading via torchaudio. "
+            "If this succeeds, diarization will continue with preloaded waveform."
+        )
+
+        # Load audio using torchaudio
+        waveform, sample_rate = torchaudio.load(str(audio_path))
+
+        # Convert to mono if stereo
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+        # Resample to 16kHz if needed (diarization expects 16kHz)
+        if sample_rate != 16000:
+            waveform = torchaudio.functional.resample(waveform, sample_rate, 16000)
+
+        # Return as numpy array (WhisperX expects this format)
+        return waveform.squeeze().numpy()
+
+    def diarize(
+        self,
+        audio_path: str | Path,
+        use_fallback: bool = False,
+    ) -> dict:
+        """Perform speaker diarization on audio file.
+
+        Args:
+            audio_path: Path to audio file (WAV mono 16kHz preferred)
+            use_fallback: If True, use torchaudio fallback for loading audio
+
+        Returns:
+            Dictionary containing:
+            - segments: List of segments with start/end times and speaker labels
+            - num_speakers: Detected/estimated number of speakers
+
+        Raises:
+            FileNotFoundError: If audio file doesn't exist
+            RuntimeError: If diarization fails
+        """
+        audio_path = Path(audio_path)
+
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        # Load model if not already loaded
+        self._load_diarization_model()
+
+        try:
+            import whisperx
+
+            # Try default loading first
+            if use_fallback:
+                logging.info("Attempting diarization with fallback audio loading...")
+                audio = self._load_audio_fallback(audio_path)
+            else:
+                # Default WhisperX audio loading
+                audio = whisperx.load_audio(str(audio_path))
+
+            # Run diarization
+            result = self._diarize_model(audio)
+
+            # Convert to our format
+            segments = []
+            for segment in result.itertracks(yield_label=True):
+                # segment is (start, end, speaker)
+                segments.append({
+                    "start": float(segment[0].start),
+                    "end": float(segment[0].end),
+                    "speaker": str(segment[2]),
+                })
+
+            # Get unique speakers
+            speakers = set(s["speaker"] for s in segments)
+            num_speakers = len(speakers)
+
+            return {
+                "segments": segments,
+                "num_speakers": num_speakers,
+                "speakers": sorted(list(speakers)),
+            }
+
+        except RuntimeError:
+            # Re-raise RuntimeErrors (like missing token)
+            raise
+        except Exception as e:
+            error_msg = str(e).lower()
+
+            # Check if it's an audio decoding issue
+            if (
+                not use_fallback
+                and (
+                    "decoder" in error_msg
+                    or "audio" in error_msg
+                    or "ffmpeg" in error_msg
+                    or "codec" in error_msg
+                    or "load_audio" in error_msg
+                )
+            ):
+                logging.warning(
+                    f"Diarization failed with default audio loading: {e}\n"
+                    "Attempting fallback approach with torchaudio..."
+                )
+                # Try fallback
+                return self.diarize(audio_path, use_fallback=True)
+
+            raise RuntimeError(
+                f"Diarization failed: {e}"
+            ) from e
+
+    @property
+    def device(self) -> str:
+        """Get the device being used."""
+        return self._device
+
+
+# [SEMANTIC-END] ADAPTER:WHISPERX_DIARIZE
+
+
+# Module-level convenience function
+def diarize_audio(
+    audio_path: str | Path,
+    min_speakers: int = 1,
+    max_speakers: int = 10,
+    device: str = "cuda",
+) -> dict:
+    """Convenience function to diarize audio using WhisperX.
+
+    Args:
+        audio_path: Path to audio file
+        min_speakers: Minimum number of expected speakers
+        max_speakers: Maximum number of expected speakers
+        device: Device to use ("cuda" or "cpu")
+
+    Returns:
+        Diarization dictionary with segments and speaker info
+    """
+    adapter = WhisperXDiarizeAdapter(
+        device=device,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+    )
+    return adapter.diarize(audio_path)

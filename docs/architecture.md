@@ -19,7 +19,7 @@ This document is intentionally concise. It defines the "skeleton" so the project
 | Transcribe stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/transcribe.py`](src/diarrhizer/pipeline/stages/transcribe.py) |
 | WhisperX adapter | ✅ Implemented | [`src/diarrhizer/adapters/whisperx.py`](src/diarrhizer/adapters/whisperx.py) |
 | FFmpeg adapter | ✅ Implemented | [`src/diarrhizer/adapters/ffmpeg.py`](src/diarrhizer/adapters/ffmpeg.py) |
-| Diarize stage | ⏳ Planned | [`src/diarrhizer/pipeline/stages/`](src/diarrhizer/pipeline/stages/) |
+| Diarize stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/diarize.py`](src/diarrhizer/pipeline/stages/diarize.py) |
 | Merge stage | ⏳ Planned | [`src/diarrhizer/pipeline/stages/`](src/diarrhizer/pipeline/stages/) |
 | Export modules | ⏳ Planned | [`src/diarrhizer/export/`](src/diarrhizer/export/) |
 
@@ -183,6 +183,23 @@ Run with:
 python -m diarrhizer doctor
 ```
 
+### Troubleshooting
+
+#### Diarization Issues
+
+If diarization fails with audio decoding errors (torchcodec/FFmpeg compatibility issues on Windows), the adapter will automatically attempt a **fallback approach**:
+
+1. First, it tries the default WhisperX audio loading
+2. If that fails with a decoder/audio/FFmpeg/codec error, it falls back to using `torchaudio` to load the audio file directly
+3. The fallback loads the waveform into memory, converts to mono if needed, resamples to 16kHz, and passes the preloaded waveform to the diarization model
+
+This fallback is logged with a warning message. If diarization still fails after the fallback attempt, an error is raised with details about the failure.
+
+To avoid this issue, ensure:
+- FFmpeg is properly installed and in PATH
+- torch and torchaudio versions are compatible
+- Consider using `--device cpu` if GPU drivers are causing issues
+
 ---
 
 ## 6. CLI Commands
@@ -212,7 +229,7 @@ python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 
 | `--lang` | string | `"auto"` | Language code or `"auto"` for detection |
 | `--device` | choice | `"cuda"` | Device: `cuda` or `cpu` |
 
-> **Note:** Pipeline runs: convert → transcribe (WhisperX ASR + alignment).
+> **Note:** Pipeline runs: convert → transcribe → diarize.
 
 ---
 
@@ -263,7 +280,8 @@ src/diarrhizer/
 │   ├── runner.py           # Pipeline orchestration
 │   └── stages/             # Individual processing stages
 │       ├── convert.py      # FFmpeg normalization
-│       └── transcribe.py  # WhisperX ASR + alignment
+│       ├── transcribe.py   # WhisperX ASR + alignment
+│       └── diarize.py      # Speaker diarization (pyannote)
 ├── adapters/               # External library wrappers
 │   ├── ffmpeg.py
 │   └── whisperx.py
