@@ -1,18 +1,22 @@
 """Pipeline runner for orchestrating stage execution."""
 
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
+# Configure logging
+logger = logging.getLogger(__name__)
+
 
 # [SEMANTIC-BEGIN] PIPELINE:RUNNER
 # @purpose: Orchestrate pipeline stages execution with caching and artifact management
-# @description: Runs a sequence of stages, manages job directory, handles idempotency
-# @inputs: input_path, config, out_dir, stages
+# @description: Runs a sequence of stages, manages job directory, handles idempotency. Supports force options to override caching.
+# @inputs: input_path, config, out_dir, stages, force, force_stage
 # @outputs: Artifacts on disk per stage definitions
-# @sideEffects: Creates job directory, writes artifacts to disk
+# @sideEffects: Creates job directory, writes artifacts to disk, deletes artifacts when force is used
 # @errors: RuntimeError, FileNotFoundError
 # @see: STAGE:CONVERT, STAGE:TRANSCRIBE, ARTIFACTS:LAYOUT
 class StageProtocol(Protocol):
@@ -26,6 +30,10 @@ class StageProtocol(Protocol):
 
     def is_cache_valid(self, job_dir: Path) -> bool:
         """Check if stage output is cached."""
+        ...
+
+    def get_artifact_paths(self, job_dir: Path) -> dict:
+        """Get the expected artifact paths for this stage."""
         ...
 
 
@@ -76,6 +84,8 @@ def run_pipeline(
     max_speakers: int = 10,
     language: str = "auto",
     device: str = "cuda",
+    force: bool = False,
+    force_stage: str | None = None,
 ) -> dict:
     """Run the processing pipeline for a media file.
 
@@ -87,6 +97,8 @@ def run_pipeline(
         max_speakers: Maximum number of speakers
         language: Language code or "auto"
         device: Device to use ("cuda" or "cpu")
+        force: If True, recompute all stages regardless of cache
+        force_stage: If set, only force a specific stage to recompute
 
     Returns:
         Dictionary with pipeline execution results
@@ -126,6 +138,8 @@ def run_pipeline(
         "device": device,
         "job_id": job_id,
         "input_file": str(input_path),
+        "force": force,
+        "force_stage": force_stage,
     }
 
     # Create job context
@@ -144,6 +158,10 @@ def run_pipeline(
     print(f"Language: {language}")
     print(f"Device: {device}")
     print(f"Speakers: {min_speakers}-{max_speakers}")
+    if force:
+        print(f"FORCE: Recomputing all stages")
+    elif force_stage:
+        print(f"FORCE: Recomputing stage '{force_stage}' only")
     print(f"=" * 50)
 
     # Run stages sequentially
@@ -154,14 +172,44 @@ def run_pipeline(
         stage_name = getattr(stage, "NAME", "unknown")
         print(f"\n--- Stage: {stage_name} ---")
 
-        # Check cache before running
-        if stage.is_cache_valid(job_dir):
-            print(f"[{stage_name}] Using cached output")
+        # Determine if this stage should be forced
+        should_force = force or (force_stage == stage_name)
+
+        # Check cache before running (skip if not forced and cache is valid)
+        if not should_force and stage.is_cache_valid(job_dir):
+            # Get the artifact paths for the log message
+            artifacts = stage.get_artifact_paths(job_dir)
+            # Find the first existing artifact for the log
+            artifact_path = None
+            if isinstance(artifacts, dict):
+                for path in artifacts.values():
+                    if isinstance(path, Path) and path.exists():
+                        artifact_path = path
+                        break
+            if artifact_path:
+                print(f"Stage {stage_name}: using cached output from {artifact_path}")
+            else:
+                print(f"Stage {stage_name}: using cached output")
             results.append({
                 "stage": stage_name,
                 "status": "cached",
             })
             continue
+
+        # If forcing, delete existing outputs first to avoid partial state
+        if should_force:
+            print(f"Stage {stage_name}: forcing recompute (--force flag)")
+            artifacts = stage.get_artifact_paths(job_dir)
+            if isinstance(artifacts, dict):
+                for path in artifacts.values():
+                    if isinstance(path, Path) and path.exists():
+                        try:
+                            path.unlink()
+                            logger.debug(f"Deleted {path}")
+                        except OSError as e:
+                            logger.warning(f"Could not delete {path}: {e}")
+        else:
+            print(f"Stage {stage_name}: running...")
 
         # Run the stage
         try:

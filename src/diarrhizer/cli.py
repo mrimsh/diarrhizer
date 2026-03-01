@@ -71,6 +71,17 @@ def main() -> int:
         choices=["cuda", "cpu"],
         help="Device to use (default: cuda)"
     )
+    run_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force recompute all stages, overwriting existing outputs"
+    )
+    run_parser.add_argument(
+        "--force-stage",
+        type=str,
+        choices=["convert", "transcribe", "diarize", "merge", "export"],
+        help="Force recompute a specific stage (convert, transcribe, diarize, merge, export)"
+    )
     
     args = parser.parse_args()
     
@@ -81,7 +92,7 @@ def main() -> int:
         # [SEMANTIC-BEGIN] CLI:RUN
         # @purpose: Run the processing pipeline for a media file
         # @description: Orchestrates FFmpeg conversion, ASR, diarization, and export
-        # @inputs: args.input, args.out, args.min_speakers, args.max_speakers, args.lang, args.device
+        # @inputs: args.input, args.out, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage
         # @outputs: Artifacts in out/ directory
         # @sideEffects: Creates job directory, writes artifacts to disk
         # @errors: Exits with code 1 on failure
@@ -96,6 +107,8 @@ def main() -> int:
                 max_speakers=args.max_speakers,
                 language=args.lang,
                 device=args.device,
+                force=args.force,
+                force_stage=args.force_stage,
             )
             print(f"\nPipeline completed successfully!")
             print(f"Job ID: {result['job_id']}")
