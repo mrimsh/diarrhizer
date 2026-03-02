@@ -85,16 +85,14 @@ Using `.venv` is the recommended way to isolate dependencies.
 **CPU option (simpler):**
 
 ```powershell
-pip install -r requirements/base.txt
-pip install -r requirements/cpu.txt
+pip install -r requirements/lock-win-cpu.txt
 pip install -e .
 ```
 
 **CUDA option (example, depends on your setup):**
 
 ```powershell
-pip install -r requirements/base.txt
-pip install -r requirements/cuda-cu128.txt
+pip install -r requirements/lock-win-cuda-cu128.txt
 pip install -e .
 ```
 
