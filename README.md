@@ -55,6 +55,7 @@ Then run with `--speakers <path_to_json>`. The mapping will be applied at export
 * Windows 10/11
 * Python 3.11+ (recommended for stable Torch stack on Windows)
 * FFmpeg available in `PATH` (also important for decoding via torchcodec/pyannote on Windows)
+* torchcodec (included in CUDA lock files; for fast audio decoding via pyannote)
 * For diarization: Hugging Face token + acceptance of gated model terms
 * (Optional) NVIDIA GPU + CUDA-compatible Torch wheels
 

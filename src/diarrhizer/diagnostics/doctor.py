@@ -128,8 +128,10 @@ def check_torchcodec() -> Tuple[str, bool, str]:
     try:
         import torchcodec
         return ("torchcodec", True, "Available (fast decoding)")
-    except ImportError:
-        msg = "Not installed. Will fallback to waveform preload (slower)."
+    except (ImportError, RuntimeError) as e:
+        # RuntimeError occurs when torchcodec is installed but fails to load
+        # its internal libraries (e.g., due to PyTorch version incompatibility)
+        msg = "Not installed or incompatible. Will fallback to waveform preload (slower)."
         return ("torchcodec", False, msg)
 
 
