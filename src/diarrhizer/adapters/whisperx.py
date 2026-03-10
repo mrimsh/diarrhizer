@@ -290,12 +290,21 @@ class WhisperXDiarizeAdapter:
         self._hf_token = self._check_hf_token()
 
         try:
-            # Load diarization model (pyannote via WhisperX)
-            self._diarize_model = whisperx.load_model(
-                "pyannote",
-                device=self._device,
-                huggingface_token=self._hf_token,
+            # Load diarization model using pyannote.audio directly
+            # Note: whisperx 3.7+ changed the API - we use pyannote.audio.Pipeline directly
+            from pyannote.audio import Pipeline
+            import os
+            os.environ["HF_TOKEN"] = self._hf_token
+            
+            # Load the pyannote diarization pipeline
+            # Using version 3.1 which is stable
+            self._diarize_model = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1"
             )
+            
+            # Move to device if CUDA
+            if self._device == "cuda":
+                self._diarize_model.to(torch.device("cuda"))
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load diarization model: {e}"
@@ -363,18 +372,9 @@ class WhisperXDiarizeAdapter:
         self._load_diarization_model()
 
         try:
-            import whisperx
-
-            # Try default loading first
-            if use_fallback:
-                logging.info("Attempting diarization with fallback audio loading...")
-                audio = self._load_audio_fallback(audio_path)
-            else:
-                # Default WhisperX audio loading
-                audio = whisperx.load_audio(str(audio_path))
-
-            # Run diarization
-            result = self._diarize_model(audio)
+            # Run diarization using the pyannote pipeline
+            # The pipeline expects a path or AudioFile object
+            result = self._diarize_model(str(audio_path))
 
             # Convert to our format
             segments = []
