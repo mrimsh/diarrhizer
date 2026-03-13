@@ -4,6 +4,57 @@ import sys
 import warnings
 warnings.filterwarnings("ignore")
 
+# CRITICAL: Patch torchaudio BEFORE any other imports
+def _apply_early_patches():
+    """Apply all compatibility patches at the earliest possible point."""
+    import os
+    
+    # Force pyannote.audio to use soundfile backend instead of torchcodec
+    # This MUST be set before pyannote.audio is imported
+    os.environ["PYANNOTE_AUDIO_BACKEND"] = "soundfile"
+    os.environ["TORCHAUDIO_BACKEND"] = "soundfile"
+    
+    # Patch torchaudio for backward compatibility
+    try:
+        import torchaudio
+        if not hasattr(torchaudio, 'list_audio_backends'):
+            def list_audio_backends():
+                return ['soundfile', 'ffmpeg']
+            torchaudio.list_audio_backends = list_audio_backends
+        if not hasattr(torchaudio, 'AudioMetaData'):
+            class AudioMetaData:
+                def __init__(self, num_frames, num_channels, sample_rate, duration):
+                    self.num_frames = num_frames
+                    self.num_channels = num_channels
+                    self.sample_rate = sample_rate
+                    self.duration = duration
+                def __repr__(self):
+                    return f"AudioMetaData(num_frames={self.num_frames}, num_channels={self.num_channels}, sample_rate={self.sample_rate}, duration={self.duration})"
+            class AudioMetaDataWithInfo(AudioMetaData):
+                @property
+                def info(self):
+                    return self
+            torchaudio.AudioMetaData = AudioMetaDataWithInfo
+    except ImportError:
+        pass
+    
+    # Patch huggingface_hub for deprecated use_auth_token parameter
+    try:
+        import huggingface_hub
+        if not hasattr(huggingface_hub, '_diarrhizer_patched'):
+            _orig_download = huggingface_hub.hf_hub_download
+            def _patched_download(*args, **kwargs):
+                if 'use_auth_token' in kwargs:
+                    kwargs['token'] = kwargs.pop('use_auth_token')
+                return _orig_download(*args, **kwargs)
+            huggingface_hub.hf_hub_download = _patched_download
+            huggingface_hub._diarrhizer_patched = True
+    except ImportError:
+        pass
+
+# Apply patches immediately
+_apply_early_patches()
+
 # Workaround for torchaudio 2.10.0+ incompatibility with pyannote.audio
 # torchaudio 2.10.0 removed/changed several attributes that pyannote.audio still expects
 # This shim provides backward compatibility
