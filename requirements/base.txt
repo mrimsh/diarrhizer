@@ -1,0 +1,19 @@
+# Diarrhizer base requirements
+# Install with stable constraints:
+#   pip install -c requirements/constraints-stable.txt -r requirements/base.txt
+
+# Core dependencies
+torch>=2.0.0
+torchaudio>=2.0.0
+whisperx>=3.0.0
+
+# Optional: for faster audio decoding (recommended for production)
+torchcodec>=0.10.0
+
+# For diarization (requires HF token)
+pyannote.audio>=3.0.0
+
+# Standard dependencies
+numpy>=1.24.0
+huggingface-hub>=0.19.0
+transformers>=4.30.0

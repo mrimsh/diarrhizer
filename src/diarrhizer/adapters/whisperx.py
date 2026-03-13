@@ -89,9 +89,30 @@ class WhisperXAdapter:
             )
             self._model_loaded = True
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to load WhisperX model '{self._model}': {e}"
-            ) from e
+            error_msg = str(e)
+            # Check for specific known errors and provide helpful messages
+            if "LazyModule" in error_msg or "speechbrain" in error_msg:
+                raise RuntimeError(
+                    f"Failed to load WhisperX model '{self._model}': {e}\n\n"
+                    "This error typically indicates a dependency compatibility issue.\n"
+                    "Common causes:\n"
+                    "  - Incompatible versions of speechbrain, huggingface-hub, or torch\n"
+                    "  - Using torch 2.10+ with WhisperX models trained on older torch\n"
+                    "  - numpy 2.x incompatibility with speechbrain\n"
+                    "Try:\n"
+                    "  1. Run: python -m diarrhizer doctor\n"
+                    "  2. Rebuild environment with: pip install -c requirements/constraints-stable.txt -r requirements/base.txt"
+                ) from e
+            elif "float16" in error_msg.lower():
+                raise RuntimeError(
+                    f"Failed to load WhisperX model '{self._model}': {e}\n\n"
+                    "This error indicates the compute type is incompatible with your device.\n"
+                    "For CPU, use --device cpu or ensure int8 compute type is available."
+                ) from e
+            else:
+                raise RuntimeError(
+                    f"Failed to load WhisperX model '{self._model}': {e}"
+                ) from e
 
     def transcribe(
         self,
@@ -146,8 +167,10 @@ class WhisperXAdapter:
             if detected_language and detected_language != "unknown":
                 try:
                     # Load alignment model
+                    # Note: whisperx 3.7+ API changed - language_code is positional, device is required
                     align_model, metadata = self._whisperx.load_align_model(
-                        language=detected_language
+                        detected_language,
+                        self._device
                     )
                     # Align words
                     alignment_result = self._whisperx.align(

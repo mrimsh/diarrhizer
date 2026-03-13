@@ -1,0 +1,38 @@
+# Diarrhizer stable constraints for Windows CUDA/CPU environments
+# These constraints fix known compatibility issues in the WhisperX/pyannote/speechbrain stack
+#
+# Usage:
+#   pip install -c requirements/constraints-stable.txt -r requirements/base.txt
+#
+# Key constraints:
+# - huggingface-hub<1.0: Avoids breaking changes in model loading
+# - numpy<2.0: Many ML packages still adapting to NumPy 2.0
+# - transformers<5.0: API changes in 5.x break some integrations
+# - torch>=2.0,<2.5: More stable with WhisperX models
+# - pyannote.audio>=3.0,<3.5: The 3.x series is required for WhisperX
+
+# Core dependency constraints (must be applied first)
+numpy<2.0
+huggingface-hub<1.0
+transformers<5.0
+tokenizers<0.22
+
+# PyTorch - use stable versions compatible with WhisperX
+# Note: torch 2.10+ has warnings with WhisperX models trained on older torch
+torch>=2.0.0,<2.5.0
+torchaudio>=2.0.0,<2.5.0
+
+# WhisperX and related
+whisperx>=3.0.0,<4.0.0
+pyannote.audio>=3.0.0,<3.5.0
+pyannote.core>=5.0.0,<6.0.0
+pyannote.database>=5.1.0,<5.2.0
+pyannote.metrics>=3.2.0,<3.3.0
+pyannote.pipeline>=3.0.0,<3.1.0
+
+# SpeechBrain - pinned for stability with pyannote
+speechbrain>=0.5.0,<1.0.0
+
+# Other dependencies that need pinning
+safetensors<0.5.0
+onnxruntime<1.20.0

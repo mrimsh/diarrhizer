@@ -8,7 +8,7 @@ from typing import List, Tuple
 
 # [SEMANTIC-BEGIN] DIAGNOSTICS:DOCTOR
 # @purpose: Run environment diagnostics to verify Diarrhizer dependencies
-# @description: Checks for Python version, FFmpeg, torch/torchaudio, CUDA, torchcodec, and HF token
+# @description: Checks for Python version, FFmpeg, torch/torchaudio, CUDA, torchcodec, HF token, and critical ML imports
 # @sideEffects: Reads environment variables, imports optional modules
 # @errors: Prints warnings for missing dependencies
 # @see: CLI:ENTRY
@@ -24,6 +24,7 @@ def run_doctor_checks() -> None:
         check_torch,
         check_cuda,
         check_torchcodec,
+        check_critical_imports,
         check_hf_token,
     ]
     
@@ -40,6 +41,15 @@ def run_doctor_checks() -> None:
     passed_count = sum(1 for _, p, _ in results if p)
     total_count = len(results)
     print(f"Results: {passed_count}/{total_count} checks passed")
+    
+    # Print additional help for failures
+    failed_imports = [name for name, passed, _ in results if not passed and name.startswith("Import:")]
+    if failed_imports:
+        print("\n" + "=" * 50)
+        print("RECOMMENDED ACTION:")
+        print("  Rebuild environment with stable constraints:")
+        print("    pip install -c requirements/constraints-stable.txt -r requirements/base.txt")
+        print("  Or reinstall PyTorch with a compatible version.")
     print("=" * 50)
 
 
@@ -133,6 +143,55 @@ def check_torchcodec() -> Tuple[str, bool, str]:
         # its internal libraries (e.g., due to PyTorch version incompatibility)
         msg = "Not installed or incompatible. Will fallback to waveform preload (slower)."
         return ("torchcodec", False, msg)
+
+
+def check_critical_imports() -> Tuple[str, bool, str]:
+    """Check critical ML library imports work correctly.
+    
+    Tests imports for whisperx, speechbrain, and pyannote.audio.
+    These are the most fragile dependencies that commonly cause issues.
+    """
+    issues = []
+    
+    # Test whisperx import
+    try:
+        import whisperx
+    except ImportError as e:
+        issues.append(f"whisperx: {e}")
+    except Exception as e:
+        issues.append(f"whisperx: {type(e).__name__}: {e}")
+    
+    # Test speechbrain import (base package)
+    try:
+        import speechbrain
+    except ImportError as e:
+        issues.append(f"speechbrain: {e}")
+    
+    # Test speechbrain.inference import (critical for model loading)
+    try:
+        import speechbrain.inference
+    except Exception as e:
+        issues.append(f"speechbrain.inference: {type(e).__name__}: {e}")
+    
+    # Test pyannote.audio import
+    try:
+        import pyannote.audio
+    except ImportError as e:
+        issues.append(f"pyannote.audio: {e}")
+    except Exception as e:
+        issues.append(f"pyannote.audio: {type(e).__name__}: {e}")
+    
+    # Test transformers import
+    try:
+        import transformers
+    except ImportError as e:
+        issues.append(f"transformers: {e}")
+    
+    if issues:
+        msg = "; ".join(issues)
+        return ("Critical imports", False, msg)
+    else:
+        return ("Critical imports", True, "All critical imports OK")
 
 
 if __name__ == "__main__":
