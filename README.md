@@ -55,7 +55,6 @@ Then run with `--speakers <path_to_json>`. The mapping will be applied at export
 * Windows 10/11
 * Python 3.11+ (recommended for stable Torch stack on Windows)
 * FFmpeg available in `PATH` (also important for decoding via torchcodec/pyannote on Windows)
-* torchcodec (included in CUDA lock files; for fast audio decoding via pyannote)
 * For diarization: Hugging Face token + acceptance of gated model terms
 * (Optional) NVIDIA GPU + CUDA-compatible Torch wheels
 
@@ -86,14 +85,16 @@ Using `.venv` is the recommended way to isolate dependencies.
 **CPU option (simpler):**
 
 ```powershell
-pip install -r requirements/lock-win-cpu.txt
+pip install -r requirements/base.txt
+pip install -r requirements/cpu.txt
 pip install -e .
 ```
 
 **CUDA option (example, depends on your setup):**
 
 ```powershell
-pip install -r requirements/lock-win-cuda-cu128.txt
+pip install -r requirements/base.txt
+pip install -r requirements/cuda-cu128.txt
 pip install -e .
 ```
 
@@ -109,46 +110,6 @@ Example `.env`:
 ```env
 HF_TOKEN=hf_xxx
 ```
-
----
-
-## Reproducible setup on another Windows machine
-
-Once you have a working environment, capture the exact dependency versions for portability:
-
-### Generate a lock file
-
-```powershell
-# Activate your working venv first
-.\.venv\Scripts\Activate.ps1
-
-# Generate lock file (CPU profile example)
-pip freeze > requirements/lock-win-cpu.txt
-```
-
-For CUDA, use a descriptive name:
-
-```powershell
-pip freeze > requirements/lock-win-cuda-cu128.txt
-```
-
-### Recreate the environment on another machine
-
-1. Copy the project (without `.venv`)
-2. Copy the lock file
-3. On the target machine:
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -U pip
-pip install -r requirements/lock-win-cpu.txt
-pip install -e .
-```
-
-This guarantees the same versions are installed. The lock file records **all** packages (including transitive dependencies), so it's fully reproducible.
-
-> **Note:** Lock files are machine-specific for Torch (CPU vs CUDA builds). Generate one for each profile you use.
 
 ---
 

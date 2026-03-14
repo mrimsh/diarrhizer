@@ -313,33 +313,19 @@ class WhisperXDiarizeAdapter:
         self._hf_token = self._check_hf_token()
 
         try:
-            # Load diarization model using pyannote.audio directly
-            # Note: whisperx 3.7+ changed the API - we use pyannote.audio.Pipeline directly
-            from pyannote.audio import Pipeline
-            import os
-            
-            # Set HF token in environment for pyannote.audio
-            # Both variables are checked by huggingface_hub
-            os.environ["HF_TOKEN"] = self._hf_token
-            os.environ["HUGGINGFACE_HUB_TOKEN"] = self._hf_token
-            
-            # Load the pyannote diarization pipeline
-            # Using version 3.1 which is stable
-            # Note: pyannote.audio uses HF_TOKEN from environment, no need to pass explicitly
-            self._diarize_model = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1"
+            # Load diarization model (pyannote via WhisperX)
+            self._diarize_model = whisperx.load_model(
+                "pyannote",
+                device=self._device,
+                huggingface_token=self._hf_token,
             )
-            
-            # Move to device if CUDA
-            if self._device == "cuda":
-                self._diarize_model.to(torch.device("cuda"))
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load diarization model: {e}"
             ) from e
 
     def _load_audio_fallback(self, audio_path: str | Path) -> Any:
-        """Fallback audio loading using scipy.
+        """Fallback audio loading using torchaudio.
 
         This is used when the default WhisperX audio loading fails
         (e.g., due to torchcodec/FFmpeg compatibility issues on Windows).
@@ -348,37 +334,28 @@ class WhisperXDiarizeAdapter:
             audio_path: Path to audio file
 
         Returns:
-            Dictionary format that pyannote.pipeline accepts
+            Audio array compatible with diarization
         """
-        import scipy.io.wavfile as wav
-        import numpy as np
+        import torchaudio
 
         logging.warning(
-            "Using fallback audio loading via scipy. "
-            "Diarization will continue with preloaded waveform."
+            "Using fallback audio loading via torchaudio. "
+            "If this succeeds, diarization will continue with preloaded waveform."
         )
 
-        # Load audio using scipy
-        sample_rate, waveform = wav.read(str(audio_path))
-        
-        # Convert to float32 if needed
-        if waveform.dtype != np.float32:
-            waveform = waveform.astype(np.float32) / 32768.0
-        
-        # Ensure mono
-        if len(waveform.shape) > 1:
-            waveform = waveform.mean(axis=1)
-        
-        # Resample to 16kHz if needed
+        # Load audio using torchaudio
+        waveform, sample_rate = torchaudio.load(str(audio_path))
+
+        # Convert to mono if stereo
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+        # Resample to 16kHz if needed (diarization expects 16kHz)
         if sample_rate != 16000:
-            from scipy.signal import resample
-            num_samples = int(len(waveform) * 16000 / sample_rate)
-            waveform = resample(waveform, num_samples)
-            sample_rate = 16000
-        
-        # Return as dict that pyannote.pipeline can use
-        import torch
-        return {"waveform": torch.from_numpy(waveform).unsqueeze(0), "sample_rate": sample_rate}
+            waveform = torchaudio.functional.resample(waveform, sample_rate, 16000)
+
+        # Return as numpy array (WhisperX expects this format)
+        return waveform.squeeze().numpy()
 
     def diarize(
         self,
@@ -409,14 +386,18 @@ class WhisperXDiarizeAdapter:
         self._load_diarization_model()
 
         try:
-            # Run diarization using the pyannote pipeline
+            import whisperx
+
+            # Try default loading first
             if use_fallback:
-                # Use scipy to load audio and pass to pipeline as dict
-                audio_dict = self._load_audio_fallback(audio_path)
-                result = self._diarize_model(audio_dict)
+                logging.info("Attempting diarization with fallback audio loading...")
+                audio = self._load_audio_fallback(audio_path)
             else:
-                # Use default pyannote.audio loading (requires torchcodec or FFmpeg)
-                result = self._diarize_model(str(audio_path))
+                # Default WhisperX audio loading
+                audio = whisperx.load_audio(str(audio_path))
+
+            # Run diarization
+            result = self._diarize_model(audio)
 
             # Convert to our format
             segments = []
@@ -453,8 +434,6 @@ class WhisperXDiarizeAdapter:
                     or "ffmpeg" in error_msg
                     or "codec" in error_msg
                     or "load_audio" in error_msg
-                    or "torchcodec" in error_msg
-                    or "torchaudio" in error_msg
                 )
             ):
                 logging.warning(
