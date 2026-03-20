@@ -1,19 +1,18 @@
-# Diarrhizer base requirements
-# Install with stable constraints:
+# Diarrhizer base requirements (Windows / Python 3.12 stable line)
+# Install with:
 #   pip install -c requirements/constraints-stable.txt -r requirements/base.txt
 
-# Core dependencies
-torch>=2.0.0
-torchaudio>=2.0.0
-whisperx>=3.0.0
+# Core runtime
+whisperx==3.3.1
 
-# Optional: for faster audio decoding (recommended for production)
-torchcodec>=0.10.0
+# Torch line kept here for clarity; exact versions are pinned in constraints
+# to reduce resolver backtracking.
+torch>=2.4.0,<2.5.0
+torchaudio>=2.4.0,<2.5.0
 
-# For diarization (requires HF token)
-pyannote.audio>=3.0.0
+# Explicit upper bounds for packages with frequent breaking changes in this stack
+numpy<2.0
+huggingface-hub<1.0
 
-# Standard dependencies
-numpy>=1.24.0
-huggingface-hub>=0.19.0
-transformers>=4.30.0
+# Optional extras are installed separately if needed
+# torchcodec>=0.10.0

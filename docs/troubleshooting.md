@@ -16,6 +16,32 @@ This will verify Python version, FFmpeg, torch/torchaudio, CUDA, torchcodec, cri
 
 ---
 
+## `pkg_resources` Missing (setuptools Compatibility)
+
+**Symptom:**
+```
+Import error: No module named 'pkg_resources'
+```
+or WhisperX fails at startup with a `ModuleNotFoundError` pointing to `pkg_resources`.
+
+**Root Cause:** WhisperX 3.3.1 uses the `pkg_resources` module from `setuptools` at runtime. On Python 3.12+, a fresh virtual environment may not include `setuptools`, or a newer `setuptools` (81+) may have removed `pkg_resources` in favor of `importlib.metadata`.
+
+**Fix:**
+
+1. **Reinstall using the constraints file** (recommended — the pin is already included):
+   ```powershell
+   pip install -c requirements/constraints-stable.txt -r requirements/base.txt
+   ```
+
+2. **Or install setuptools directly:**
+   ```powershell
+   pip install "setuptools<81"
+   ```
+
+**Why `setuptools<81`?** Versions 81+ dropped `pkg_resources`. WhisperX 3.3.1 still depends on it, so a compatible `setuptools` version must be present in the environment. The constraint file pins `setuptools<81` to ensure this.
+
+---
+
 ## Dependency Compatibility Issues
 
 ### Symptom: LazyModule / SpeechBrain Import Errors
@@ -56,6 +82,7 @@ Model was trained with pyannote.audio 0.0.1, yours is 3.4.0. Bad things might ha
    ```
 
 **Key constraints in `requirements/constraints-stable.txt`:**
+- `setuptools<81` - WhisperX needs `pkg_resources`, removed in setuptools 81+
 - `numpy<2.0` - Many ML packages still adapting to NumPy 2.0
 - `huggingface-hub<1.0` - Avoids breaking changes in model loading
 - `transformers<5.0` - API changes in 5.x break some integrations

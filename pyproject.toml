@@ -13,14 +13,16 @@ authors = [
     {name = "Diarrhizer Team"}
 ]
 dependencies = [
-    # PyTorch (install CUDA version separately for GPU support)
-    "torch>=2.0.0",
-    "torchaudio>=2.0.0",
-    # WhisperX for ASR and alignment
+    "torch>=2.4.0,<2.5.0",
+    "torchaudio>=2.4.0,<2.5.0",
     "whisperx>=3.0",
 ]
 
 [project.optional-dependencies]
+cuda = [
+    # Use with: pip install -e .[cuda]
+    # Then install CUDA wheels separately (see requirements/cuda-cu124.txt)
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.1",

@@ -1,0 +1,8 @@
+# Diarrhizer CUDA requirements for NVIDIA GPUs (CUDA 12.4)
+# Install with:
+#   pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu124.txt
+
+# CUDA-specific PyTorch wheels (matching version in constraints-stable.txt)
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.4.1+cu124
+torchaudio==2.4.1+cu124

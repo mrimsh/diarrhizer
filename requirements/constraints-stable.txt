@@ -1,38 +1,43 @@
-# Diarrhizer stable constraints for Windows CUDA/CPU environments
-# These constraints fix known compatibility issues in the WhisperX/pyannote/speechbrain stack
-#
+# Diarrhizer stable constraints for Windows + Python 3.12
 # Usage:
 #   pip install -c requirements/constraints-stable.txt -r requirements/base.txt
 #
-# Key constraints:
-# - huggingface-hub<1.0: Avoids breaking changes in model loading
-# - numpy<2.0: Many ML packages still adapting to NumPy 2.0
-# - transformers<5.0: API changes in 5.x break some integrations
-# - torch>=2.0,<2.5: More stable with WhisperX models
-# - pyannote.audio>=3.0,<3.5: The 3.x series is required for WhisperX
+# This revision fixes the conflict:
+#   pyannote.audio 3.3.2 -> speechbrain>=1.0.0
+# while an older constraint forced speechbrain<1.0.0.
 
-# Core dependency constraints (must be applied first)
+# Core stack pinned by WhisperX 3.3.1
+whisperx==3.3.1
+faster-whisper==1.1.0
+ctranslate2==4.4.0
+
+# Diarization stack required by WhisperX 3.3.1
+pyannote.audio==3.3.2
+pyannote.core==5.0.0
+pyannote.database==5.1.3
+pyannote.metrics==3.2.1
+pyannote.pipeline==3.0.1
+speechbrain>=1.0.0,<1.1
+
+# PyTorch line
+# Pin exact versions to reduce backtracking on Windows.
+torch==2.4.1
+torchaudio==2.4.1
+
+# Supporting libraries
+# setuptools<81 required: WhisperX 3.3.1 uses pkg_resources at runtime,
+# which is absent in setuptools>=81.
+setuptools<81
 numpy<2.0
 huggingface-hub<1.0
-transformers<5.0
-tokenizers<0.22
-
-# PyTorch - use stable versions compatible with WhisperX
-# Note: torch 2.10+ has warnings with WhisperX models trained on older torch
-torch>=2.0.0,<2.5.0
-torchaudio>=2.0.0,<2.5.0
-
-# WhisperX and related
-whisperx>=3.0.0,<4.0.0
-pyannote.audio>=3.0.0,<3.5.0
-pyannote.core>=5.0.0,<6.0.0
-pyannote.database>=5.1.0,<5.2.0
-pyannote.metrics>=3.2.0,<3.3.0
-pyannote.pipeline>=3.0.0,<3.1.0
-
-# SpeechBrain - pinned for stability with pyannote
-speechbrain>=0.5.0,<1.0.0
-
-# Other dependencies that need pinning
-safetensors<0.5.0
+tokenizers<0.16
+transformers==4.39.3
 onnxruntime<1.20.0
+safetensors<0.5.0
+pandas>=2.2,<3.0
+
+# IMPORTANT:
+# Do not pin `av` here for now. On Windows, PyPI file availability for recent
+# PyAV releases can vary, and forcing a specific version may push pip into a
+# source build. Resolve `speechbrain` first; if `av` still builds from source,
+# handle that as a separate PyAV/Windows issue.

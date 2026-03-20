@@ -1,0 +1,8 @@
+# Diarrhizer CPU requirements (no GPU needed)
+# Install with:
+#   pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
+
+# CPU-only PyTorch wheels (matching version in constraints-stable.txt)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.4.1+cpu
+torchaudio==2.4.1+cpu

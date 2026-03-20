@@ -55,6 +55,7 @@ Then run with `--speakers <path_to_json>`. The mapping will be applied at export
 * Windows 10/11
 * Python 3.11+ (recommended for stable Torch stack on Windows)
 * FFmpeg available in `PATH` (also important for decoding via torchcodec/pyannote on Windows)
+* `setuptools<81` — WhisperX 3.3.1 depends on `pkg_resources` at runtime; setuptools 81+ removed it. This is pinned automatically via `constraints-stable.txt`.
 * For diarization: Hugging Face token + acceptance of gated model terms
 * (Optional) NVIDIA GPU + CUDA-compatible Torch wheels
 
@@ -85,18 +86,18 @@ Using `.venv` is the recommended way to isolate dependencies.
 **CPU option (simpler):**
 
 ```powershell
-pip install -r requirements/base.txt
-pip install -r requirements/cpu.txt
+pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
 pip install -e .
 ```
 
-**CUDA option (example, depends on your setup):**
+**CUDA option (NVIDIA GPU with CUDA 12.4):**
 
 ```powershell
-pip install -r requirements/base.txt
-pip install -r requirements/cuda-cu128.txt
+pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu124.txt
 pip install -e .
 ```
+
+> Note: If you need a different CUDA version, replace `cuda-cu124.txt` with the appropriate file (e.g., `cuda-cu121.txt` for CUDA 12.1). Ensure your GPU driver supports the selected CUDA version.
 
 ---
 
@@ -213,6 +214,7 @@ This allows:
 * `pip check` — check for dependency conflicts
 * `python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"`
 * `where ffmpeg` and `ffmpeg -version`
+* `Import error: No module named 'pkg_resources'` — install `setuptools<81` (see `docs/troubleshooting.md` for details)
 * If pyannote/torchcodec reports FFmpeg or compatibility issues:
 
   * Verify FFmpeg installation (shared DLL build)
