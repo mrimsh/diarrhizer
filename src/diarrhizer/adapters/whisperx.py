@@ -296,12 +296,12 @@ class WhisperXDiarizeAdapter:
         return token
 
     def _load_diarization_model(self) -> None:
-        """Load WhisperX diarization model."""
+        """Load WhisperX diarization model (pyannote pipeline)."""
         if self._diarize_model is not None:
             return
 
         try:
-            import whisperx
+            from whisperx.diarize import DiarizationPipeline
         except ImportError as e:
             raise RuntimeError(
                 "WhisperX not installed. Please install it with:\n"
@@ -313,11 +313,11 @@ class WhisperXDiarizeAdapter:
         self._hf_token = self._check_hf_token()
 
         try:
-            # Load diarization model (pyannote via WhisperX)
-            self._diarize_model = whisperx.load_model(
-                "pyannote",
+            # DiarizationPipeline wraps pyannote.audio Pipeline.
+            # The token is passed via use_auth_token (not huggingface_token).
+            self._diarize_model = DiarizationPipeline(
+                use_auth_token=self._hf_token,
                 device=self._device,
-                huggingface_token=self._hf_token,
             )
         except Exception as e:
             raise RuntimeError(
@@ -396,17 +396,20 @@ class WhisperXDiarizeAdapter:
                 # Default WhisperX audio loading
                 audio = whisperx.load_audio(str(audio_path))
 
-            # Run diarization
-            result = self._diarize_model(audio)
+            # Run diarization (DiarizationPipeline returns a DataFrame)
+            result = self._diarize_model(
+                audio,
+                min_speakers=self._min_speakers,
+                max_speakers=self._max_speakers,
+            )
 
-            # Convert to our format
+            # Convert DataFrame to our format (columns: segment, label, speaker, start, end)
             segments = []
-            for segment in result.itertracks(yield_label=True):
-                # segment is (start, end, speaker)
+            for _, row in result.iterrows():
                 segments.append({
-                    "start": float(segment[0].start),
-                    "end": float(segment[0].end),
-                    "speaker": str(segment[2]),
+                    "start": float(row["start"]),
+                    "end": float(row["end"]),
+                    "speaker": str(row["speaker"]),
                 })
 
             # Get unique speakers
