@@ -7,8 +7,11 @@ whisperx==3.3.1
 
 # Torch line kept here for clarity; exact versions are pinned in constraints
 # to reduce resolver backtracking.
-torch>=2.4.0,<2.5.0
-torchaudio>=2.4.0,<2.5.0
+# IMPORTANT: torch <2.4.0 is required for GPU (cuDNN 8 compatibility with ctranslate2 4.4.0).
+# WhisperX 3.3.1 explicitly requires ctranslate2<4.5.0, which needs cuDNN 8.
+# torch>=2.4.0+cu124 bundles cuDNN 9 and will cause "Could not locate cudnn_ops_infer64_8.dll".
+torch>=2.3.0,<2.4.0
+torchaudio>=2.3.0,<2.4.0
 
 # Explicit upper bounds for packages with frequent breaking changes in this stack
 numpy<2.0

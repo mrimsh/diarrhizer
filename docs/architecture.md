@@ -188,7 +188,8 @@ Name mapping is a separate layer on top.
 
 The Windows dependency stack is sensitive:
 
-- torch / torchaudio / torchvision version alignment (CPU vs CUDA builds),
+- torch / torchaudio version alignment (CPU vs CUDA builds),
+- **cuDNN major version** — WhisperX 3.3.1 requires ctranslate2<4.5.0 (cuDNN 8), while torch >=2.4.0+cu124 ships cuDNN 9. This mismatch causes `Could not locate cudnn_ops_infer64_8.dll` at transcribe time even though `torch.cuda.is_available()` returns `True`. See [troubleshooting](troubleshooting.md#cuDNN-dll-mismatch-ctranslate2-vs-torch-cuda).
 - FFmpeg availability in `PATH`,
 - Hugging Face token (gated models),
 - potential torchcodec ↔ FFmpeg / torch compatibility issues.

@@ -13,15 +13,15 @@ authors = [
     {name = "Diarrhizer Team"}
 ]
 dependencies = [
-    "torch>=2.4.0,<2.5.0",
-    "torchaudio>=2.4.0,<2.5.0",
+    "torch>=2.3.0,<2.4.0",
+    "torchaudio>=2.3.0,<2.4.0",
     "whisperx>=3.0",
 ]
 
 [project.optional-dependencies]
 cuda = [
     # Use with: pip install -e .[cuda]
-    # Then install CUDA wheels separately (see requirements/cuda-cu124.txt)
+    # Then install CUDA wheels separately (see requirements/cuda-cu121.txt)
 ]
 dev = [
     "pytest>=7.0",

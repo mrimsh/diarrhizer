@@ -19,10 +19,14 @@ pyannote.metrics==3.2.1
 pyannote.pipeline==3.0.1
 speechbrain>=1.0.0,<1.1
 
-# PyTorch line
+# PyTorch line — cuDNN 8 alignment
+# WhisperX 3.3.1 requires ctranslate2<4.5.0 (cuDNN 8).
+# torch <2.4.0 ships cuDNN 8 DLLs (compatible).
+# torch >=2.4.0+cu124 ships cuDNN 9 DLLs (INCOMPATIBLE — causes
+# "Could not locate cudnn_ops_infer64_8.dll" at transcribe time).
 # Pin exact versions to reduce backtracking on Windows.
-torch==2.4.1
-torchaudio==2.4.1
+torch==2.3.1
+torchaudio==2.3.1
 
 # Supporting libraries
 # setuptools<81 required: WhisperX 3.3.1 uses pkg_resources at runtime,

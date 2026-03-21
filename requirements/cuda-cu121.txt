@@ -1,0 +1,15 @@
+# Diarrhizer CUDA requirements for NVIDIA GPUs (CUDA 12.1)
+# Install with:
+#   pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
+#
+# WHY cu121 and not cu124?
+# WhisperX 3.3.1 requires ctranslate2<4.5.0 (cuDNN 8).
+# torch >=2.4.0+cu124 bundles cuDNN 9 → runtime failure:
+#   "Could not locate cudnn_ops_infer64_8.dll"
+# torch 2.3.1+cu121 bundles cuDNN 8 → compatible with ctranslate2 4.4.0.
+# See docs/troubleshooting.md § "cuDNN DLL mismatch" for details.
+
+# CUDA-specific PyTorch wheels (cuDNN 8 build, compatible with ctranslate2 4.4.0)
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.3.1+cu121
+torchaudio==2.3.1+cu121

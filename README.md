@@ -59,6 +59,8 @@ Then run with `--speakers <path_to_json>`. The mapping will be applied at export
 * For diarization: Hugging Face token + acceptance of gated model terms
 * (Optional) NVIDIA GPU + CUDA-compatible Torch wheels
 
+> **GPU / cuDNN note:** WhisperX 3.3.1 requires `ctranslate2<4.5.0`, which depends on **cuDNN 8**. PyTorch `>=2.4.0+cu124` ships **cuDNN 9**, causing `Could not locate cudnn_ops_infer64_8.dll` at transcribe time. The stable GPU path uses **torch 2.3.1+cu121** (cuDNN 8). See [troubleshooting](docs/troubleshooting.md) for diagnostics.
+
 > Internet access is usually required for the initial model download; models are cached locally afterward.
 
 ---
@@ -81,23 +83,35 @@ Using `.venv` is the recommended way to isolate dependencies.
 
 ### 2) Install dependencies
 
-> Important: On Windows with GPU, the `torch/torchaudio/torchvision` stack must be strictly aligned by version and build type (CPU or `+cuXXX`). This is the main compatibility bottleneck.
+> **Important:** On Windows with GPU, the `torch/torchaudio` stack must be strictly aligned by version **and** cuDNN major version. `torch.cuda.is_available() == True` does **not** guarantee that WhisperX / CTranslate2 can actually use the GPU — cuDNN 8 vs 9 DLL mismatch is a silent failure that only appears during transcription.
 
-**CPU option (simpler):**
+**CPU option (simpler, recommended first):**
 
 ```powershell
 pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
 pip install -e .
 ```
 
-**CUDA option (NVIDIA GPU with CUDA 12.4):**
+**CUDA option (NVIDIA GPU, CUDA 12.1 cuDNN 8 — stable supported path):**
 
 ```powershell
-pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu124.txt
+pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
 pip install -e .
 ```
 
-> Note: If you need a different CUDA version, replace `cuda-cu124.txt` with the appropriate file (e.g., `cuda-cu121.txt` for CUDA 12.1). Ensure your GPU driver supports the selected CUDA version.
+This installs `torch==2.3.1+cu121` which bundles cuDNN 8 — compatible with `ctranslate2==4.4.0` (required by WhisperX 3.3.1).
+
+> **Why cu121 and not cu124?** WhisperX 3.3.1 pins `ctranslate2<4.5.0`, which requires cuDNN 8. PyTorch cu124 wheels ship cuDNN 9, causing `Could not locate cudnn_ops_infer64_8.dll`. Until WhisperX lifts the ctranslate2 upper bound, the cu121 path is the only stable GPU option.
+
+**Verify your GPU setup after install:**
+
+```powershell
+python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())"
+pip show whisperx faster-whisper ctranslate2 pyannote.audio torch torchaudio
+dir .venv\Lib\site-packages\torch\lib\cudnn*.dll
+```
+
+You should see `cudnn_ops_infer64_8.dll` (cuDNN 8) in the last command. If you see only `cudnn*64_9.dll` (cuDNN 9), the setup is broken — see [troubleshooting](docs/troubleshooting.md).
 
 ---
 
@@ -211,17 +225,17 @@ This allows:
 
 ## Troubleshooting (Essentials)
 
+* `python -m diarrhizer doctor` — run full environment diagnostics
 * `pip check` — check for dependency conflicts
-* `python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"`
+* `python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())"` — verify torch/CUDA
+* `pip show whisperx faster-whisper ctranslate2 pyannote.audio torch torchaudio` — check installed versions
+* `dir .venv\Lib\site-packages\torch\lib\cudnn*.dll` — verify cuDNN 8 DLLs present (GPU setups)
 * `where ffmpeg` and `ffmpeg -version`
-* `Import error: No module named 'pkg_resources'` — install `setuptools<81` (see `docs/troubleshooting.md` for details)
-* If pyannote/torchcodec reports FFmpeg or compatibility issues:
+* `Could not locate cudnn_ops_infer64_8.dll` — cuDNN mismatch, see [troubleshooting](docs/troubleshooting.md)
+* `Import error: No module named 'pkg_resources'` — install `setuptools<81` (see `docs/troubleshooting.md`)
+* **Fallback to CPU for verification:** if GPU fails with cryptic DLL errors, try `--device cpu` to confirm the pipeline works, then fix the GPU stack
 
-  * Verify FFmpeg installation (shared DLL build)
-  * Ensure torchcodec ↔ torch versions are compatible
-  * A fallback may be used: loading waveform into memory to bypass internal decoding
-
-See `docs/troubleshooting.md` (to be expanded during development).
+See `docs/troubleshooting.md` for detailed diagnostics.
 
 ---
 

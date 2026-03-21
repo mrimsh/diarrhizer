@@ -130,19 +130,132 @@ Model was trained with pyannote.audio 0.0.1, yours is 3.4.0. Bad things might ha
 - Slow processing despite having GPU
 
 **Solution:**
-Reinstall torch with the correct CUDA version. Example for CUDA 12.8:
+Reinstall torch with the correct CUDA version. The stable supported path uses CUDA 12.1 (cuDNN 8):
 
-```cmd
-pip uninstall torch torchaudio torchvision
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+```powershell
+pip uninstall torch torchaudio
+pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
 ```
 
 For CPU-only (no GPU):
-```cmd
-pip install torch torchaudio torchvision
+```powershell
+pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
 ```
 
-**Verify:** Run `python -c "import torch; print(torch.cuda.is_available())"`
+**Verify:** Run `python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())"`
+
+**Important:** `torch.cuda.is_available() == True` does **not** guarantee that WhisperX / CTranslate2 can use the GPU. The cuDNN DLL mismatch is a separate, silent failure. See the next section.
+
+---
+
+## cuDNN DLL Mismatch (CTranslate2 vs Torch CUDA)
+
+This is the most common GPU failure on Windows with newer PyTorch.
+
+### Symptom
+
+During the **transcribe** stage (WhisperX / faster-whisper / CTranslate2):
+
+```
+Could not locate cudnn_ops_infer64_8.dll. Please make sure it is in your library path!
+```
+
+Or during **diarization**:
+
+```
+Unable to load any of {libcudnn_cnn.so.9.1.0, libcudnn_cnn.so.9.1, libcudnn_cnn.so.9, libcudnn_cnn.so}
+Invalid handle. Cannot load symbol cudnnCreateConvolutionDescriptor
+```
+
+The `doctor` command may pass all checks (torch imports fine, CUDA reports available) — the error only occurs when WhisperX actually calls CTranslate2.
+
+### Root Cause
+
+**cuDNN version conflict** between PyTorch and CTranslate2:
+
+| Package | cuDNN version bundled |
+|---------|----------------------|
+| `torch>=2.4.0+cu124` | cuDNN **9** |
+| `torch<2.4.0` or `torch+cu121` | cuDNN **8** |
+| `ctranslate2<4.5.0` (WhisperX 3.3.1) | expects cuDNN **8** |
+| `ctranslate2>=4.5.0` | expects cuDNN **9** |
+
+**WhisperX 3.3.1 explicitly requires `ctranslate2<4.5.0`**, which needs cuDNN 8.
+But `torch>=2.4.0+cu124` bundles cuDNN 9 DLLs into `site-packages\torch\lib\`.
+CTranslate2 4.4.0 searches for `cudnn_ops_infer64_8.dll` (cuDNN 8), doesn't find it, and crashes.
+
+This is why `torch.cuda.is_available() == True` is not sufficient — torch itself works fine with cuDNN 9, but CTranslate2 doesn't.
+
+### Verification Commands
+
+Run these to diagnose:
+
+```powershell
+# 1. Check torch version and CUDA build
+python -c "import torch; print('torch:', torch.__version__); print('CUDA:', torch.version.cuda); print('available:', torch.cuda.is_available())"
+
+# 2. Check all relevant package versions
+pip show whisperx faster-whisper ctranslate2 pyannote.audio torch torchaudio
+
+# 3. Check which cuDNN DLLs are actually in the torch package
+dir .venv\Lib\site-packages\torch\lib\cudnn*.dll
+```
+
+**What to look for:**
+- If step 3 shows `cudnn_ops_infer64_8.dll` → cuDNN 8, should work
+- If step 3 shows only `cudnn*64_9.dll` files → cuDNN 9, **will fail** with CTranslate2 4.4.0
+- If `ctranslate2` shows `4.4.0` and `torch` shows `2.4.x+cu124` → **mismatch confirmed**
+
+### Fix Path
+
+**Option A — Use the project's pinned setup (recommended):**
+
+Recreate your venv with the correct pins:
+
+```powershell
+deactivate
+rmdir /s .venv
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+
+# For GPU (CUDA 12.1, cuDNN 8):
+pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
+pip install -e .
+
+# Or for CPU:
+pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
+pip install -e .
+```
+
+**Option B — Manual fix (if you can't recreate the venv):**
+
+```powershell
+pip uninstall torch torchaudio
+pip install torch==2.3.1+cu121 torchaudio==2.3.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+```
+
+**Option C — Use CPU for verification:**
+
+If you need to confirm the pipeline works before fixing the GPU stack:
+
+```powershell
+python -m diarrhizer run "path\to\file.mp4" --out ".\out" --device cpu
+```
+
+### Why You Must Recreate the Venv
+
+Pip's dependency resolver does not retroactively downgrade packages when you change constraint files. If torch 2.4.1+cu124 is already installed, `pip install torch==2.3.1+cu121` may leave fragments. A clean venv ensures all DLLs are consistent.
+
+### Compatibility Matrix
+
+| torch | CUDA | cuDNN | ctranslate2 | Status |
+|-------|------|-------|-------------|--------|
+| 2.3.1+cu121 | 12.1 | 8 | 4.4.0 | **Stable (recommended)** |
+| 2.4.1+cu124 | 12.4 | 9 | 4.4.0 | Broken — cuDNN mismatch |
+| 2.4.1+cu124 | 12.4 | 9 | >=4.5.0 | Would work but WhisperX 3.3.1 forbids it |
+| 2.3.1+cpu | — | — | 4.4.0 | Stable (CPU only) |
 
 ---
 
@@ -197,9 +310,12 @@ ValueError: Requested float16 compute type, but the target device or backend do 
 
 | Version | Status | Notes |
 |---------|--------|-------|
-| torch 2.10 + whisperx 3.7 | ⚠️ Works with warnings | Shows model version mismatch warnings |
-| numpy 2.x | ⚠️ May work | Some packages still adapting |
-| transformers 5.x | ⚠️ May work | API changes in 5.x |
-| huggingface-hub 1.5+ | ⚠️ May work | Lazy loading changes |
-| pyannote.audio 3.4 | ✅ Works | Current default |
-| speechbrain 1.0.3 | ✅ Works | Current default |
+| torch 2.3.1+cu121 + ctranslate2 4.4.0 | **Stable** | Recommended GPU path (cuDNN 8) |
+| torch 2.4.1+cu124 + ctranslate2 4.4.0 | **Broken** | cuDNN 9 vs 8 mismatch → `cudnn_ops_infer64_8.dll` error |
+| torch 2.4.x+cu124 + ctranslate2 >=4.5.0 | Would work | Blocked by WhisperX 3.3.1 `ctranslate2<4.5.0` |
+| torch 2.10 + whisperx 3.7 | Works with warnings | Shows model version mismatch warnings |
+| numpy 2.x | May work | Some packages still adapting |
+| transformers 5.x | May work | API changes in 5.x |
+| huggingface-hub 1.5+ | May work | Lazy loading changes |
+| pyannote.audio 3.3.2 | **Stable** | Current default |
+| speechbrain 1.0.x | **Stable** | Current default |
