@@ -22,12 +22,17 @@ coverage.xml
 
 # ===== Virtual environments =====
 .venv/
+.venvcuda/
 venv/
 ENV/
 
 # ===== IDE =====
 .vscode/
 .idea/
+
+## ===== Kilo =====
+.kilo/
+.kilocode/
 
 # ===== Environment / secrets =====
 .env
