@@ -3,7 +3,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from diarrhizer.adapters.whisperx import WhisperXAdapter
 
@@ -43,17 +43,60 @@ class TranscribeStage:
         self._model = model
         self._device = device
         self._language: str | None = None
+        # ASR parameters
+        self._compute_type: Optional[str] = None
+        self._beam_size: int = 5
+        self._temperature: float = 0.0
+        self._condition_on_previous_text: bool = True
+        self._initial_prompt: Optional[str] = None
+        self._vad_filter: bool = True
+        self._vad_min_silence_ms: int = 1000
 
-    def configure(self, language: str, device: str) -> None:
+    def configure(
+        self,
+        language: str,
+        device: str,
+        model: Optional[str] = None,
+        compute_type: Optional[str] = None,
+        beam_size: Optional[int] = None,
+        temperature: Optional[float] = None,
+        condition_on_previous_text: Optional[bool] = None,
+        initial_prompt: Optional[str] = None,
+        vad_filter: Optional[bool] = None,
+        vad_min_silence_ms: Optional[int] = None,
+    ) -> None:
         """Configure transcription parameters.
 
         Args:
             language: Language code or "auto" for detection
             device: Device to use ("cuda" or "cpu")
+            model: WhisperX model override
+            compute_type: Compute type override
+            beam_size: Decoding beam size
+            temperature: Decoding temperature
+            condition_on_previous_text: Condition on previous text
+            initial_prompt: Initial prompt string
+            vad_filter: Enable VAD filtering
+            vad_min_silence_ms: VAD minimum silence in milliseconds
         """
         self._device = device
         self._language = None if language == "auto" else language
-        # Reset adapter to use new settings
+        if model is not None:
+            self._model = model
+        if compute_type is not None:
+            self._compute_type = compute_type
+        if beam_size is not None:
+            self._beam_size = beam_size
+        if temperature is not None:
+            self._temperature = temperature
+        if condition_on_previous_text is not None:
+            self._condition_on_previous_text = condition_on_previous_text
+        if initial_prompt is not None:
+            self._initial_prompt = initial_prompt
+        if vad_filter is not None:
+            self._vad_filter = vad_filter
+        if vad_min_silence_ms is not None:
+            self._vad_min_silence_ms = vad_min_silence_ms
         self._whisperx_adapter = None
 
     @property
@@ -64,6 +107,13 @@ class TranscribeStage:
                 model=self._model,
                 device=self._device,
                 language=self._language,
+                compute_type=self._compute_type,
+                beam_size=self._beam_size,
+                temperature=self._temperature,
+                condition_on_previous_text=self._condition_on_previous_text,
+                initial_prompt=self._initial_prompt,
+                vad_filter=self._vad_filter,
+                vad_min_silence_ms=self._vad_min_silence_ms,
             )
         return self._whisperx_adapter
 
@@ -111,7 +161,18 @@ class TranscribeStage:
         device = config.get("device", "cuda")
 
         # Apply configuration (resets adapter if settings changed)
-        self.configure(language=language, device=device)
+        self.configure(
+            language=language,
+            device=device,
+            model=config.get("asr_model"),
+            compute_type=config.get("asr_compute_type"),
+            beam_size=config.get("asr_beam_size"),
+            temperature=config.get("asr_temperature"),
+            condition_on_previous_text=config.get("asr_condition_on_previous_text"),
+            initial_prompt=config.get("asr_initial_prompt"),
+            vad_filter=config.get("asr_vad_filter"),
+            vad_min_silence_ms=config.get("asr_vad_min_silence_ms"),
+        )
 
         # Run transcription
         start_time = datetime.now()
@@ -131,10 +192,11 @@ class TranscribeStage:
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
 
-        # Prepare transcript data
+        # Prepare transcript data with full ASR configuration
         transcript_data = {
             "stage": self.NAME,
             "model": self._model,
+            "compute_type": self._compute_type,
             "language": result.get("language", language),
             "text": result.get("text", ""),
             "segments": result.get("segments", []),
@@ -144,6 +206,12 @@ class TranscribeStage:
                 "output_path": str(transcript_output),
                 "device": device,
                 "language_setting": language,
+                "beam_size": self._beam_size,
+                "temperature": self._temperature,
+                "condition_on_previous_text": self._condition_on_previous_text,
+                "vad_filter": self._vad_filter,
+                "vad_min_silence_ms": self._vad_min_silence_ms,
+                "initial_prompt": self._initial_prompt[:100] + "..." if self._initial_prompt and len(self._initial_prompt) > 100 else self._initial_prompt,
                 "start_time": start_time.isoformat(),
                 "end_time": end_time.isoformat(),
                 "duration_seconds": duration,

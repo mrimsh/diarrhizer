@@ -26,15 +26,15 @@ def main() -> int:
         prog="diarrhizer",
         description="Local Windows tool for processing call recordings"
     )
-    
+
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
-    
+
     # Doctor command
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Run environment diagnostics"
     )
-    
+
     # Run command
     run_parser = subparsers.add_parser(
         "run",
@@ -89,9 +89,71 @@ def main() -> int:
         default=None,
         help="Path to JSON file with speaker name mapping (e.g., {\"Speaker_00\": \"Ivan\", \"Speaker_01\": \"Maria\"})"
     )
-    
+    run_parser.add_argument(
+        "--asr-model",
+        type=str,
+        default="base",
+        help="WhisperX model (default: base, or HF repo like koekaverna/faster-whisper-podlodka-turbo)"
+    )
+    run_parser.add_argument(
+        "--asr-compute-type",
+        type=str,
+        default=None,
+        choices=["float16", "int8_float16", "int8"],
+        help="Compute type for WhisperX (default: auto based on device)"
+    )
+    run_parser.add_argument(
+        "--asr-beam-size",
+        type=int,
+        default=5,
+        help="Decoding beam size (default: 5)"
+    )
+    run_parser.add_argument(
+        "--asr-temperature",
+        type=float,
+        default=0.0,
+        help="Decoding temperature (default: 0.0)"
+    )
+    run_parser.add_argument(
+        "--asr-condition-on-previous-text",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Condition on previous text for stable decoding (default: true)"
+    )
+    run_parser.add_argument(
+        "--asr-initial-prompt-file",
+        type=str,
+        default=None,
+        help="Path to file containing initial prompt/glossary for ASR"
+    )
+    run_parser.add_argument(
+        "--asr-hotwords-file",
+        type=str,
+        default=None,
+        help="Path to hotwords file (not yet implemented)"
+    )
+    run_parser.add_argument(
+        "--asr-vad-filter",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable VAD filtering (default: true)"
+    )
+    run_parser.add_argument(
+        "--asr-vad-min-silence-ms",
+        type=int,
+        default=1000,
+        help="VAD minimum silence in milliseconds (default: 1000)"
+    )
+    run_parser.add_argument(
+        "--audio-profile",
+        type=str,
+        default="raw",
+        choices=["raw", "voice-call", "denoise-light", "split-stereo"],
+        help="Audio preprocessing profile (default: raw)"
+    )
+
     args = parser.parse_args()
-    
+
     if args.command == "doctor":
         run_doctor_checks()
         return 0
@@ -99,7 +161,7 @@ def main() -> int:
         # [SEMANTIC-BEGIN] CLI:RUN
         # @purpose: Run the processing pipeline for a media file
         # @description: Orchestrates FFmpeg conversion, ASR, diarization, and export
-        # @inputs: args.input, args.out, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.speakers
+        # @inputs: args.input, args.out, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.speakers, ASR params, audio_profile
         # @outputs: Artifacts in out/ directory
         # @sideEffects: Creates job directory, writes artifacts to disk
         # @errors: Exits with code 1 on failure
@@ -121,7 +183,6 @@ def main() -> int:
                 return 1
             with open(speakers_path, "r", encoding="utf-8") as f:
                 speakers = json.load(f)
-            # Validate speakers structure
             if not isinstance(speakers, dict):
                 print(f"Error: Speakers file must contain a JSON object (dictionary)", file=sys.stderr)
                 return 1
@@ -131,8 +192,26 @@ def main() -> int:
             print(f"[CLI] Loaded speaker mapping: {speakers}")
         # [SEMANTIC-END] CONFIG:SPEAKERS_MAP
 
+        # [SEMANTIC-BEGIN] CONFIG:INITIAL_PROMPT
+        # @purpose: Load initial prompt/glossary for ASR from file
+        # @description: Reads a text file containing initial prompt for terminology guidance
+        # @inputs: args.asr_initial_prompt_file (file path)
+        # @outputs: initial_prompt string or None
+        # @sideEffects: File I/O
+        # @errors: FileNotFoundError
+        # @see: CLI:RUN, STAGE:TRANSCRIBE, ADAPTER:WHISPERX_ASR
+        initial_prompt = None
+        if args.asr_initial_prompt_file:
+            prompt_path = Path(args.asr_initial_prompt_file)
+            if not prompt_path.exists():
+                print(f"Error: Initial prompt file not found: {prompt_path}", file=sys.stderr)
+                return 1
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                initial_prompt = f.read().strip()
+            print(f"[CLI] Loaded initial prompt: {len(initial_prompt)} chars")
+        # [SEMANTIC-END] CONFIG:INITIAL_PROMPT
+
         try:
-            # Wire pipeline: convert -> transcribe -> diarize -> merge -> export
             result = run_pipeline(
                 input_path=args.input,
                 out_dir=args.out,
@@ -144,6 +223,16 @@ def main() -> int:
                 force=args.force,
                 force_stage=args.force_stage,
                 speakers=speakers,
+                asr_model=args.asr_model,
+                asr_compute_type=args.asr_compute_type,
+                asr_beam_size=args.asr_beam_size,
+                asr_temperature=args.asr_temperature,
+                asr_condition_on_previous_text=args.asr_condition_on_previous_text,
+                asr_initial_prompt=initial_prompt,
+                asr_hotwords_file=args.asr_hotwords_file,
+                asr_vad_filter=args.asr_vad_filter,
+                asr_vad_min_silence_ms=args.asr_vad_min_silence_ms,
+                audio_profile=args.audio_profile,
             )
             print(f"\nPipeline completed successfully!")
             print(f"Job ID: {result['job_id']}")

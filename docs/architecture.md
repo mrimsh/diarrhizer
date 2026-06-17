@@ -115,11 +115,11 @@ Planned layout:
 ```
 out/
   <job_id>/
-    meta/                 # metadata (config, versions, timestamps)
+    meta/                 # metadata (config, versions, timestamps, ASR params)
     audio/
-      normalized.wav
+      normalized.wav      # or normalized_left.wav/normalized_right.wav for split-stereo
     asr/
-      transcript.json
+      transcript.json     # includes ASR config in metadata
     diar/
       diarization.json
     merged/
@@ -168,7 +168,15 @@ The "stitched" result: text + timestamps + speaker at segment (and/or word) leve
     }
   ],
   "num_segments": 1,
-  "metadata": {...}
+  "metadata": {
+    "asr_params": {
+      "model": "base",
+      "compute_type": "float16",
+      "beam_size": 5,
+      "temperature": 0.0
+    },
+    "audio_profile": "raw"
+  }
 }
 ```
 
@@ -184,7 +192,40 @@ Name mapping is a separate layer on top.
 
 ---
 
-## 5. Environment Diagnostics (`doctor`)
+## 5. Audio Profiles
+
+Audio profiles apply FFmpeg filters during conversion:
+
+| Profile | Filters Applied | Use Case |
+|---------|-----------------|----------|
+| `raw` | None | Default behavior, no preprocessing |
+| `voice-call` | Bandpass filter (300Hz-7kHz) + mild EQ boost at 3kHz | Phone call recordings, VoIP |
+| `denoise-light` | afftdn noise reduction | Noisy recordings with background noise |
+| `split-stereo` | Separates L/R channels | Multi-channel recordings, interview separation |
+
+---
+
+## 6. ASR Parameter Persistence
+
+All ASR parameters are saved in `asr/transcript.json` under `metadata` to enable experiment comparison:
+
+```json
+{
+  "metadata": {
+    "model": "large-v3",
+    "compute_type": "float16",
+    "beam_size": 5,
+    "temperature": 0.0,
+    "condition_on_previous_text": true,
+    "vad_filter": true,
+    "vad_min_silence_ms": 1000
+  }
+}
+```
+
+---
+
+## 7. Environment Diagnostics (`doctor`)
 
 The Windows dependency stack is sensitive:
 
@@ -230,7 +271,7 @@ To avoid this issue, ensure:
 
 ---
 
-## 6. CLI Commands
+## 8. CLI Commands
 
 ### `doctor`
 
@@ -238,7 +279,7 @@ To avoid this issue, ensure:
 python -m diarrhizer doctor
 ```
 
-Runs environment diagnostics. See [Section 5](#5-environment-diagnostics-doctor) for details.
+Runs environment diagnostics. See [Section 7](#7-environment-diagnostics-doctor) for details.
 
 ### `run`
 
@@ -256,12 +297,23 @@ python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 
 | `--max-speakers` | int | `10` | Maximum number of speakers |
 | `--lang` | string | `"auto"` | Language code or `"auto"` for detection |
 | `--device` | choice | `"cuda"` | Device: `cuda` or `cpu` |
+| `--asr-model` | string | `"base"` | WhisperX model (or HF repo like koekaverna/faster-whisper-podlodka-turbo) |
+| `--asr-compute-type` | string | auto | Compute type: `float16`, `int8_float16`, `int8` |
+| `--asr-beam-size` | int | `5` | Decoding beam size for quality/speed trade-off |
+| `--asr-temperature` | float | `0.0` | Decoding temperature for stability |
+| `--asr-condition-on-previous-text` | bool | `true` | Prevent repeats and hallucinations |
+| `--asr-initial-prompt-file` | string | — | Path to glossary/prompt file for terminology |
+| `--asr-hotwords-file` | string | — | Path to hotwords file (not yet implemented) |
+| `--asr-vad-filter` | bool | `true` | Enable VAD filtering |
+| `--asr-vad-min-silence-ms` | int | `1000` | VAD minimum silence in milliseconds |
+| `--audio-profile` | choice | `"raw"` | Audio preprocessing: `raw`, `voice-call`, `denoise-light`, `split-stereo` |
+| `--force-stage` | choice | — | Force recompute specific stage |
 
 > **Note:** Pipeline runs: convert → transcribe → diarize → merge → export.
 
 ---
 
-## 7. Extensibility (Future Growth)
+## 9. Extensibility (Future Growth)
 
 The architecture is designed to allow extensions without breaking the core:
 
@@ -283,7 +335,7 @@ The architecture is designed to allow extensions without breaking the core:
 
 ---
 
-## 8. Implicit Quality Requirements
+## 10. Implicit Quality Requirements
 
 - Every stage must log:
   - input/output artifact paths,
@@ -297,7 +349,7 @@ The architecture is designed to allow extensions without breaking the core:
 
 ---
 
-## 9. Project Structure (Planned)
+## 11. Project Structure (Planned)
 
 ```
 src/diarrhizer/

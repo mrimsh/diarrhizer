@@ -87,6 +87,16 @@ def run_pipeline(
     force: bool = False,
     force_stage: str | None = None,
     speakers: dict | None = None,
+    asr_model: str = "base",
+    asr_compute_type: str | None = None,
+    asr_beam_size: int = 5,
+    asr_temperature: float = 0.0,
+    asr_condition_on_previous_text: bool = True,
+    asr_initial_prompt: str | None = None,
+    asr_hotwords_file: str | None = None,
+    asr_vad_filter: bool = True,
+    asr_vad_min_silence_ms: int = 1000,
+    audio_profile: str = "raw",
 ) -> dict:
     """Run the processing pipeline for a media file.
 
@@ -101,6 +111,16 @@ def run_pipeline(
         force: If True, recompute all stages regardless of cache
         force_stage: If set, only force a specific stage to recompute
         speakers: Optional speaker name mapping {speaker_id: display_name}
+        asr_model: WhisperX model size or HF repo
+        asr_compute_type: Compute type (float16, int8_float16, int8)
+        asr_beam_size: Decoding beam size
+        asr_temperature: Decoding temperature
+        asr_condition_on_previous_text: Condition on previous text for stable decoding
+        asr_initial_prompt: Initial prompt string for ASR
+        asr_hotwords_file: Path to hotwords file (not yet implemented)
+        asr_vad_filter: Enable VAD filtering
+        asr_vad_min_silence_ms: VAD minimum silence in milliseconds
+        audio_profile: Audio preprocessing profile
 
     Returns:
         Dictionary with pipeline execution results
@@ -142,6 +162,17 @@ def run_pipeline(
         "input_file": str(input_path),
         "force": force,
         "force_stage": force_stage,
+        # ASR parameters
+        "asr_model": asr_model,
+        "asr_compute_type": asr_compute_type,
+        "asr_beam_size": asr_beam_size,
+        "asr_temperature": asr_temperature,
+        "asr_condition_on_previous_text": asr_condition_on_previous_text,
+        "asr_initial_prompt": asr_initial_prompt,
+        "asr_hotwords_file": asr_hotwords_file,
+        "asr_vad_filter": asr_vad_filter,
+        "asr_vad_min_silence_ms": asr_vad_min_silence_ms,
+        "audio_profile": audio_profile,
     }
     # Only add speakers to config if explicitly provided
     if speakers is not None:

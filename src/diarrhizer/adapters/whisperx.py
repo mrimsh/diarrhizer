@@ -10,11 +10,11 @@ import torch
 # [SEMANTIC-BEGIN] ADAPTER:WHISPERX_ASR
 # @purpose: Wrap WhisperX for ASR transcription and word-level alignment
 # @description: Provides a clean interface to WhisperX for transcribing audio with timestamps
-# @inputs: audio_path, language, device
+# @inputs: audio_path, language, device, compute_type, beam_size, temperature, initial_prompt, vad_params
 # @outputs: Transcript dictionary with segments and word-level timestamps
 # @sideEffects: Loads WhisperX model into memory (GPU/CPU), creates output artifacts
 # @errors: RuntimeError if whisperx/torch is missing, model download fails, or transcription fails
-# @see: STAGE:TRANSCRIBE
+# @see: STAGE:TRANSCRIBE, CONFIG:INITIAL_PROMPT
 class WhisperXAdapter:
     """Adapter for WhisperX ASR operations."""
 
@@ -26,13 +26,27 @@ class WhisperXAdapter:
         model: str = DEFAULT_MODEL,
         device: str = "cuda",
         language: Optional[str] = None,
+        compute_type: Optional[str] = None,
+        beam_size: int = 5,
+        temperature: float = 0.0,
+        condition_on_previous_text: bool = True,
+        initial_prompt: Optional[str] = None,
+        vad_filter: bool = True,
+        vad_min_silence_ms: int = 1000,
     ) -> None:
         """Initialize the WhisperX adapter.
 
         Args:
-            model: WhisperX model size (tiny, base, small, medium, large)
+            model: WhisperX model size (tiny, base, small, medium, large) or HF repo
             device: Device to use ("cuda" or "cpu")
             language: Language code (e.g., "en", "ru"). If None, auto-detect.
+            compute_type: Compute type (float16, int8_float16, int8). Auto-based on device if None.
+            beam_size: Decoding beam size
+            temperature: Decoding temperature
+            condition_on_previous_text: Condition on previous text for stable decoding
+            initial_prompt: Initial prompt string for terminology guidance
+            vad_filter: Enable VAD filtering
+            vad_min_silence_ms: VAD minimum silence in milliseconds
 
         Raises:
             RuntimeError: If required dependencies are missing or CUDA requested but unavailable
@@ -40,6 +54,13 @@ class WhisperXAdapter:
         self._model = model
         self._device = self._validate_device(device)
         self._language = language
+        self._compute_type = compute_type
+        self._beam_size = beam_size
+        self._temperature = temperature
+        self._condition_on_previous_text = condition_on_previous_text
+        self._initial_prompt = initial_prompt
+        self._vad_filter = vad_filter
+        self._vad_min_silence_ms = vad_min_silence_ms
         self._whisperx: Any = None
         self._model_loaded = False
 
@@ -76,8 +97,10 @@ class WhisperXAdapter:
                 f"Import error: {e}"
             ) from e
 
-        # Determine compute type based on device
-        compute_type = "float16" if self._device == "cuda" else "int8"
+        # Determine compute type: use configured or auto-based on device
+        compute_type = self._compute_type
+        if compute_type is None:
+            compute_type = "float16" if self._device == "cuda" else "int8"
 
         # Load model
         try:
@@ -90,7 +113,6 @@ class WhisperXAdapter:
             self._model_loaded = True
         except Exception as e:
             error_msg = str(e)
-            # Check for specific known errors and provide helpful messages
             if "LazyModule" in error_msg or "speechbrain" in error_msg:
                 raise RuntimeError(
                     f"Failed to load WhisperX model '{self._model}': {e}\n\n"
@@ -103,11 +125,11 @@ class WhisperXAdapter:
                     "  1. Run: python -m diarrhizer doctor\n"
                     "  2. Rebuild environment with: pip install -c requirements/constraints-stable.txt -r requirements/base.txt"
                 ) from e
-            elif "float16" in error_msg.lower():
+            elif "float16" in error_msg.lower() or "int8" in error_msg.lower():
                 raise RuntimeError(
                     f"Failed to load WhisperX model '{self._model}': {e}\n\n"
                     "This error indicates the compute type is incompatible with your device.\n"
-                    "For CPU, use --device cpu or ensure int8 compute type is available."
+                    "For CPU, try --asr-compute-type int8 or int8_float16."
                 ) from e
             else:
                 raise RuntimeError(
@@ -118,12 +140,26 @@ class WhisperXAdapter:
         self,
         audio_path: str | Path,
         language: Optional[str] = None,
+        compute_type: Optional[str] = None,
+        beam_size: Optional[int] = None,
+        temperature: Optional[float] = None,
+        condition_on_previous_text: Optional[bool] = None,
+        initial_prompt: Optional[str] = None,
+        vad_filter: Optional[bool] = None,
+        vad_min_silence_ms: Optional[int] = None,
     ) -> dict:
         """Transcribe audio file with word-level alignment.
 
         Args:
             audio_path: Path to audio file (WAV mono 16kHz preferred)
             language: Language code. Uses adapter default if not provided.
+            compute_type: Override compute type for this transcription
+            beam_size: Override beam size for this transcription
+            temperature: Override temperature for this transcription
+            condition_on_previous_text: Override condition flag for this transcription
+            initial_prompt: Override initial prompt for this transcription
+            vad_filter: Override VAD filter flag for this transcription
+            vad_min_silence_ms: Override VAD min silence for this transcription
 
         Returns:
             Dictionary containing:
@@ -141,23 +177,45 @@ class WhisperXAdapter:
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-        # Use provided language or fall back to adapter default
         lang = language or self._language
+        current_compute_type = compute_type or self._compute_type
+        current_beam_size = beam_size if beam_size is not None else self._beam_size
+        current_temperature = temperature if temperature is not None else self._temperature
+        current_condition = condition_on_previous_text if condition_on_previous_text is not None else self._condition_on_previous_text
+        current_initial_prompt = initial_prompt or self._initial_prompt
+        current_vad_filter = vad_filter if vad_filter is not None else self._vad_filter
+        current_vad_min_silence = vad_min_silence_ms or self._vad_min_silence_ms
 
-        # Load WhisperX if not already loaded
         self._load_whisperx()
 
         try:
-            # Load audio
             audio = self._whisperx.load_audio(str(audio_path))
 
-            # Transcribe
-            result = self._whisper_model.transcribe(
-                audio,
-                language=lang,
-                # Batch size for faster processing on GPU
-                batch_size=16 if self._device == "cuda" else 1,
-            )
+            # Build transcribe options
+            transcribe_options: dict = {
+                "language": lang,
+                "batch_size": 16 if self._device == "cuda" else 1,
+                "beam_size": current_beam_size,
+                "temperature": current_temperature,
+                "condition_on_previous_text": current_condition,
+            }
+            if current_initial_prompt:
+                transcribe_options["initial_prompt"] = current_initial_prompt
+
+            # VAD-related options
+            if current_vad_filter:
+                transcribe_options["vad_filter"] = True
+
+            # Load model with correct compute type if override
+            if current_compute_type and current_compute_type != self._compute_type:
+                # Need to reload model with new compute type
+                self._whisper_model = self._whisperx.load_model(
+                    self._model,
+                    device=self._device,
+                    compute_type=current_compute_type,
+                )
+
+            result = self._whisper_model.transcribe(audio, **transcribe_options)
 
             # Get detected language if auto-detected
             detected_language = result.get("language", lang or "unknown")
@@ -216,6 +274,13 @@ def transcribe_audio(
     language: Optional[str] = None,
     device: str = "cuda",
     model: str = "base",
+    compute_type: Optional[str] = None,
+    beam_size: int = 5,
+    temperature: float = 0.0,
+    condition_on_previous_text: bool = True,
+    initial_prompt: Optional[str] = None,
+    vad_filter: bool = True,
+    vad_min_silence_ms: int = 1000,
 ) -> dict:
     """Convenience function to transcribe audio using WhisperX.
 
@@ -224,11 +289,29 @@ def transcribe_audio(
         language: Language code or None for auto-detect
         device: Device to use ("cuda" or "cpu")
         model: WhisperX model size
+        compute_type: Compute type (float16, int8_float16, int8)
+        beam_size: Decoding beam size
+        temperature: Decoding temperature
+        condition_on_previous_text: Condition on previous text for stable decoding
+        initial_prompt: Initial prompt string for terminology guidance
+        vad_filter: Enable VAD filtering
+        vad_min_silence_ms: VAD minimum silence in milliseconds
 
     Returns:
         Transcript dictionary with text, segments, and words
     """
-    adapter = WhisperXAdapter(model=model, device=device, language=language)
+    adapter = WhisperXAdapter(
+        model=model,
+        device=device,
+        language=language,
+        compute_type=compute_type,
+        beam_size=beam_size,
+        temperature=temperature,
+        condition_on_previous_text=condition_on_previous_text,
+        initial_prompt=initial_prompt,
+        vad_filter=vad_filter,
+        vad_min_silence_ms=vad_min_silence_ms,
+    )
     return adapter.transcribe(audio_path, language=language)
 
 
