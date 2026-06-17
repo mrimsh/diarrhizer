@@ -116,8 +116,9 @@ def main() -> int:
     )
     run_parser.add_argument(
         "--asr-condition-on-previous-text",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        type=str,
+        default="true",
+        choices=["true", "false", "1", "0", "yes", "no"],
         help="Condition on previous text for stable decoding (default: true)"
     )
     run_parser.add_argument(
@@ -134,8 +135,9 @@ def main() -> int:
     )
     run_parser.add_argument(
         "--asr-vad-filter",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        type=str,
+        default="true",
+        choices=["true", "false", "1", "0", "yes", "no"],
         help="Enable VAD filtering (default: true)"
     )
     run_parser.add_argument(
@@ -192,6 +194,10 @@ def main() -> int:
             print(f"[CLI] Loaded speaker mapping: {speakers}")
         # [SEMANTIC-END] CONFIG:SPEAKERS_MAP
 
+        # Helper to convert string bool to actual bool
+        def _parse_bool(val: str) -> bool:
+            return val.lower() in ("true", "1", "yes")
+
         # [SEMANTIC-BEGIN] CONFIG:INITIAL_PROMPT
         # @purpose: Load initial prompt/glossary for ASR from file
         # @description: Reads a text file containing initial prompt for terminology guidance
@@ -227,10 +233,10 @@ def main() -> int:
                 asr_compute_type=args.asr_compute_type,
                 asr_beam_size=args.asr_beam_size,
                 asr_temperature=args.asr_temperature,
-                asr_condition_on_previous_text=args.asr_condition_on_previous_text,
+                asr_condition_on_previous_text=_parse_bool(args.asr_condition_on_previous_text),
                 asr_initial_prompt=initial_prompt,
                 asr_hotwords_file=args.asr_hotwords_file,
-                asr_vad_filter=args.asr_vad_filter,
+                asr_vad_filter=_parse_bool(args.asr_vad_filter),
                 asr_vad_min_silence_ms=args.asr_vad_min_silence_ms,
                 audio_profile=args.audio_profile,
             )

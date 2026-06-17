@@ -1,5 +1,6 @@
 """WhisperX adapter for ASR, alignment, and diarization."""
 
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -136,6 +137,40 @@ class WhisperXAdapter:
                     f"Failed to load WhisperX model '{self._model}': {e}"
                 ) from e
 
+    def _build_transcribe_kwargs(
+        self,
+        lang: Optional[str],
+        beam_size: int,
+        temperature: float,
+        condition_on_previous_text: bool,
+        initial_prompt: Optional[str],
+        vad_filter: bool,
+        vad_min_silence_ms: int,
+    ) -> dict:
+        """Build kwargs dict for transcribe(), filtered to supported parameters."""
+        supported = set()
+        try:
+            sig = inspect.signature(self._whisper_model.transcribe)
+            supported = set(sig.parameters.keys()) - {"audio", "self"}
+        except (TypeError, ValueError):
+            supported = set()
+
+        kwargs: dict = {"language": lang}
+
+        # Conditionally add supported options
+        for name, value in {
+            "beam_size": beam_size,
+            "temperature": temperature,
+            "condition_on_previous_text": condition_on_previous_text,
+            "initial_prompt": initial_prompt,
+            "vad_filter": vad_filter,
+            "vad_min_silence_ms": vad_min_silence_ms,
+        }.items():
+            if name in supported:
+                kwargs[name] = value
+
+        return kwargs
+
     def transcribe(
         self,
         audio_path: str | Path,
@@ -191,31 +226,43 @@ class WhisperXAdapter:
         try:
             audio = self._whisperx.load_audio(str(audio_path))
 
-            # Build transcribe options
-            transcribe_options: dict = {
-                "language": lang,
-                "batch_size": 16 if self._device == "cuda" else 1,
-                "beam_size": current_beam_size,
-                "temperature": current_temperature,
-                "condition_on_previous_text": current_condition,
-            }
-            if current_initial_prompt:
-                transcribe_options["initial_prompt"] = current_initial_prompt
-
-            # VAD-related options
-            if current_vad_filter:
-                transcribe_options["vad_filter"] = True
-
             # Load model with correct compute type if override
             if current_compute_type and current_compute_type != self._compute_type:
-                # Need to reload model with new compute type
                 self._whisper_model = self._whisperx.load_model(
                     self._model,
                     device=self._device,
                     compute_type=current_compute_type,
                 )
 
-            result = self._whisper_model.transcribe(audio, **transcribe_options)
+            # Build options by introspecting transcribe() signature
+            transcribe_kwargs = self._build_transcribe_kwargs(
+                lang=lang,
+                beam_size=current_beam_size,
+                temperature=current_temperature,
+                condition_on_previous_text=current_condition,
+                initial_prompt=current_initial_prompt,
+                vad_filter=current_vad_filter,
+                vad_min_silence_ms=current_vad_min_silence,
+            )
+
+            try:
+                result = self._whisper_model.transcribe(
+                    audio,
+                    **transcribe_kwargs,
+                )
+            except TypeError as e:
+                if "unexpected keyword argument" in str(e):
+                    logging.warning(
+                        "Some transcribe options not supported by this backend, "
+                        "retrying with minimal options. Error: %s", e
+                    )
+                    result = self._whisper_model.transcribe(
+                        audio,
+                        language=lang,
+                        batch_size=16 if self._device == "cuda" else 1,
+                    )
+                else:
+                    raise
 
             # Get detected language if auto-detected
             detected_language = result.get("language", lang or "unknown")

@@ -297,19 +297,35 @@ python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 
 | `--max-speakers` | int | `10` | Maximum number of speakers |
 | `--lang` | string | `"auto"` | Language code or `"auto"` for detection |
 | `--device` | choice | `"cuda"` | Device: `cuda` or `cpu` |
-| `--asr-model` | string | `"base"` | WhisperX model (or HF repo like koekaverna/faster-whisper-podlodka-turbo) |
+| `--asr-model` | string | `"base"` | WhisperX model (or HF repo) |
 | `--asr-compute-type` | string | auto | Compute type: `float16`, `int8_float16`, `int8` |
-| `--asr-beam-size` | int | `5` | Decoding beam size for quality/speed trade-off |
-| `--asr-temperature` | float | `0.0` | Decoding temperature for stability |
-| `--asr-condition-on-previous-text` | bool | `true` | Prevent repeats and hallucinations |
-| `--asr-initial-prompt-file` | string | — | Path to glossary/prompt file for terminology |
+| `--asr-beam-size` | int | `5` | Decoding beam size |
+| `--asr-temperature` | float | `0.0` | Decoding temperature |
+| `--asr-condition-on-previous-text` | string | `"true"` | previous text conditioning (true/false) |
+| `--asr-initial-prompt-file` | string | — | Path to prompt/glossary file |
 | `--asr-hotwords-file` | string | — | Path to hotwords file (not yet implemented) |
-| `--asr-vad-filter` | bool | `true` | Enable VAD filtering |
-| `--asr-vad-min-silence-ms` | int | `1000` | VAD minimum silence in milliseconds |
-| `--audio-profile` | choice | `"raw"` | Audio preprocessing: `raw`, `voice-call`, `denoise-light`, `split-stereo` |
+| `--asr-vad-filter` | string | `"true"` | Enable VAD filtering (true/false) |
+| `--asr-vad-min-silence-ms` | int | `1000` | VAD minimum silence (ms) |
+| `--audio-profile` | choice | `"raw"` | Audio preprocessing |
 | `--force-stage` | choice | — | Force recompute specific stage |
 
 > **Note:** Pipeline runs: convert → transcribe → diarize → merge → export.
+
+**Example:**
+
+```powershell
+python -m diarrhizer run "meeting.mp4" `
+  --out ".\out" `
+  --min-speakers 2 --max-speakers 3 `
+  --lang ru `
+  --device cuda `
+  --asr-model "koekaverna/faster-whisper-podlodka-turbo" `
+  --asr-compute-type float16 `
+  --asr-beam-size 5 `
+  --asr-condition-on-previous-text false `
+  --asr-initial-prompt-file ".\glossaries\default_ru.txt" `
+  --audio-profile voice-call
+```
 
 ---
 
