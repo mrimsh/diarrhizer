@@ -164,15 +164,34 @@ All options:
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `input` | Path to input media file | (required) |
-| `--out` | Output directory | `./out` |
+| `input` | Path to input media file | (required, unless `--job-dir` resumes a job that already recorded it) |
+| `--out` | Output directory | `./out` (ignored when `--job-dir` is given) |
+| `--job-dir` | Resume an existing job directory instead of starting a new job | none |
 | `--min-speakers` | Minimum number of speakers | 1 |
 | `--max-speakers` | Maximum number of speakers | 10 |
 | `--lang` | Language code or `auto` | `auto` |
 | `--device` | Device to use (`cuda` or `cpu`) | `cuda` |
 | `--force` | Force recompute all stages | false |
 | `--force-stage` | Force recompute specific stage | none |
+| `--from-stage` | Start the pipeline at this stage, skipping earlier ones (their outputs must already exist on disk) | none (starts at `convert`) |
+| `--to-stage` | Stop the pipeline after this stage, skipping later ones | none (runs through `export`) |
 | `--speakers` | Path to JSON speaker mapping file | none |
+
+---
+
+### Resuming a Job / Re-running Only Part of the Pipeline
+
+`--job-dir` points the CLI at an existing job folder instead of starting a new one. If that job already went through `convert`, its `meta/run.json` has the original input path recorded, so `input` can be omitted entirely. Combined with `--from-stage`/`--to-stage`, this lets you re-run just a slice of the pipeline without recomputing the expensive stages (ASR, diarization):
+
+```powershell
+# Only re-export (e.g. after editing speakers.json) - no ASR/diarization recompute:
+python -m diarrhizer run --job-dir ".\out\meeting_20260101_120000" --from-stage export --speakers ".\speakers.json"
+
+# Resume a job that stopped partway through, starting at merge:
+python -m diarrhizer run --job-dir ".\out\meeting_20260101_120000" --from-stage merge
+```
+
+Stages outside the `--from-stage`/`--to-stage` range are skipped entirely (not even checked); stages inside it still use the normal cache (only recomputed if their inputs changed or `--force`/`--force-stage` was passed). If the first stage in range doesn't have the artifacts it needs on disk yet, the command fails with a clear error naming the missing file instead of a confusing crash.
 
 ---
 
@@ -219,7 +238,7 @@ Each run will create a job-specific folder inside `--out`, containing artifacts 
 This allows:
 
 * Reusing cached intermediate results (avoid recomputing heavy stages)
-* Re-exporting in new formats without rerunning ASR/diarization
+* Re-exporting in new formats without rerunning ASR/diarization, via `--job-dir <job folder> --from-stage export` (see [Resuming a Job](#resuming-a-job--re-running-only-part-of-the-pipeline))
 
 ---
 

@@ -1,5 +1,6 @@
 """Pipeline runner for orchestrating stage execution."""
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -13,11 +14,16 @@ logger = logging.getLogger(__name__)
 
 # [SEMANTIC-BEGIN] PIPELINE:RUNNER
 # @purpose: Orchestrate pipeline stages execution with caching and artifact management
-# @description: Runs a sequence of stages, manages job directory, handles idempotency. Supports force options to override caching.
-# @inputs: input_path, config, out_dir, stages, force, force_stage
+# @description: Runs a sequence of stages, manages job directory, handles idempotency. Supports
+#   force options to override caching, --job-dir to resume an existing job directory (recovering
+#   input_path from a prior convert stage's meta/run.json if not given explicitly), and
+#   from_stage/to_stage to skip stages outside a range entirely. Stages outside the range are
+#   never touched (not even cache-checked); stages inside it still go through the normal
+#   is_stale-based caching, not an unconditional recompute.
+# @inputs: input_path, config, out_dir, stages, job_dir, force, force_stage, from_stage, to_stage
 # @outputs: Artifacts on disk per stage definitions
 # @sideEffects: Creates job directory, writes artifacts to disk, deletes artifacts when force is used
-# @errors: RuntimeError, FileNotFoundError
+# @errors: RuntimeError, FileNotFoundError, ValueError
 # @see: STAGE:CONVERT, STAGE:TRANSCRIBE, ARTIFACTS:LAYOUT, PIPELINE:CACHE, CONFIG:PIPELINE
 class StageProtocol(Protocol):
     """Protocol for pipeline stages."""
@@ -65,6 +71,9 @@ class PipelineConfig:
         device: Device to use ("cuda" or "cpu")
         force: If True, recompute all stages regardless of cache
         force_stage: If set, only force a specific stage to recompute
+        from_stage: If set, skip every stage before this one (its own artifacts
+            must already exist on disk, or be reachable via job resume)
+        to_stage: If set, skip every stage after this one
         speakers: Optional speaker name mapping {speaker_id: display_name}
         asr_model: WhisperX model size or HF repo
         asr_compute_type: Compute type (float16, int8_float16, int8)
@@ -86,6 +95,8 @@ class PipelineConfig:
     device: str = "cuda"
     force: bool = False
     force_stage: str | None = None
+    from_stage: str | None = None
+    to_stage: str | None = None
     speakers: dict | None = None
     asr_model: str = "base"
     asr_compute_type: str | None = None
@@ -139,16 +150,36 @@ def generate_job_id(input_path: str | Path) -> str:
 # [SEMANTIC-END] PIPELINE:RUNNER
 
 
+def _read_recorded_input_path(job_dir: Path) -> Path | None:
+    """Recover the original input file path from a prior convert stage's
+    meta/run.json, so resuming a job dir via --job-dir doesn't require
+    re-passing the input file. Returns None if it can't be recovered.
+    """
+    meta_path = job_dir / "meta" / "run.json"
+    if not meta_path.exists():
+        return None
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    recorded = data.get("input_path")
+    return Path(recorded) if recorded else None
+
+
 def run_pipeline(
-    input_path: str | Path,
+    *,
+    input_path: str | Path | None = None,
     out_dir: str | Path,
     stages: Sequence[StageProtocol],
+    job_dir: str | Path | None = None,
     min_speakers: int = PipelineConfig.min_speakers,
     max_speakers: int = PipelineConfig.max_speakers,
     language: str = PipelineConfig.language,
     device: str = PipelineConfig.device,
     force: bool = PipelineConfig.force,
     force_stage: str | None = PipelineConfig.force_stage,
+    from_stage: str | None = PipelineConfig.from_stage,
+    to_stage: str | None = PipelineConfig.to_stage,
     speakers: dict | None = PipelineConfig.speakers,
     asr_model: str = PipelineConfig.asr_model,
     asr_compute_type: str | None = PipelineConfig.asr_compute_type,
@@ -164,15 +195,20 @@ def run_pipeline(
     """Run the processing pipeline for a media file.
 
     Args:
-        input_path: Path to input media file
-        out_dir: Base output directory
+        input_path: Path to input media file. Optional when job_dir resumes a
+            job that already recorded it in meta/run.json (see _read_recorded_input_path).
+        out_dir: Base output directory (ignored when job_dir is given)
         stages: Sequence of pipeline stages to run
+        job_dir: Resume this existing job directory instead of creating a new
+            one from input_path + a timestamp
         min_speakers: Minimum number of speakers
         max_speakers: Maximum number of speakers
         language: Language code or "auto"
         device: Device to use ("cuda" or "cpu")
         force: If True, recompute all stages regardless of cache
         force_stage: If set, only force a specific stage to recompute
+        from_stage: If set, skip every stage before this one entirely
+        to_stage: If set, skip every stage after this one entirely
         speakers: Optional speaker name mapping {speaker_id: display_name}
         asr_model: WhisperX model size or HF repo
         asr_compute_type: Compute type (float16, int8_float16, int8)
@@ -188,12 +224,8 @@ def run_pipeline(
     Returns:
         Dictionary with pipeline execution results
     """
-    input_path = Path(input_path)
+    input_path = Path(input_path) if input_path is not None else None
     out_dir = Path(out_dir)
-
-    # Validate input exists
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input file not found: {input_path}")
 
     # Validate speaker range
     if min_speakers > max_speakers:
@@ -201,19 +233,76 @@ def run_pipeline(
             f"min_speakers ({min_speakers}) cannot be greater than max_speakers ({max_speakers})"
         )
 
-    # Validate out_dir is accessible
-    out_dir = Path(out_dir)
-    if not out_dir.exists() and not out_dir.parent.exists():
-        raise FileNotFoundError(
-            f"Output directory parent does not exist: {out_dir.parent}"
+    # Resolve the requested stage range against the stages actually supplied
+    # (not a hardcoded stage list), so a caller-provided subset - e.g. tests
+    # running just [MergeStage(), ExportStage()] - validates and skips
+    # correctly too.
+    stage_names = [getattr(s, "NAME", None) for s in stages]
+
+    def _stage_index(name: str | None, flag: str) -> int | None:
+        if name is None:
+            return None
+        if name not in stage_names:
+            raise ValueError(
+                f"Unknown {flag} '{name}'. Available stages: {', '.join(stage_names)}"
+            )
+        return stage_names.index(name)
+
+    from_index = _stage_index(from_stage, "--from-stage")
+    from_index = 0 if from_index is None else from_index
+    to_index = _stage_index(to_stage, "--to-stage")
+    to_index = len(stage_names) - 1 if to_index is None else to_index
+    if stage_names and from_index > to_index:
+        raise ValueError(
+            f"--from-stage '{from_stage}' comes after --to-stage '{to_stage}' in "
+            f"pipeline order ({', '.join(stage_names)})"
         )
+    convert_in_range = "convert" in stage_names[from_index:to_index + 1]
 
-    # Generate job ID and create job directory
-    job_id = generate_job_id(input_path)
-    job_dir = out_dir / job_id
+    # Resolve the job directory: either an existing one to resume (--job-dir)
+    # or a fresh one named from the input file + timestamp. Each branch
+    # validates input_path *before* creating anything on disk where possible
+    # (matches the pre-existing "fail fast, touch nothing" behavior); the
+    # --job-dir branch is the one exception, since recovering input_path from
+    # meta/run.json requires the directory to already be readable.
+    if job_dir is not None:
+        job_dir = Path(job_dir)
+        job_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create output directory if needed
-    job_dir.mkdir(parents=True, exist_ok=True)
+        # Recover the original input path from a prior run's meta/run.json
+        # when resuming without re-passing it explicitly.
+        if input_path is None:
+            input_path = _read_recorded_input_path(job_dir)
+            if input_path is None:
+                raise FileNotFoundError(
+                    f"input_path is required: none was given, and {job_dir / 'meta' / 'run.json'} "
+                    "does not record one (the convert stage must run at least once first)."
+                )
+
+        # The original media file only needs to exist on disk when the
+        # convert stage is actually going to run - later stages only read
+        # job_dir artifacts, and export only carries this path through as
+        # descriptive text.
+        if convert_in_range and not input_path.exists():
+            raise FileNotFoundError(f"Input file not found: {input_path}")
+    else:
+        if not out_dir.exists() and not out_dir.parent.exists():
+            raise FileNotFoundError(
+                f"Output directory parent does not exist: {out_dir.parent}"
+            )
+        if input_path is None:
+            raise FileNotFoundError(
+                "input_path is required to start a new job (or pass job_dir to resume an existing one)"
+            )
+        # Unlike the --job-dir resume branch, a brand new job has no
+        # artifacts yet regardless of stage range, so the input file is
+        # always required to exist here - not just when convert is in range.
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input file not found: {input_path}")
+        job_dir = out_dir / generate_job_id(input_path)
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+    job_id = job_dir.name
 
     # Build job configuration
     config = PipelineConfig(
@@ -225,6 +314,8 @@ def run_pipeline(
         device=device,
         force=force,
         force_stage=force_stage,
+        from_stage=from_stage,
+        to_stage=to_stage,
         speakers=speakers,
         asr_model=asr_model,
         asr_compute_type=asr_compute_type,
@@ -254,6 +345,8 @@ def run_pipeline(
     print(f"Language: {language}")
     print(f"Device: {device}")
     print(f"Speakers: {min_speakers}-{max_speakers}")
+    if from_stage or to_stage:
+        print(f"Stage range: {from_stage or stage_names[0]} -> {to_stage or stage_names[-1]}")
     if force:
         print(f"FORCE: Recomputing all stages")
     elif force_stage:
@@ -264,8 +357,18 @@ def run_pipeline(
     results: list[dict] = []
     start_time = datetime.now()
 
-    for stage in stages:
+    for index, stage in enumerate(stages):
         stage_name = getattr(stage, "NAME", "unknown")
+
+        # Stages outside [from_stage, to_stage] are skipped entirely - not
+        # run, not cache-checked - as opposed to stages inside the range,
+        # which still go through the normal is_stale-based caching below
+        # rather than being unconditionally recomputed.
+        if index < from_index or index > to_index:
+            print(f"\n--- Stage: {stage_name} (skipped, outside stage range) ---")
+            results.append({"stage": stage_name, "status": "skipped"})
+            continue
+
         print(f"\n--- Stage: {stage_name} ---")
 
         # Determine if this stage should be forced

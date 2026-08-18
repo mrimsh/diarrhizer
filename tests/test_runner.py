@@ -179,3 +179,170 @@ def test_global_force_recomputes_every_stage(fixed_job):
     result2 = _run(input_file, out_dir, force=True)
 
     assert _statuses(result2) == {"merge": "completed", "export": "completed"}
+
+
+# --- run_pipeline: --job-dir resume ----------------------------------------
+
+def test_job_dir_resume_recovers_input_path_from_meta(tmp_path):
+    """--job-dir lets a run be resumed without re-passing the input file, by
+    recovering it from a prior convert stage's meta/run.json - the mechanism
+    that makes e.g. --from-stage export a real "re-export only" feature.
+    """
+    input_file = tmp_path / "input.wav"
+    input_file.write_bytes(b"fake")
+    out_dir = tmp_path / "out"
+    job_dir = out_dir / "resumed_job"
+    _seed_job_dir(job_dir)
+    (job_dir / "meta").mkdir(parents=True, exist_ok=True)
+    (job_dir / "meta" / "run.json").write_text(
+        json.dumps({"input_path": str(input_file)}), encoding="utf-8"
+    )
+
+    result = run_pipeline(
+        out_dir=out_dir,
+        stages=[MergeStage(), ExportStage()],
+        job_dir=job_dir,
+    )
+
+    assert result["job_id"] == "resumed_job"
+    assert _statuses(result) == {"merge": "completed", "export": "completed"}
+
+
+def test_job_dir_resume_without_input_or_meta_raises_clear_error(tmp_path):
+    out_dir = tmp_path / "out"
+    job_dir = out_dir / "no_meta_job"
+    _seed_job_dir(job_dir)
+
+    with pytest.raises(FileNotFoundError, match="input_path is required"):
+        run_pipeline(
+            out_dir=out_dir,
+            stages=[MergeStage(), ExportStage()],
+            job_dir=job_dir,
+        )
+
+
+def test_job_dir_explicit_input_overrides_meta(tmp_path):
+    """An explicitly passed input_path wins over whatever meta/run.json
+    recorded, so a moved/renamed source file can be re-pointed at.
+    """
+    old_input = tmp_path / "old.wav"
+    old_input.write_bytes(b"fake")
+    new_input = tmp_path / "new.wav"
+    new_input.write_bytes(b"fake")
+    out_dir = tmp_path / "out"
+    job_dir = out_dir / "repointed_job"
+    _seed_job_dir(job_dir)
+    (job_dir / "meta").mkdir(parents=True, exist_ok=True)
+    (job_dir / "meta" / "run.json").write_text(
+        json.dumps({"input_path": str(old_input)}), encoding="utf-8"
+    )
+
+    run_pipeline(
+        input_path=new_input,
+        out_dir=out_dir,
+        stages=[MergeStage(), ExportStage()],
+        job_dir=job_dir,
+    )
+
+    data = json.loads((job_dir / "export" / "result.json").read_text(encoding="utf-8"))
+    assert data["metadata"]["input_file"] == str(new_input)
+
+
+# --- run_pipeline: --from-stage / --to-stage -------------------------------
+
+def test_to_stage_merge_skips_export(fixed_job):
+    input_file, out_dir, job_dir = fixed_job
+    _run(input_file, out_dir)
+
+    result2 = _run(input_file, out_dir, to_stage="merge")
+
+    assert _statuses(result2) == {"merge": "cached", "export": "skipped"}
+
+
+def test_from_stage_export_skips_merge(fixed_job):
+    input_file, out_dir, job_dir = fixed_job
+    _run(input_file, out_dir)
+
+    result2 = _run(input_file, out_dir, from_stage="export")
+
+    assert _statuses(result2) == {"merge": "skipped", "export": "cached"}
+
+
+class _ExplodingStage:
+    """Stub earlier-than-merge stage that fails the test if the runner ever
+    calls it. Used to prove --from-stage genuinely skips earlier stages
+    entirely (never even cache-checks them), rather than merely happening to
+    start at index 0 in a reduced pipeline.
+    """
+
+    NAME = "explode"
+
+    def run(self, job):
+        raise AssertionError("should have been skipped by --from-stage")
+
+    def is_cache_valid(self, job_dir):
+        raise AssertionError("should have been skipped by --from-stage")
+
+    def get_artifact_paths(self, job_dir):
+        return {}
+
+    def get_output_paths(self, job_dir):
+        return {}
+
+
+def test_from_stage_merge_skips_earlier_stage_and_fails_clearly_on_empty_job_dir(tmp_path):
+    """Requirement: selecting a stage range whose first active stage's
+    job-dir inputs don't exist yet must fail with a clear, actionable error
+    (e.g. "please run the transcribe stage first") - not a confusing crash -
+    while genuinely skipping (never calling) the stages before it.
+    """
+    input_file = tmp_path / "input.wav"
+    input_file.write_bytes(b"fake")
+    out_dir = tmp_path / "out"
+    job_dir = out_dir / "empty_job"
+    job_dir.mkdir(parents=True)
+
+    with pytest.raises(FileNotFoundError, match="Transcript not found"):
+        run_pipeline(
+            input_path=input_file,
+            out_dir=out_dir,
+            stages=[_ExplodingStage(), MergeStage(), ExportStage()],
+            job_dir=job_dir,
+            from_stage="merge",
+        )
+
+
+def test_from_stage_after_to_stage_raises_value_error(fixed_job):
+    input_file, out_dir, job_dir = fixed_job
+
+    with pytest.raises(ValueError, match="--from-stage"):
+        _run(input_file, out_dir, from_stage="export", to_stage="merge")
+
+
+def test_unknown_stage_name_not_in_supplied_stages_raises_value_error(fixed_job):
+    """"convert" is a real pipeline stage, but this test's reduced pipeline
+    (like _run's) only supplies [MergeStage(), ExportStage()], so it must be
+    rejected as unknown *for this stages sequence* rather than silently
+    accepted - the validation is against the stages actually passed in, not
+    a hardcoded stage list.
+    """
+    input_file, out_dir, job_dir = fixed_job
+
+    with pytest.raises(ValueError, match="Unknown --from-stage 'convert'"):
+        _run(input_file, out_dir, from_stage="convert")
+
+
+def test_force_stage_outside_range_has_no_effect(fixed_job):
+    """--force-stage naming a stage that --from-stage/--to-stage excludes
+    from the active range must not touch that stage at all: range-skipping
+    happens before the should_force check in the runner loop.
+    """
+    input_file, out_dir, job_dir = fixed_job
+    _run(input_file, out_dir)
+    segments_path = job_dir / "merged" / "segments.json"
+    mtime_before = segments_path.stat().st_mtime
+
+    result2 = _run(input_file, out_dir, from_stage="export", force_stage="merge")
+
+    assert _statuses(result2) == {"merge": "skipped", "export": "cached"}
+    assert segments_path.stat().st_mtime == mtime_before

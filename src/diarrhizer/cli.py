@@ -7,6 +7,10 @@ from pathlib import Path
 
 from diarrhizer.diagnostics.doctor import run_doctor_checks
 
+# Pipeline stage names in execution order. Shared by --force-stage,
+# --from-stage, and --to-stage so the three choices lists can't drift apart.
+STAGE_NAMES = ["convert", "transcribe", "diarize", "merge", "export"]
+
 
 # [SEMANTIC-BEGIN] CLI:ENTRY
 # @purpose: CLI entry point for Diarrhizer commands
@@ -44,12 +48,21 @@ def main() -> int:
     )
     run_parser.add_argument(
         "input",
-        help="Path to input media file"
+        nargs="?",
+        default=None,
+        help="Path to input media file (optional if --job-dir resumes a job that already recorded it)"
     )
     run_parser.add_argument(
         "--out",
         default="./out",
-        help="Output directory (default: ./out)"
+        help="Output directory (default: ./out; ignored when --job-dir is given)"
+    )
+    run_parser.add_argument(
+        "--job-dir",
+        type=str,
+        default=None,
+        help="Resume an existing job directory instead of starting a new job "
+             "(e.g. out/meeting_20260101_120000)"
     )
     run_parser.add_argument(
         "--min-speakers",
@@ -82,8 +95,24 @@ def main() -> int:
     run_parser.add_argument(
         "--force-stage",
         type=str,
-        choices=["convert", "transcribe", "diarize", "merge", "export"],
+        choices=STAGE_NAMES,
         help="Force recompute a specific stage (convert, transcribe, diarize, merge, export)"
+    )
+    run_parser.add_argument(
+        "--from-stage",
+        type=str,
+        choices=STAGE_NAMES,
+        default=None,
+        help="Start the pipeline at this stage, skipping earlier stages entirely "
+             "(their outputs must already exist on disk, e.g. via --job-dir)"
+    )
+    run_parser.add_argument(
+        "--to-stage",
+        type=str,
+        choices=STAGE_NAMES,
+        default=None,
+        help="Stop the pipeline after this stage, skipping later stages entirely "
+             "(e.g. --from-stage export --to-stage export to only re-export)"
     )
     run_parser.add_argument(
         "--speakers",
@@ -164,8 +193,12 @@ def main() -> int:
     elif args.command == "run":
         # [SEMANTIC-BEGIN] CLI:RUN
         # @purpose: Run the processing pipeline for a media file
-        # @description: Orchestrates FFmpeg conversion, ASR, diarization, and export
-        # @inputs: args.input, args.out, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.speakers, ASR params, audio_profile
+        # @description: Orchestrates FFmpeg conversion, ASR, diarization, and export. --job-dir
+        #   resumes an existing job directory (args.input becomes optional if that job already
+        #   recorded it in meta/run.json); --from-stage/--to-stage select a stage range to run,
+        #   skipping stages outside it entirely - e.g. --from-stage export re-exports without
+        #   recomputing ASR/diarization.
+        # @inputs: args.input, args.out, args.job_dir, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.from_stage, args.to_stage, args.speakers, ASR params, audio_profile
         # @outputs: Artifacts in out/ directory
         # @sideEffects: Creates job directory, writes artifacts to disk
         # @errors: Exits with code 1 on failure
@@ -234,12 +267,15 @@ def main() -> int:
                 input_path=args.input,
                 out_dir=args.out,
                 stages=[ConvertStage(), TranscribeStage(), DiarizeStage(), MergeStage(), ExportStage()],
+                job_dir=args.job_dir,
                 min_speakers=args.min_speakers,
                 max_speakers=args.max_speakers,
                 language=args.lang,
                 device=args.device,
                 force=args.force,
                 force_stage=args.force_stage,
+                from_stage=args.from_stage,
+                to_stage=args.to_stage,
                 speakers=speakers,
                 asr_model=args.asr_model,
                 asr_compute_type=args.asr_compute_type,

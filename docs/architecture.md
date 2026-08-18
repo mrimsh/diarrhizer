@@ -116,6 +116,7 @@ Planned layout:
 out/
   <job_id>/
     meta/                 # metadata (config, versions, timestamps, ASR params)
+      run.json            # written by convert; records the original input_path
     audio/
       normalized.wav      # or normalized_left.wav/normalized_right.wav for split-stereo
     asr/
@@ -134,6 +135,8 @@ out/
 
 - filename + timestamp, or
 - hash (input + config) — if reproducibility/deduplication is important.
+
+`meta/run.json`'s recorded `input_path` is also what `run --job-dir <dir>` reads to make the `input` argument optional when resuming a job (see [Section 8](#8-cli-commands)).
 
 ---
 
@@ -291,8 +294,9 @@ python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `input` | positional | — | Path to input media file (required) |
-| `--out` | string | `./out` | Output directory |
+| `input` | positional | — | Path to input media file (required, unless `--job-dir` resumes a job that already recorded it in `meta/run.json`) |
+| `--out` | string | `./out` | Output directory (ignored when `--job-dir` is given) |
+| `--job-dir` | string | — | Resume an existing job directory instead of starting a new one, e.g. `out/meeting_20260101_120000` |
 | `--min-speakers` | int | `1` | Minimum number of speakers |
 | `--max-speakers` | int | `10` | Maximum number of speakers |
 | `--lang` | string | `"auto"` | Language code or `"auto"` for detection |
@@ -308,8 +312,11 @@ python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 
 | `--asr-vad-min-silence-ms` | int | `1000` | VAD minimum silence (ms) |
 | `--audio-profile` | choice | `"raw"` | Audio preprocessing |
 | `--force-stage` | choice | — | Force recompute specific stage |
+| `--from-stage` | choice | — | Start at this stage, skipping earlier ones entirely (their outputs must already be on disk) |
+| `--to-stage` | choice | — | Stop after this stage, skipping later ones entirely |
 
 > **Note:** Pipeline runs: convert → transcribe → diarize → merge → export.
+> `--from-stage`/`--to-stage` select a sub-range of that order (choices: `convert`, `transcribe`, `diarize`, `merge`, `export`); stages outside the range are skipped entirely (not even cache-checked), while stages inside it keep the normal cache behavior instead of being unconditionally recomputed. Combine with `--job-dir` to resume a job partway through - e.g. `--job-dir out/meeting_20260101_120000 --from-stage export` re-exports without recomputing ASR/diarization.
 
 **Example:**
 
