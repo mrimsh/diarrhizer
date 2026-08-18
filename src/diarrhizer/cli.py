@@ -30,6 +30,14 @@ def main() -> int:
     )
 
     # Run command
+    #
+    # NOTE on defaults: the literals below intentionally duplicate
+    # PipelineConfig's field defaults (src/diarrhizer/pipeline/runner.py).
+    # They can't just reference PipelineConfig directly: argparse needs
+    # concrete values for its own --help text, and two of them
+    # (--asr-condition-on-previous-text, --asr-vad-filter) are parsed here as
+    # true/false strings while PipelineConfig stores real bools. Keep these in
+    # sync with PipelineConfig by hand when either changes.
     run_parser = subparsers.add_parser(
         "run",
         help="Process a media file"
@@ -161,7 +169,7 @@ def main() -> int:
         # @outputs: Artifacts in out/ directory
         # @sideEffects: Creates job directory, writes artifacts to disk
         # @errors: Exits with code 1 on failure
-        # @see: PIPELINE:RUNNER, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, STAGE:MERGE, STAGE:EXPORT
+        # @see: PIPELINE:RUNNER, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, STAGE:MERGE, STAGE:EXPORT, CONFIG:PIPELINE
 
         # Imported lazily (not at module level) so that `doctor` never pulls in
         # torch/whisperx as a side effect - it needs to stay import-safe to diagnose

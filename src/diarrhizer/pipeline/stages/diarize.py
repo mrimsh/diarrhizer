@@ -107,9 +107,9 @@ class DiarizeStage:
         diar_output.parent.mkdir(parents=True, exist_ok=True)
 
         # Configure adapter with job-specific settings
-        device = config.get("device", "cuda")
-        min_speakers = config.get("min_speakers", 1)
-        max_speakers = config.get("max_speakers", 10)
+        device = config.device
+        min_speakers = config.min_speakers
+        max_speakers = config.max_speakers
 
         # Apply configuration (resets adapter if settings changed)
         self.configure(

@@ -61,7 +61,7 @@ class ConvertStage:
         print(f"[{self.NAME}] Converting: {input_path}")
 
         # Get audio profile from config
-        audio_profile = config.get("audio_profile", "raw")
+        audio_profile = config.audio_profile
 
         # Build output paths
         audio_output = job_dir / self.NORMALIZED_WAV
@@ -108,14 +108,14 @@ class ConvertStage:
             "end_time": end_time.isoformat(),
             "duration_seconds": duration,
             "pipeline_config": {
-                "min_speakers": config.get("min_speakers"),
-                "max_speakers": config.get("max_speakers"),
-                "language": config.get("language"),
-                "device": config.get("device"),
-                "asr_model": config.get("asr_model"),
-                "asr_compute_type": config.get("asr_compute_type"),
-                "asr_beam_size": config.get("asr_beam_size"),
-                "asr_temperature": config.get("asr_temperature"),
+                "min_speakers": config.min_speakers,
+                "max_speakers": config.max_speakers,
+                "language": config.language,
+                "device": config.device,
+                "asr_model": config.asr_model,
+                "asr_compute_type": config.asr_compute_type,
+                "asr_beam_size": config.asr_beam_size,
+                "asr_temperature": config.asr_temperature,
                 "audio_profile": audio_profile,
             },
         }

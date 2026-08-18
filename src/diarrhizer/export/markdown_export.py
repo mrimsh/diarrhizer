@@ -2,9 +2,12 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from diarrhizer.export.speakers import resolve_speaker_name
+
+if TYPE_CHECKING:
+    from diarrhizer.pipeline.runner import PipelineConfig
 
 
 # [SEMANTIC-BEGIN] EXPORT:MARKDOWN
@@ -14,10 +17,10 @@ from diarrhizer.export.speakers import resolve_speaker_name
 # @outputs: Markdown-formatted string
 # @sideEffects: None (pure function)
 # @errors: None
-# @see: STAGE:EXPORT, EXPORT:JSON
+# @see: STAGE:EXPORT, EXPORT:JSON, CONFIG:PIPELINE
 def export_to_markdown(
     segments: list[dict[str, Any]],
-    config: dict[str, Any],
+    config: "PipelineConfig",
     input_path: str,
 ) -> str:
     """Export segments to Markdown format.
@@ -29,13 +32,13 @@ def export_to_markdown(
 
     Args:
         segments: List of segment dictionaries with start, end, speaker_id, text
-        config: Pipeline configuration dictionary
+        config: Pipeline configuration
         input_path: Original input file path
 
     Returns:
         Markdown-formatted transcript string
     """
-    speakers = config.get("speakers")
+    speakers = config.speakers
     lines: list[str] = []
 
     # Header with metadata
@@ -43,8 +46,8 @@ def export_to_markdown(
     lines.append("")
     lines.append(f"**Input:** {input_path}")
     lines.append(f"**Generated:** {datetime.now().isoformat()}")
-    lines.append(f"**Language:** {config.get('language', 'auto')}")
-    lines.append(f"**Device:** {config.get('device', 'cpu')}")
+    lines.append(f"**Language:** {config.language}")
+    lines.append(f"**Device:** {config.device}")
     lines.append("")
 
     # Segments

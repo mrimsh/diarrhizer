@@ -149,21 +149,21 @@ class TranscribeStage:
         transcript_output.parent.mkdir(parents=True, exist_ok=True)
 
         # Configure adapter with job-specific settings
-        language = config.get("language", "auto")
-        device = config.get("device", "cuda")
+        language = config.language
+        device = config.device
 
         # Apply configuration (resets adapter if settings changed)
         self.configure(
             language=language,
             device=device,
-            model=config.get("asr_model"),
-            compute_type=config.get("asr_compute_type"),
-            beam_size=config.get("asr_beam_size"),
-            temperature=config.get("asr_temperature"),
-            condition_on_previous_text=config.get("asr_condition_on_previous_text"),
-            initial_prompt=config.get("asr_initial_prompt"),
-            vad_filter=config.get("asr_vad_filter"),
-            vad_min_silence_ms=config.get("asr_vad_min_silence_ms"),
+            model=config.asr_model,
+            compute_type=config.asr_compute_type,
+            beam_size=config.asr_beam_size,
+            temperature=config.asr_temperature,
+            condition_on_previous_text=config.asr_condition_on_previous_text,
+            initial_prompt=config.asr_initial_prompt,
+            vad_filter=config.asr_vad_filter,
+            vad_min_silence_ms=config.asr_vad_min_silence_ms,
         )
 
         # Run transcription

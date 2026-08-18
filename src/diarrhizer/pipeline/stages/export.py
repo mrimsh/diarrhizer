@@ -73,7 +73,7 @@ class ExportStage:
         metadata = segments_data.get("metadata", {})
 
         # Get input path from config
-        input_path = config.get("input_file", str(job.input_path))
+        input_path = config.input_file
 
         start_time = datetime.now()
 

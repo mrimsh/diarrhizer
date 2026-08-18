@@ -3,9 +3,12 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from diarrhizer.export.speakers import resolve_speaker_name
+
+if TYPE_CHECKING:
+    from diarrhizer.pipeline.runner import PipelineConfig
 
 
 # [SEMANTIC-BEGIN] EXPORT:JSON
@@ -15,10 +18,10 @@ from diarrhizer.export.speakers import resolve_speaker_name
 # @outputs: JSON-formatted string
 # @sideEffects: None (pure function)
 # @errors: None
-# @see: STAGE:EXPORT, EXPORT:MARKDOWN
+# @see: STAGE:EXPORT, EXPORT:MARKDOWN, CONFIG:PIPELINE
 def export_to_json(
     segments: list[dict[str, Any]],
-    config: dict[str, Any],
+    config: "PipelineConfig",
     input_path: str,
 ) -> str:
     """Export segments to JSON format.
@@ -47,13 +50,13 @@ def export_to_json(
 
     Args:
         segments: List of segment dictionaries with start, end, speaker_id, text
-        config: Pipeline configuration dictionary
+        config: Pipeline configuration
         input_path: Original input file path
 
     Returns:
         JSON-formatted transcript string
     """
-    speakers = config.get("speakers")
+    speakers = config.speakers
 
     # Enrich segments with speaker_name
     enriched_segments = []
@@ -80,10 +83,10 @@ def export_to_json(
             "input_file": input_path,
             "created_at": datetime.now().isoformat(),
             "config": {
-                "language": config.get("language", "auto"),
-                "device": config.get("device", "cpu"),
-                "min_speakers": config.get("min_speakers", 1),
-                "max_speakers": config.get("max_speakers", 10),
+                "language": config.language,
+                "device": config.device,
+                "min_speakers": config.min_speakers,
+                "max_speakers": config.max_speakers,
             },
         },
         "segments": enriched_segments,
