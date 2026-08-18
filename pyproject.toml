@@ -36,3 +36,7 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 diarrhizer = "src/diarrhizer"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

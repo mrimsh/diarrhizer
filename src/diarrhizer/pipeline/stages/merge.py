@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from diarrhizer.pipeline.cache import is_stale
 from diarrhizer.utils import write_json_atomic
 
 if TYPE_CHECKING:
@@ -65,15 +66,6 @@ class MergeStage:
                 f"Diarization not found: {diar_input}. "
                 "Please run the diarize stage first."
             )
-
-        # Check if output already exists (idempotency)
-        if segments_output.exists():
-            print(f"[{self.NAME}] Skipping - output already exists")
-            return {
-                "stage": self.NAME,
-                "status": "skipped",
-                "output_path": str(segments_output),
-            }
 
         # Ensure output directory exists
         segments_output.parent.mkdir(parents=True, exist_ok=True)
@@ -149,8 +141,19 @@ class MergeStage:
             "segments": job_dir / self.SEGMENTS_JSON,
         }
 
+    def get_output_paths(self, job_dir: Path) -> dict:
+        """Get only the artifact paths this stage produces (not its inputs).
+
+        Args:
+            job_dir: Job directory path
+
+        Returns:
+            Dictionary of output artifact name to path
+        """
+        return {"segments": job_dir / self.SEGMENTS_JSON}
+
     def is_cache_valid(self, job_dir: Path) -> bool:
-        """Check if stage output exists and is valid.
+        """Check if stage output exists and is up to date relative to its inputs.
 
         Args:
             job_dir: Job directory path
@@ -159,7 +162,10 @@ class MergeStage:
             True if output exists and is valid
         """
         artifacts = self.get_artifact_paths(job_dir)
-        return artifacts["segments"].exists()
+        return not is_stale(
+            outputs=list(self.get_output_paths(job_dir).values()),
+            inputs=[artifacts["transcript"], artifacts["diarization"]],
+        )
 
 
 # [SEMANTIC-END] STAGE:MERGE

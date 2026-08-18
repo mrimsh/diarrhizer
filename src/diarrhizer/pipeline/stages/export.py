@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from diarrhizer.export.markdown_export import export_to_markdown
 from diarrhizer.export.json_export import export_to_json
+from diarrhizer.pipeline.cache import is_stale
 from diarrhizer.utils import write_text_atomic
 
 if TYPE_CHECKING:
@@ -116,17 +117,34 @@ class ExportStage:
             "result_json": job_dir / self.RESULT_JSON,
         }
 
-    def is_cache_valid(self, job_dir: Path) -> bool:
-        """Check if stage output exists and is valid.
+    def get_output_paths(self, job_dir: Path) -> dict:
+        """Get only the artifact paths this stage produces (not its inputs).
 
         Args:
             job_dir: Job directory path
 
         Returns:
-            True if both outputs exist
+            Dictionary of output artifact name to path
+        """
+        return {
+            "result_md": job_dir / self.RESULT_MD,
+            "result_json": job_dir / self.RESULT_JSON,
+        }
+
+    def is_cache_valid(self, job_dir: Path) -> bool:
+        """Check if stage output exists and is up to date relative to its input segments.
+
+        Args:
+            job_dir: Job directory path
+
+        Returns:
+            True if both outputs exist and are valid
         """
         artifacts = self.get_artifact_paths(job_dir)
-        return artifacts["result_md"].exists() and artifacts["result_json"].exists()
+        return not is_stale(
+            outputs=list(self.get_output_paths(job_dir).values()),
+            inputs=[artifacts["segments"]],
+        )
 
 
 # [SEMANTIC-END] STAGE:EXPORT

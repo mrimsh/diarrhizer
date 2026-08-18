@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Union, List
 
 from diarrhizer.adapters.ffmpeg import FFmpegAdapter
+from diarrhizer.pipeline.cache import is_stale
 from diarrhizer.utils import write_json_atomic
 
 if TYPE_CHECKING:
@@ -66,27 +67,8 @@ class ConvertStage:
         audio_output = job_dir / self.NORMALIZED_WAV
         meta_output = job_dir / self.META_RUN_JSON
 
-        # Check if output already exists (idempotency)
-        # For split-stereo, check if both channel files exist
-        if audio_profile == FFmpegAdapter.PROFILE_SPLIT_STEREO:
-            left_output = job_dir / self.NORMALIZED_LEFT_WAV
-            right_output = job_dir / self.NORMALIZED_RIGHT_WAV
-            if left_output.exists() and right_output.exists() and meta_output.exists():
-                print(f"[{self.NAME}] Skipping - output already exists")
-                return {
-                    "stage": self.NAME,
-                    "status": "skipped",
-                    "output_path": str(left_output),
-                    "output_paths": [str(left_output), str(right_output)],
-                }
-        else:
-            if audio_output.exists() and meta_output.exists():
-                print(f"[{self.NAME}] Skipping - output already exists")
-                return {
-                    "stage": self.NAME,
-                    "status": "skipped",
-                    "output_path": str(audio_output),
-                }
+        # Whether to (re)run is decided by the pipeline runner (is_cache_valid
+        # + force flags), not here - run() always does the work when called.
 
         # Ensure output directories exist
         audio_output.parent.mkdir(parents=True, exist_ok=True)
@@ -169,8 +151,23 @@ class ConvertStage:
             "meta": job_dir / self.META_RUN_JSON,
         }
 
+    def get_output_paths(self, job_dir: Path) -> dict:
+        """Get only the artifact paths this stage produces.
+
+        Convert is the first stage: it has no job-directory inputs of its
+        own (it reads the original external input file), so its outputs are
+        the same as its full artifact set.
+
+        Args:
+            job_dir: Job directory path
+
+        Returns:
+            Dictionary of output artifact name to path
+        """
+        return self.get_artifact_paths(job_dir)
+
     def is_cache_valid(self, job_dir: Path) -> bool:
-        """Check if stage output exists and is valid.
+        """Check if stage output exists and is up to date.
 
         Args:
             job_dir: Job directory path
@@ -178,8 +175,8 @@ class ConvertStage:
         Returns:
             True if output exists and is valid
         """
-        artifacts = self.get_artifact_paths(job_dir)
-        return artifacts["audio"].exists() and artifacts["meta"].exists()
+        outputs = list(self.get_output_paths(job_dir).values())
+        return not is_stale(outputs=outputs, inputs=[])
 
 
 # [SEMANTIC-END] STAGE:CONVERT

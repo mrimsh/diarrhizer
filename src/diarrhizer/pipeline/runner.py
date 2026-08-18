@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # @outputs: Artifacts on disk per stage definitions
 # @sideEffects: Creates job directory, writes artifacts to disk, deletes artifacts when force is used
 # @errors: RuntimeError, FileNotFoundError
-# @see: STAGE:CONVERT, STAGE:TRANSCRIBE, ARTIFACTS:LAYOUT
+# @see: STAGE:CONVERT, STAGE:TRANSCRIBE, ARTIFACTS:LAYOUT, PIPELINE:CACHE
 class StageProtocol(Protocol):
     """Protocol for pipeline stages."""
 
@@ -33,7 +33,11 @@ class StageProtocol(Protocol):
         ...
 
     def get_artifact_paths(self, job_dir: Path) -> dict:
-        """Get the expected artifact paths for this stage."""
+        """Get all artifact paths (inputs and outputs) relevant to this stage."""
+        ...
+
+    def get_output_paths(self, job_dir: Path) -> dict:
+        """Get only the artifact paths this stage produces (not its inputs)."""
         ...
 
 
@@ -213,12 +217,15 @@ def run_pipeline(
 
         # Check cache before running (skip if not forced and cache is valid)
         if not should_force and stage.is_cache_valid(job_dir):
-            # Get the artifact paths for the log message
-            artifacts = stage.get_artifact_paths(job_dir)
+            # Get this stage's own output paths for the log message. Using
+            # get_output_paths() (not get_artifact_paths()) matters here:
+            # get_artifact_paths() also includes this stage's *inputs*, which
+            # belong to earlier stages.
+            outputs = stage.get_output_paths(job_dir)
             # Find the first existing artifact for the log
             artifact_path = None
-            if isinstance(artifacts, dict):
-                for path in artifacts.values():
+            if isinstance(outputs, dict):
+                for path in outputs.values():
                     if isinstance(path, Path) and path.exists():
                         artifact_path = path
                         break
@@ -232,12 +239,15 @@ def run_pipeline(
             })
             continue
 
-        # If forcing, delete existing outputs first to avoid partial state
+        # If forcing, delete this stage's own outputs first to avoid partial
+        # state. Deliberately uses get_output_paths(), not get_artifact_paths():
+        # the latter also includes this stage's *inputs* (other stages'
+        # outputs), which must never be deleted here.
         if should_force:
             print(f"Stage {stage_name}: forcing recompute (--force flag)")
-            artifacts = stage.get_artifact_paths(job_dir)
-            if isinstance(artifacts, dict):
-                for path in artifacts.values():
+            outputs = stage.get_output_paths(job_dir)
+            if isinstance(outputs, dict):
+                for path in outputs.values():
                     if isinstance(path, Path) and path.exists():
                         try:
                             path.unlink()

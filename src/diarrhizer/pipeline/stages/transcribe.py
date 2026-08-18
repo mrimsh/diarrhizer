@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from diarrhizer.adapters.whisperx import WhisperXAdapter
+from diarrhizer.pipeline.cache import is_stale
 from diarrhizer.utils import write_json_atomic
 
 if TYPE_CHECKING:
@@ -144,15 +145,6 @@ class TranscribeStage:
                 "Please run the convert stage first."
             )
 
-        # Check if output already exists (idempotency)
-        if transcript_output.exists():
-            print(f"[{self.NAME}] Skipping - output already exists")
-            return {
-                "stage": self.NAME,
-                "status": "skipped",
-                "output_path": str(transcript_output),
-            }
-
         # Ensure output directory exists
         transcript_output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -249,8 +241,19 @@ class TranscribeStage:
             "transcript": job_dir / self.TRANSCRIPT_JSON,
         }
 
+    def get_output_paths(self, job_dir: Path) -> dict:
+        """Get only the artifact paths this stage produces (not its inputs).
+
+        Args:
+            job_dir: Job directory path
+
+        Returns:
+            Dictionary of output artifact name to path
+        """
+        return {"transcript": job_dir / self.TRANSCRIPT_JSON}
+
     def is_cache_valid(self, job_dir: Path) -> bool:
-        """Check if stage output exists and is valid.
+        """Check if stage output exists and is up to date relative to its input audio.
 
         Args:
             job_dir: Job directory path
@@ -259,7 +262,10 @@ class TranscribeStage:
             True if output exists and is valid
         """
         artifacts = self.get_artifact_paths(job_dir)
-        return artifacts["transcript"].exists()
+        return not is_stale(
+            outputs=list(self.get_output_paths(job_dir).values()),
+            inputs=[artifacts["input_audio"]],
+        )
 
 
 # [SEMANTIC-END] STAGE:TRANSCRIBE
