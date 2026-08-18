@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from diarrhizer.export.markdown_export import export_to_markdown
 from diarrhizer.export.json_export import export_to_json
+from diarrhizer.utils import write_text_atomic
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -77,14 +78,11 @@ class ExportStage:
 
         # Export to Markdown
         md_content = export_to_markdown(segments, config, input_path)
-        md_output.parent.mkdir(parents=True, exist_ok=True)
-        with open(md_output, "w", encoding="utf-8") as f:
-            f.write(md_content)
+        write_text_atomic(md_output, md_content)
 
         # Export to JSON
         json_content = export_to_json(segments, config, input_path)
-        with open(json_output, "w", encoding="utf-8") as f:
-            f.write(json_content)
+        write_text_atomic(json_output, json_content)
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()

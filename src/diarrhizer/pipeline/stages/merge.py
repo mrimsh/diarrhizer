@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from diarrhizer.utils import write_json_atomic
+
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
 
@@ -118,8 +120,7 @@ class MergeStage:
         }
 
         # Write merged segments to JSON
-        with open(segments_output, "w", encoding="utf-8") as f:
-            json.dump(output_data, f, indent=2, ensure_ascii=False)
+        write_json_atomic(segments_output, output_data)
 
         print(f"[{self.NAME}] Completed in {duration:.2f}s")
         print(f"[{self.NAME}] Segments: {len(merged_segments)}")

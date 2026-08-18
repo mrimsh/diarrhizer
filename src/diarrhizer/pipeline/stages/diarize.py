@@ -1,11 +1,11 @@
 """Diarize stage for speaker diarization."""
 
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from diarrhizer.adapters.whisperx import WhisperXDiarizeAdapter
+from diarrhizer.utils import write_json_atomic
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -160,8 +160,7 @@ class DiarizeStage:
         }
 
         # Write diarization to JSON
-        with open(diar_output, "w", encoding="utf-8") as f:
-            json.dump(diar_data, f, indent=2, ensure_ascii=False)
+        write_json_atomic(diar_output, diar_data)
 
         print(f"[{self.NAME}] Completed in {duration:.2f}s")
         print(f"[{self.NAME}] Speakers detected: {result.get('num_speakers', 0)}")

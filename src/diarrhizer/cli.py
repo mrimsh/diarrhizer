@@ -6,12 +6,6 @@ import sys
 from pathlib import Path
 
 from diarrhizer.diagnostics.doctor import run_doctor_checks
-from diarrhizer.pipeline.runner import run_pipeline
-from diarrhizer.pipeline.stages.convert import ConvertStage
-from diarrhizer.pipeline.stages.transcribe import TranscribeStage
-from diarrhizer.pipeline.stages.diarize import DiarizeStage
-from diarrhizer.pipeline.stages.merge import MergeStage
-from diarrhizer.pipeline.stages.export import ExportStage
 
 
 # [SEMANTIC-BEGIN] CLI:ENTRY
@@ -169,6 +163,16 @@ def main() -> int:
         # @errors: Exits with code 1 on failure
         # @see: PIPELINE:RUNNER, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, STAGE:MERGE, STAGE:EXPORT
 
+        # Imported lazily (not at module level) so that `doctor` never pulls in
+        # torch/whisperx as a side effect - it needs to stay import-safe to diagnose
+        # a broken install.
+        from diarrhizer.pipeline.runner import run_pipeline
+        from diarrhizer.pipeline.stages.convert import ConvertStage
+        from diarrhizer.pipeline.stages.transcribe import TranscribeStage
+        from diarrhizer.pipeline.stages.diarize import DiarizeStage
+        from diarrhizer.pipeline.stages.merge import MergeStage
+        from diarrhizer.pipeline.stages.export import ExportStage
+
         # [SEMANTIC-BEGIN] CONFIG:SPEAKERS_MAP
         # @purpose: Load speaker name mapping from JSON file
         # @description: Reads a JSON file that maps diarization IDs to display names
@@ -244,11 +248,13 @@ def main() -> int:
             print(f"Job ID: {result['job_id']}")
             print(f"Output: {result['job_dir']}")
             return 0
-        except FileNotFoundError as e:
+        except (FileNotFoundError, RuntimeError, ValueError) as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
+        except Exception as e:
+            # Catch-all so unexpected failures (corrupt cached JSON, malformed
+            # inputs, etc.) exit cleanly instead of dumping a raw traceback.
+            print(f"Error: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
         # [SEMANTIC-END] CLI:RUN
     else:

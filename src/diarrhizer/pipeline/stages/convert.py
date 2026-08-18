@@ -1,11 +1,11 @@
 """Convert stage for audio normalization."""
 
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Union, List
 
 from diarrhizer.adapters.ffmpeg import FFmpegAdapter
+from diarrhizer.utils import write_json_atomic
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -138,8 +138,7 @@ class ConvertStage:
             },
         }
 
-        with open(meta_output, "w", encoding="utf-8") as f:
-            json.dump(meta_info, f, indent=2, ensure_ascii=False)
+        write_json_atomic(meta_output, meta_info)
 
         print(f"[{self.NAME}] Completed in {duration:.2f}s")
         print(f"[{self.NAME}] Profile: {audio_profile}")

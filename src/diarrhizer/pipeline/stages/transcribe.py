@@ -1,11 +1,11 @@
 """Transcribe stage for WhisperX ASR and alignment."""
 
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from diarrhizer.adapters.whisperx import WhisperXAdapter
+from diarrhizer.utils import write_json_atomic
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -219,8 +219,7 @@ class TranscribeStage:
         }
 
         # Write transcript to JSON
-        with open(transcript_output, "w", encoding="utf-8") as f:
-            json.dump(transcript_data, f, indent=2, ensure_ascii=False)
+        write_json_atomic(transcript_output, transcript_data)
 
         print(f"[{self.NAME}] Completed in {duration:.2f}s")
         print(f"[{self.NAME}] Language: {result.get('language', 'unknown')}")

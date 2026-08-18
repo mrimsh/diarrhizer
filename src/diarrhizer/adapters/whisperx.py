@@ -383,15 +383,12 @@ class WhisperXDiarizeAdapter:
 
         Args:
             device: Device to use ("cuda" or "cpu")
-            min_speakers: Minimum number of expected speakers (currently unused)
-            max_speakers: Maximum number of expected speakers (currently unused)
+            min_speakers: Minimum expected speakers, passed to pyannote as a constraint
+            max_speakers: Maximum expected speakers, passed to pyannote as a constraint
 
         Raises:
             RuntimeError: If HF_TOKEN is not set or CUDA requested but unavailable
         """
-        # TODO: Implement min_speakers/max_speakers filtering in diarize()
-        # Currently WhisperX/pyannote determines speaker count automatically.
-        # These parameters could be used to post-filter results or constrain the model.
         self._device = self._validate_device(device)
         self._min_speakers = min_speakers
         self._max_speakers = max_speakers
