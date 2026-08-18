@@ -1,9 +1,11 @@
 """Export stage for generating final output files."""
 
 import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from diarrhizer.export.markdown_export import export_to_markdown
 from diarrhizer.export.json_export import export_to_json
@@ -11,17 +13,39 @@ from diarrhizer.pipeline.cache import is_stale
 from diarrhizer.utils import write_text_atomic
 
 if TYPE_CHECKING:
-    from diarrhizer.pipeline.runner import JobContext
+    from diarrhizer.pipeline.runner import JobContext, PipelineConfig
 
 
 # [SEMANTIC-BEGIN] STAGE:EXPORT
-# @purpose: Export merged segments to Markdown and JSON output files
-# @description: Reads merged/segments.json and produces result.md and result.json
+# @purpose: Export merged segments to every registered output format
+# @description: Reads merged/segments.json and renders it through each
+#   Exporter in ExportStage.EXPORTERS (currently Markdown and JSON). Adding a
+#   format (SRT/VTT/HTML/DOCX/...) means appending an Exporter entry to that
+#   list - run() and get_output_paths()/get_artifact_paths()/is_cache_valid()
+#   all derive from it, so none of them need editing for a new format.
+#   Registered outputs are treated as one atomic cache group (matching prior
+#   behavior, back when there were only two hardcoded outputs): is_cache_valid()
+#   is False, and --force-stage export deletes every output, if even one
+#   format is missing or stale, so formats can never drift out of sync with
+#   segments.json or with each other.
 # @inputs: artifacts/merged/segments.json
-# @outputs: artifacts/export/result.md, artifacts/export/result.json
+# @outputs: one file per Exporter in EXPORTERS (artifacts/export/result.md, artifacts/export/result.json)
 # @sideEffects: Reads JSON files, writes export files to disk
 # @errors: FileNotFoundError if input artifacts missing
 # @see: STAGE:MERGE, EXPORT:MARKDOWN, EXPORT:JSON
+@dataclass(frozen=True)
+class Exporter:
+    """A single registered export format.
+
+    export_fn renders segments to text; output_path is where run() writes
+    that text, relative to job_dir.
+    """
+
+    name: str
+    export_fn: Callable[[list[dict[str, Any]], "PipelineConfig", str], str]
+    output_path: str
+
+
 class ExportStage:
     """Stage for exporting processed transcripts to output files."""
 
@@ -30,11 +54,16 @@ class ExportStage:
 
     # Output paths relative to job directory
     EXPORT_DIR = "export"
-    RESULT_MD = "export/result.md"
-    RESULT_JSON = "export/result.json"
 
     # Input artifact path
     INPUT_SEGMENTS = "merged/segments.json"
+
+    # Registered export formats. To add a format, append an Exporter here -
+    # no other method in this class needs to change.
+    EXPORTERS: tuple[Exporter, ...] = (
+        Exporter("markdown", export_to_markdown, "export/result.md"),
+        Exporter("json", export_to_json, "export/result.json"),
+    )
 
     def run(self, job: "JobContext") -> dict:
         """Run the export stage.
@@ -50,10 +79,6 @@ class ExportStage:
 
         # Build input path
         segments_input = job_dir / self.INPUT_SEGMENTS
-
-        # Build output paths
-        md_output = job_dir / self.RESULT_MD
-        json_output = job_dir / self.RESULT_JSON
 
         print(f"[{self.NAME}] Exporting results")
 
@@ -77,27 +102,26 @@ class ExportStage:
 
         start_time = datetime.now()
 
-        # Export to Markdown
-        md_content = export_to_markdown(segments, config, input_path)
-        write_text_atomic(md_output, md_content)
-
-        # Export to JSON
-        json_content = export_to_json(segments, config, input_path)
-        write_text_atomic(json_output, json_content)
+        # Render and write every registered format
+        outputs: dict[str, str] = {}
+        for exporter in self.EXPORTERS:
+            content = exporter.export_fn(segments, config, input_path)
+            output_file = job_dir / exporter.output_path
+            write_text_atomic(output_file, content)
+            outputs[exporter.name] = str(output_file)
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
 
         print(f"[{self.NAME}] Completed in {duration:.2f}s")
         print(f"[{self.NAME}] Segments: {len(segments)}")
-        print(f"[{self.NAME}] Markdown: {md_output}")
-        print(f"[{self.NAME}] JSON: {json_output}")
+        for exporter in self.EXPORTERS:
+            print(f"[{self.NAME}] {exporter.name}: {outputs[exporter.name]}")
 
         return {
             "stage": self.NAME,
             "status": "completed",
-            "output_md": str(md_output),
-            "output_json": str(json_output),
+            "outputs": outputs,
             "num_segments": len(segments),
             "duration_seconds": duration,
         }
@@ -109,13 +133,12 @@ class ExportStage:
             job_dir: Job directory path
 
         Returns:
-            Dictionary of artifact name to path
+            Dictionary of artifact name to path (input segments plus one
+            entry per registered Exporter)
         """
-        return {
-            "segments": job_dir / self.INPUT_SEGMENTS,
-            "result_md": job_dir / self.RESULT_MD,
-            "result_json": job_dir / self.RESULT_JSON,
-        }
+        artifacts = {"segments": job_dir / self.INPUT_SEGMENTS}
+        artifacts.update(self.get_output_paths(job_dir))
+        return artifacts
 
     def get_output_paths(self, job_dir: Path) -> dict:
         """Get only the artifact paths this stage produces (not its inputs).
@@ -124,21 +147,23 @@ class ExportStage:
             job_dir: Job directory path
 
         Returns:
-            Dictionary of output artifact name to path
+            Dictionary of Exporter.name to path, one entry per registered
+            Exporter in EXPORTERS.
         """
-        return {
-            "result_md": job_dir / self.RESULT_MD,
-            "result_json": job_dir / self.RESULT_JSON,
-        }
+        return {exporter.name: job_dir / exporter.output_path for exporter in self.EXPORTERS}
 
     def is_cache_valid(self, job_dir: Path) -> bool:
         """Check if stage output exists and is up to date relative to its input segments.
+
+        All registered formats are one atomic group: if any single one is
+        missing or older than segments.json, the whole stage is considered
+        stale and every format is re-rendered.
 
         Args:
             job_dir: Job directory path
 
         Returns:
-            True if both outputs exist and are valid
+            True if every registered output exists and is valid
         """
         artifacts = self.get_artifact_paths(job_dir)
         return not is_stale(
