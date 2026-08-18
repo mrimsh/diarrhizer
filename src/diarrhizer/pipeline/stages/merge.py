@@ -1,5 +1,6 @@
 """Merge stage for combining ASR transcripts with speaker diarization."""
 
+import bisect
 import json
 from datetime import datetime
 from pathlib import Path
@@ -173,7 +174,10 @@ class MergeStage:
 
 # [SEMANTIC-BEGIN] MERGE:ASSIGN_SPEAKERS
 # @purpose: Assign speaker labels to ASR segments based on overlap with diarization
-# @description: Simple overlap-based algorithm - for each segment/word, find speaker with max overlap
+# @description: For each segment/word (processed in chronological order), finds the
+#   speaker with max overlap via a sweep over sorted, time-ordered queries
+#   (see _DiarizationSweep) instead of rescanning all diarization segments per
+#   query - matters for long calls with many words/diarization segments
 # @inputs: transcript_segments, transcript_words, diar_segments
 # @outputs: List of merged segments with speaker_id
 # @sideEffects: None (pure function)
@@ -231,25 +235,39 @@ def assign_speakers(
         ]
 
     # Build word index for faster lookup
-    # Words are grouped by which transcript segment they belong to
+    # Words are grouped by which transcript segment they belong to.
+    #
+    # Both lists are chronologically ordered and transcript segments don't
+    # overlap each other, so a single forward-moving pointer into
+    # transcript_segments suffices - O(segments + words) total instead of
+    # rescanning all segments for every word.
     word_segment_map: dict[int, list[dict]] = {}
     if transcript_words:
-        # Map each word to its containing segment
-        for word_idx, word in enumerate(transcript_words):
+        seg_idx = 0
+        num_segments = len(transcript_segments)
+        for word in transcript_words:
             word_start = word.get("start", 0)
-            # Find the containing segment (word must start within the segment)
-            for seg_idx, seg in enumerate(transcript_segments):
-                seg_start = seg.get("start", 0)
-                seg_end = seg.get("end", 0)
-                # Word belongs to segment if it starts within the segment
-                # Use inclusive start, exclusive end for cleaner boundary handling
-                if seg_start <= word_start < seg_end:
-                    if seg_idx not in word_segment_map:
-                        word_segment_map[seg_idx] = []
-                    word_segment_map[seg_idx].append(word)
-                    break
+            # Advance past segments that ended before this (or any later,
+            # since words are chronological) word could start.
+            while (
+                seg_idx < num_segments
+                and transcript_segments[seg_idx].get("end", 0) <= word_start
+            ):
+                seg_idx += 1
+            if seg_idx >= num_segments:
+                break
+            # Word belongs to segment if it starts within the segment
+            # (inclusive start, exclusive end); otherwise it falls in a gap
+            # between segments and is left unmatched.
+            if transcript_segments[seg_idx].get("start", 0) <= word_start:
+                word_segment_map.setdefault(seg_idx, []).append(word)
 
-    # Process each transcript segment
+    # Process each transcript segment. Segments, and each segment's words, are
+    # visited in chronological order, so a single _DiarizationSweep instance
+    # can answer every query in amortized O(1) instead of rescanning all of
+    # diar_segments per segment/word (see _DiarizationSweep for why this is
+    # safe even though diarization segments may overlap each other).
+    speaker_lookup = _DiarizationSweep(diar_segments)
     merged_segments = []
 
     for seg_idx, seg in enumerate(transcript_segments):
@@ -257,10 +275,7 @@ def assign_speakers(
         seg_end = seg.get("end", 0)
         seg_text = seg.get("text", "")
 
-        # Find speaker with maximum overlap
-        speaker_id = _find_overlapping_speaker(
-            seg_start, seg_end, diar_segments
-        )
+        speaker_id = speaker_lookup.find(seg_start, seg_end)
 
         # Build merged segment
         merged_seg = {
@@ -280,10 +295,7 @@ def assign_speakers(
                 word_end = word.get("end", 0)
                 word_text = word.get("word", "")
 
-                # Find speaker for this word
-                word_speaker = _find_overlapping_speaker(
-                    word_start, word_end, diar_segments
-                )
+                word_speaker = speaker_lookup.find(word_start, word_end)
 
                 merged_words.append({
                     "start": word_start,
@@ -357,6 +369,118 @@ def _find_overlapping_speaker(
                 best_speaker = speaker
 
     return best_speaker
+
+
+class _DiarizationSweep:
+    """Faster replacement for repeated _find_overlapping_speaker calls against
+    the same diar_segments, when queries are issued in chronological
+    (non-decreasing start time) order - true for how assign_speakers walks
+    segments, then each segment's words.
+
+    Internally sorts diar_segments by start once. The *left* edge of the
+    candidate window is tracked incrementally across calls in amortized O(1):
+    once a segment's end falls at/before some query's start, it can never
+    overlap that or any later query (queries only move forward), so it's
+    retired for good. The *right* edge cannot be tracked the same way -
+    queries move forward in start time but not necessarily in end time (an
+    earlier query can have a later end than a later query with a smaller
+    span), so it's recomputed with a binary search every call. That keeps
+    each call O(log diar_segments) plus the size of the (usually tiny)
+    candidate window, instead of the O(diar_segments) full rescan
+    _find_overlapping_speaker does.
+
+    When nothing in the window overlaps, the closest neighbor is used
+    instead: the best already-ended segment seen so far (tracked
+    incrementally as the left edge advances) versus the next segment to
+    start (found via the same binary search used for the window's right
+    edge) - equivalent to _find_overlapping_speaker's fallback, which
+    considers every segment, because sorting by start means neither
+    candidate can be beaten by a segment the window/search didn't consider.
+    """
+
+    DEFAULT_SPEAKER = "Speaker_00"
+
+    def __init__(self, diar_segments: list[dict]) -> None:
+        # Keep each segment's original position so overlap/gap ties can be
+        # broken the same way _find_overlapping_speaker breaks them - first
+        # match in the caller's original order wins - even though this class
+        # scans in a different (start-sorted) order. Real diarization output
+        # commonly ties on overlap: any query fully inside two or more
+        # concurrently-overlapping speakers' segments overlaps all of them by
+        # exactly the query's own duration.
+        indexed = sorted(enumerate(diar_segments), key=lambda pair: pair[1].get("start", 0))
+        self._segments = [seg for _, seg in indexed]
+        self._orig_index = [idx for idx, _ in indexed]
+        self._starts = [seg.get("start", 0) for seg in self._segments]
+        self._left = 0
+        self._before_end: float | None = None
+        self._before_speaker: str | None = None
+        self._before_orig_index: int = -1
+
+    def find(self, start: float, end: float) -> str:
+        """Find the speaker with maximum overlap for [start, end).
+
+        Args:
+            start: Query start time in seconds (must be >= every previous
+                call's start within this sweep instance)
+            end: Query end time in seconds
+
+        Returns:
+            Speaker ID with maximum overlap, or the closest one by time if
+            nothing overlaps, or the default speaker if there's no
+            diarization data at all.
+        """
+        segments = self._segments
+        n = len(segments)
+        if n == 0:
+            return self.DEFAULT_SPEAKER
+
+        # Retire segments that ended at/before this query's start - they can
+        # never overlap this or any later query. Remember the best (latest
+        # ending) one retired so far in case we need a "closest before" fallback.
+        while self._left < n and segments[self._left].get("end", 0) <= start:
+            seg_end = segments[self._left].get("end", 0)
+            orig_idx = self._orig_index[self._left]
+            if (
+                self._before_end is None
+                or seg_end > self._before_end
+                or (seg_end == self._before_end and orig_idx < self._before_orig_index)
+            ):
+                self._before_end = seg_end
+                self._before_speaker = segments[self._left].get("speaker", self.DEFAULT_SPEAKER)
+                self._before_orig_index = orig_idx
+            self._left += 1
+
+        # Segments sorted by start form a contiguous run with start < end
+        # starting at _left; binary-search its upper bound fresh each call
+        # (see class docstring for why this can't be tracked incrementally).
+        right = bisect.bisect_left(self._starts, end, lo=self._left)
+
+        best_speaker = self.DEFAULT_SPEAKER
+        max_overlap = 0.0
+        best_orig_index = -1
+        for i in range(self._left, right):
+            seg = segments[i]
+            overlap = max(0.0, min(end, seg.get("end", 0)) - max(start, seg.get("start", 0)))
+            orig_idx = self._orig_index[i]
+            if overlap > max_overlap or (overlap == max_overlap and overlap > 0 and orig_idx < best_orig_index):
+                max_overlap = overlap
+                best_speaker = seg.get("speaker", self.DEFAULT_SPEAKER)
+                best_orig_index = orig_idx
+
+        if max_overlap > 0:
+            return best_speaker
+
+        # No overlap anywhere: fall back to whichever neighbor is closer in
+        # time - the last segment that already ended, or the next one to start.
+        before_gap = start - self._before_end if self._before_end is not None else float("inf")
+        after_gap = segments[right].get("start", 0) - end if right < n else float("inf")
+
+        if before_gap <= after_gap and self._before_speaker is not None:
+            return self._before_speaker
+        if right < n:
+            return segments[right].get("speaker", self.DEFAULT_SPEAKER)
+        return self.DEFAULT_SPEAKER
 
 
 # [SEMANTIC-END] MERGE:ASSIGN_SPEAKERS
