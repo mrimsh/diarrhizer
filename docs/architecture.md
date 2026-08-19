@@ -118,7 +118,9 @@ out/
     meta/                 # metadata (config, versions, timestamps, ASR params)
       run.json            # written by convert; records the original input_path
     audio/
-      normalized.wav      # or normalized_left.wav/normalized_right.wav for split-stereo
+      normalized.wav      # always written, regardless of audio_profile
+      normalized_left.wav  # split-stereo only: extra left-channel artifact (not consumed downstream)
+      normalized_right.wav # split-stereo only: extra right-channel artifact (not consumed downstream)
     asr/
       transcript.json     # includes ASR config in metadata
     diar/
@@ -197,14 +199,16 @@ Name mapping is a separate layer on top.
 
 ## 5. Audio Profiles
 
-Audio profiles apply FFmpeg filters during conversion:
+Audio profiles apply FFmpeg filters during conversion. Every profile writes the
+standard mono `audio/normalized.wav` that transcribe/diarize/merge read
+unconditionally, so the pipeline shape never depends on `audio_profile`.
 
 | Profile | Filters Applied | Use Case |
 |---------|-----------------|----------|
 | `raw` | None | Default behavior, no preprocessing |
 | `voice-call` | Bandpass filter (300Hz-7kHz) + mild EQ boost at 3kHz | Phone call recordings, VoIP |
 | `denoise-light` | afftdn noise reduction | Noisy recordings with background noise |
-| `split-stereo` | Separates L/R channels | Multi-channel recordings, interview separation |
+| `split-stereo` | Writes the standard mono downmix to `normalized.wav` (used by the rest of the pipeline) **and** additionally splits L/R channels into `normalized_left.wav`/`normalized_right.wav` | Keeping raw per-channel audio available for manual inspection; the channels themselves are not currently fed into transcribe/diarize/merge - diarization still runs as usual on the mono mix |
 
 ---
 

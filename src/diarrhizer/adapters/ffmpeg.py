@@ -57,9 +57,11 @@ def resolve_ffmpeg_path(explicit: Optional[str | Path] = None) -> Optional[str]:
 # @purpose: Wrap FFmpeg calls for audio normalization and format conversion
 # @description: Provides a clean interface to FFmpeg for converting media files to WAV with optional profiles.
 #   Locates the ffmpeg executable via resolve_ffmpeg_path(): explicit ffmpeg_path arg > DIARRHIZER_FFMPEG_PATH
-#   env var > PATH lookup.
+#   env var > PATH lookup. split-stereo always writes the standard mono downmix to output_path in addition
+#   to the per-channel _left/_right files, so every profile leaves the same primary file behind (see
+#   _convert_split_stereo).
 # @inputs: input_path (str or Path), output_path (str or Path), audio_profile, ffmpeg_path (optional override)
-# @outputs: Path to converted audio file(s)
+# @outputs: Path to converted audio file, or [output_path, left_path, right_path] for split-stereo
 # @sideEffects: Executes FFmpeg subprocess, creates output file(s) on disk, reads DIARRHIZER_FFMPEG_PATH env var
 # @errors: RuntimeError if FFmpeg is not found or conversion fails
 # @see: STAGE:CONVERT, DIAGNOSTICS:DOCTOR
@@ -116,11 +118,18 @@ class FFmpegAdapter:
 
         Args:
             input_path: Path to input media file (any format FFmpeg supports)
-            output_path: Path to output WAV file (for raw/denoise/voice-call) or base path (for split-stereo)
+            output_path: Path to output WAV file. For split-stereo this is still
+                the path downstream stages read (a standard mono downmix is
+                written here too), plus two extra per-channel files derived
+                from its stem/suffix (see _convert_split_stereo).
             audio_profile: Audio preprocessing profile (raw, voice-call, denoise-light, split-stereo)
 
         Returns:
-            Path to the converted audio file, or list of paths for split-stereo
+            Path to the converted audio file, or for split-stereo a list
+            `[output_path, left_path, right_path]` - output_path is the same
+            standard mono downmix every other profile produces, so downstream
+            stages don't need to know which profile ran; left/right are
+            extra per-channel artifacts, not consumed by the rest of the pipeline.
 
         Raises:
             RuntimeError: If FFmpeg conversion fails
@@ -192,14 +201,25 @@ class FFmpegAdapter:
             ) from e
 
     def _convert_split_stereo(self, input_path: Path, output_path: Path) -> List[Path]:
-        """Split stereo audio into separate left and right channel files.
+        """Split stereo audio into separate left/right channel files, and also
+        write the standard mono downmix to output_path itself.
+
+        Every other profile leaves a single mono WAV at output_path that the
+        rest of the pipeline (transcribe/diarize) reads unconditionally via a
+        hardcoded "audio/normalized.wav" path. split-stereo used to skip that
+        file entirely and only write the per-channel extras, which made those
+        later stages fail with FileNotFoundError. Writing the same downmix
+        here too means split-stereo behaves like every other profile for the
+        rest of the pipeline; the per-channel files are additional artifacts,
+        not (yet) consumed by transcribe/diarize/merge.
 
         Args:
             input_path: Path to input media file
-            output_path: Base output path (left/right suffixes will be added)
+            output_path: Path to the standard mono downmix (left/right
+                filenames are derived from its stem/suffix)
 
         Returns:
-            List of paths to converted audio files [left, right]
+            List of paths to converted audio files [output_path, left, right]
         """
         stem = output_path.stem
         suffix = output_path.suffix
@@ -207,6 +227,18 @@ class FFmpegAdapter:
 
         left_path = parent / f"{stem}_left{suffix}"
         right_path = parent / f"{stem}_right{suffix}"
+
+        # Standard mono downmix, same as the raw profile - lets every
+        # downstream stage read audio/normalized.wav regardless of profile.
+        cmd_mono = [
+            self._ffmpeg_path,
+            "-y",
+            "-i", str(input_path),
+            "-ac", str(self.TARGET_CHANNELS),
+            "-ar", str(self.TARGET_SAMPLE_RATE),
+            "-acodec", "pcm_s16le",
+            str(output_path),
+        ]
 
         # Extract left channel
         cmd_left = [
@@ -231,9 +263,10 @@ class FFmpegAdapter:
         ]
 
         try:
+            subprocess.run(cmd_mono, capture_output=True, text=True, check=True, timeout=3600)
             subprocess.run(cmd_left, capture_output=True, text=True, check=True, timeout=3600)
             subprocess.run(cmd_right, capture_output=True, text=True, check=True, timeout=3600)
-            return [left_path, right_path]
+            return [output_path, left_path, right_path]
         except subprocess.CalledProcessError as e:
             raise RuntimeError(
                 f"FFmpeg split-stereo conversion failed: {e.stderr}"

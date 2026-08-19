@@ -1,5 +1,6 @@
 """Convert stage for audio normalization."""
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Union, List
@@ -14,10 +15,18 @@ if TYPE_CHECKING:
 
 # [SEMANTIC-BEGIN] STAGE:CONVERT
 # @purpose: Normalize input media to WAV mono 16kHz with optional audio profiles
-# @description: Uses FFmpeg adapter to convert input audio/video to a standardized format with preprocessing
+# @description: Uses FFmpeg adapter to convert input audio/video to a standardized format with preprocessing.
+#   Every profile, including split-stereo, always produces audio/normalized.wav - the file every downstream
+#   stage reads unconditionally - so pipeline shape never depends on audio_profile. split-stereo additionally
+#   produces audio/normalized_left.wav / normalized_right.wav as extra artifacts (not consumed downstream).
+#   get_output_paths()/is_cache_valid() only expect those two extras once a prior run's meta/run.json recorded
+#   audio_profile="split-stereo" (see _read_recorded_audio_profile) - on a first run, before meta/run.json
+#   exists, only normalized.wav+meta are checked, which is still correct since a missing normalized.wav alone
+#   is enough to mark the stage stale.
 # @inputs: job.input_path, config.audio_profile
-# @outputs: artifacts/audio/normalized.wav, meta/run.json
-# @sideEffects: Creates output directory structure, writes audio file to disk
+# @outputs: artifacts/audio/normalized.wav, meta/run.json, and for split-stereo also
+#   artifacts/audio/normalized_left.wav / normalized_right.wav
+# @sideEffects: Creates output directory structure, writes audio file(s) to disk
 # @errors: RuntimeError, FileNotFoundError
 # @see: ADAPTER:FFMPEG, PIPELINE:RUNNER
 class ConvertStage:
@@ -137,8 +146,28 @@ class ConvertStage:
             "duration_seconds": duration,
         }
 
+    def _read_recorded_audio_profile(self, job_dir: Path) -> str | None:
+        """Recover the audio_profile a prior convert run recorded in
+        meta/run.json, so cache checks know whether to expect split-stereo's
+        extra normalized_left.wav/normalized_right.wav artifacts. Returns
+        None if there's no prior run to read (e.g. before convert ever ran).
+        """
+        meta_path = job_dir / self.META_RUN_JSON
+        if not meta_path.exists():
+            return None
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data.get("config", {}).get("audio_profile")
+
     def get_artifact_paths(self, job_dir: Path) -> dict:
         """Get the expected artifact paths for this stage.
+
+        For split-stereo, also includes the per-channel extras once a prior
+        run has recorded that profile in meta/run.json (see
+        _read_recorded_audio_profile) - not just the primary normalized.wav
+        every profile shares.
 
         Args:
             job_dir: Job directory path
@@ -146,10 +175,14 @@ class ConvertStage:
         Returns:
             Dictionary of artifact name to path
         """
-        return {
+        paths = {
             "audio": job_dir / self.NORMALIZED_WAV,
             "meta": job_dir / self.META_RUN_JSON,
         }
+        if self._read_recorded_audio_profile(job_dir) == FFmpegAdapter.PROFILE_SPLIT_STEREO:
+            paths["audio_left"] = job_dir / self.NORMALIZED_LEFT_WAV
+            paths["audio_right"] = job_dir / self.NORMALIZED_RIGHT_WAV
+        return paths
 
     def get_output_paths(self, job_dir: Path) -> dict:
         """Get only the artifact paths this stage produces.

@@ -6,6 +6,8 @@ env var > PATH) and FFmpegAdapter's use of it. No real ffmpeg binary is required
 """
 
 import re
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -131,3 +133,44 @@ def test_adapter_raises_runtime_error_mentioning_all_resolution_options_when_unr
     assert "PATH" in message
     assert ENV_FFMPEG_PATH in message
     assert "ffmpeg_path" in message
+
+
+# --- split-stereo: mono downmix + per-channel extras -------------------------
+
+
+def _fake_ffmpeg_run(cmd, capture_output=True, text=True, check=True, timeout=None):
+    """Stand-in for subprocess.run that just materializes whatever output
+    file the command was going to write (last arg), instead of invoking a
+    real ffmpeg binary.
+    """
+    output_path = Path(cmd[-1])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(b"fake wav data")
+    return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+
+def test_split_stereo_also_writes_standard_mono_downmix(tmp_path, monkeypatch):
+    """split-stereo must still produce the same audio/normalized.wav every
+    other profile does (in addition to the left/right extras), since
+    transcribe/diarize read that path unconditionally regardless of profile.
+    """
+    ffmpeg_path = make_fake_ffmpeg(tmp_path)
+    input_file = tmp_path / "input.mp4"
+    input_file.write_bytes(b"fake media")
+    output_path = tmp_path / "job" / "audio" / "normalized.wav"
+
+    monkeypatch.setattr(ffmpeg_module.subprocess, "run", _fake_ffmpeg_run)
+
+    adapter = FFmpegAdapter(ffmpeg_path=ffmpeg_path)
+    result = adapter.convert_to_wav(
+        input_file, output_path, audio_profile=FFmpegAdapter.PROFILE_SPLIT_STEREO
+    )
+
+    expected = [
+        output_path,
+        output_path.parent / "normalized_left.wav",
+        output_path.parent / "normalized_right.wav",
+    ]
+    assert result == expected
+    for path in expected:
+        assert path.exists(), f"expected {path} to be written"

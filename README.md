@@ -177,6 +177,25 @@ All options:
 | `--from-stage` | Start the pipeline at this stage, skipping earlier ones (their outputs must already exist on disk) | none (starts at `convert`) |
 | `--to-stage` | Stop the pipeline after this stage, skipping later ones | none (runs through `export`) |
 | `--speakers` | Path to JSON speaker mapping file | none |
+| `--audio-profile` | Audio preprocessing profile: `raw`, `voice-call`, `denoise-light`, `split-stereo` | `raw` |
+
+---
+
+### Audio Profiles
+
+`--audio-profile` controls FFmpeg preprocessing during the `convert` stage. Every
+profile writes the same `audio/normalized.wav` that the rest of the pipeline
+reads, so switching profiles never changes which stages run:
+
+* `raw` — no filtering.
+* `voice-call` — bandpass filter (300Hz-7kHz) + mild EQ boost, for phone/VoIP recordings.
+* `denoise-light` — light noise reduction (`afftdn`) for noisy recordings.
+* `split-stereo` — in addition to the usual mono `normalized.wav`, also writes
+  `normalized_left.wav`/`normalized_right.wav` (separated L/R channels) as
+  extra artifacts. These per-channel files are not currently consumed by
+  transcribe/diarize/merge - diarization still runs on the mono mix as usual.
+
+See [`docs/architecture.md`](docs/architecture.md#5-audio-profiles) for details.
 
 ---
 
