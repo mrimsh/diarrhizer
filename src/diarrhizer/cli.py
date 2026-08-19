@@ -123,8 +123,9 @@ def main() -> int:
     run_parser.add_argument(
         "--asr-model",
         type=str,
-        default="base",
-        help="WhisperX model (default: base, or HF repo like koekaverna/faster-whisper-podlodka-turbo)"
+        default="large-v3",
+        help="WhisperX model (default: large-v3; use a smaller size like 'base' for faster/cheaper "
+             "runs, or an HF repo like koekaverna/faster-whisper-podlodka-turbo)"
     )
     run_parser.add_argument(
         "--asr-compute-type",

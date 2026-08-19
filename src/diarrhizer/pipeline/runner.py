@@ -98,7 +98,7 @@ class PipelineConfig:
     from_stage: str | None = None
     to_stage: str | None = None
     speakers: dict | None = None
-    asr_model: str = "base"
+    asr_model: str = "large-v3"
     asr_compute_type: str | None = None
     asr_beam_size: int = 5
     asr_temperature: float = 0.0

@@ -173,7 +173,7 @@ The "stitched" result: text + timestamps + speaker at segment (and/or word) leve
   "num_segments": 1,
   "metadata": {
     "asr_params": {
-      "model": "base",
+      "model": "large-v3",
       "compute_type": "float16",
       "beam_size": 5,
       "temperature": 0.0
@@ -301,7 +301,7 @@ python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 
 | `--max-speakers` | int | `10` | Maximum number of speakers |
 | `--lang` | string | `"auto"` | Language code or `"auto"` for detection |
 | `--device` | choice | `"cuda"` | Device: `cuda` or `cpu` |
-| `--asr-model` | string | `"base"` | WhisperX model (or HF repo) |
+| `--asr-model` | string | `"large-v3"` | WhisperX model (or HF repo); use a smaller size (e.g. `base`) for faster/cheaper runs |
 | `--asr-compute-type` | string | auto | Compute type: `float16`, `int8_float16`, `int8` |
 | `--asr-beam-size` | int | `5` | Decoding beam size |
 | `--asr-temperature` | float | `0.0` | Decoding temperature |

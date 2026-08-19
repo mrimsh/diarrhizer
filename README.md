@@ -171,6 +171,7 @@ All options:
 | `--max-speakers` | Maximum number of speakers | 10 |
 | `--lang` | Language code or `auto` | `auto` |
 | `--device` | Device to use (`cuda` or `cpu`) | `cuda` |
+| `--asr-model` | WhisperX/Whisper model size or HF repo (e.g. `base`, `small`, `medium`, `large-v3`) — bigger models are more accurate but slower and need more VRAM | `large-v3` |
 | `--force` | Force recompute all stages | false |
 | `--force-stage` | Force recompute specific stage | none |
 | `--from-stage` | Start the pipeline at this stage, skipping earlier ones (their outputs must already exist on disk) | none (starts at `convert`) |

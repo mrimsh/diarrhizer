@@ -19,8 +19,8 @@ import torch
 class WhisperXAdapter:
     """Adapter for WhisperX ASR operations."""
 
-    # Default model - small and fast, good for most use cases
-    DEFAULT_MODEL = "base"
+    # Default model - largest official Whisper checkpoint, best accuracy
+    DEFAULT_MODEL = "large-v3"
 
     def __init__(
         self,
@@ -320,7 +320,7 @@ def transcribe_audio(
     audio_path: str | Path,
     language: Optional[str] = None,
     device: str = "cuda",
-    model: str = "base",
+    model: str = "large-v3",
     compute_type: Optional[str] = None,
     beam_size: int = 5,
     temperature: float = 0.0,

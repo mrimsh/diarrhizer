@@ -33,7 +33,7 @@ class TranscribeStage:
     # Input artifact path (from convert stage)
     INPUT_WAV = "audio/normalized.wav"
 
-    def __init__(self, model: str = "base", device: str = "cuda") -> None:
+    def __init__(self, model: str = "large-v3", device: str = "cuda") -> None:
         """Initialize the transcribe stage.
 
         Args:
