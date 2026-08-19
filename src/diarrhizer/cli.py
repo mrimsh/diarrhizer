@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -12,14 +13,37 @@ from diarrhizer.diagnostics.doctor import run_doctor_checks
 STAGE_NAMES = ["convert", "transcribe", "diarize", "merge", "export"]
 
 
+def _configure_logging() -> None:
+    """Attach a plain StreamHandler to the "diarrhizer" package logger so
+    pipeline/stage progress (logged via logging, not print - see
+    PIPELINE:RUNNER, STAGE:CONVERT et al.) reaches the console looking
+    exactly like the print()-based output it replaced: the formatter emits
+    only the message text, since each progress call already spells out its
+    own "[stage] ..." / "Stage x: ..." wording. Idempotent so calling main()
+    more than once (e.g. in tests) doesn't attach duplicate handlers.
+    """
+    package_logger = logging.getLogger("diarrhizer")
+    if package_logger.handlers:
+        return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    package_logger.addHandler(handler)
+    package_logger.setLevel(logging.INFO)
+    package_logger.propagate = False
+
+
 # [SEMANTIC-BEGIN] CLI:ENTRY
 # @purpose: CLI entry point for Diarrhizer commands
 # @description: Provides doctor and run commands for diagnostics and processing
-# @sideEffects: Parses args, runs diagnostics or pipeline
+# @sideEffects: Parses args, runs diagnostics or pipeline, configures a StreamHandler
+#   (stdout, "%(message)s") on the "diarrhizer" package logger so stage/pipeline
+#   progress logged via logging (see PIPELINE:RUNNER) prints like the old print()s did
 # @errors: Exits with code 1 on invalid arguments
-# @see: DIAGNOSTICS:DOCTOR
+# @see: DIAGNOSTICS:DOCTOR, PIPELINE:RUNNER
 def main() -> int:
     """Main CLI entry point."""
+    _configure_logging()
+
     parser = argparse.ArgumentParser(
         prog="diarrhizer",
         description="Local Windows tool for processing call recordings"

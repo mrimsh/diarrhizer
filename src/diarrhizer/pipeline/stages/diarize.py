@@ -1,5 +1,6 @@
 """Diarize stage for speaker diarization."""
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,13 +12,16 @@ from diarrhizer.utils import write_json_atomic
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
 
+logger = logging.getLogger(__name__)
+
 
 # [SEMANTIC-BEGIN] STAGE:DIARIZE
 # @purpose: Perform speaker diarization using WhisperX/pyannote
 # @description: Consumes normalized WAV from convert stage and produces speaker segments
 # @inputs: artifacts/audio/normalized.wav
 # @outputs: artifacts/diar/diarization.json
-# @sideEffects: Loads pyannote model, writes diarization JSON to disk
+# @sideEffects: Loads pyannote model, writes diarization JSON to disk,
+#   logs progress via logging (INFO, extra={"stage": "diarize"})
 # @errors: RuntimeError if HF_TOKEN missing, FileNotFoundError
 # @see: ADAPTER:WHISPERX_DIARIZE, STAGE:CONVERT, PIPELINE:RUNNER
 class DiarizeStage:
@@ -94,7 +98,7 @@ class DiarizeStage:
         # Build output paths
         diar_output = job_dir / self.DIARIZATION_JSON
 
-        print(f"[{self.NAME}] Diarizing: {audio_input}")
+        logger.info(f"[{self.NAME}] Diarizing: {audio_input}", extra={"stage": self.NAME})
 
         # Check if input exists
         if not audio_input.exists():
@@ -154,9 +158,12 @@ class DiarizeStage:
         # Write diarization to JSON
         write_json_atomic(diar_output, diar_data)
 
-        print(f"[{self.NAME}] Completed in {duration:.2f}s")
-        print(f"[{self.NAME}] Speakers detected: {result.get('num_speakers', 0)}")
-        print(f"[{self.NAME}] Output: {diar_output}")
+        logger.info(f"[{self.NAME}] Completed in {duration:.2f}s", extra={"stage": self.NAME})
+        logger.info(
+            f"[{self.NAME}] Speakers detected: {result.get('num_speakers', 0)}",
+            extra={"stage": self.NAME},
+        )
+        logger.info(f"[{self.NAME}] Output: {diar_output}", extra={"stage": self.NAME})
 
         return {
             "stage": self.NAME,

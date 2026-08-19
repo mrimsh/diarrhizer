@@ -2,6 +2,7 @@
 
 import bisect
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,6 +12,8 @@ from diarrhizer.utils import write_json_atomic
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
+
+logger = logging.getLogger(__name__)
 
 
 # [SEMANTIC-BEGIN] STAGE:MERGE
@@ -22,7 +25,8 @@ if TYPE_CHECKING:
 #   merged/exported output instead of failing.
 # @inputs: artifacts/asr/transcript.json (required), artifacts/diar/diarization.json (optional)
 # @outputs: artifacts/merged/segments.json
-# @sideEffects: Reads JSON files, writes merged segments to disk
+# @sideEffects: Reads JSON files, writes merged segments to disk,
+#   logs progress via logging (INFO, extra={"stage": "merge"})
 # @errors: FileNotFoundError if transcript.json is missing
 # @see: STAGE:TRANSCRIBE, STAGE:DIARIZE, MERGE:ASSIGN_SPEAKERS
 class MergeStage:
@@ -57,7 +61,7 @@ class MergeStage:
         # Build output path
         segments_output = job_dir / self.SEGMENTS_JSON
 
-        print(f"[{self.NAME}] Merging transcripts with diarization")
+        logger.info(f"[{self.NAME}] Merging transcripts with diarization", extra={"stage": self.NAME})
 
         # Check if inputs exist
         if not transcript_input.exists():
@@ -81,7 +85,10 @@ class MergeStage:
                 diar_data = json.load(f)
             diar_segments = diar_data.get("segments", [])
         else:
-            print(f"[{self.NAME}] No diarization found at {diar_input}; defaulting to Speaker_00")
+            logger.info(
+                f"[{self.NAME}] No diarization found at {diar_input}; defaulting to Speaker_00",
+                extra={"stage": self.NAME},
+            )
             diar_segments = []
 
         # Extract segments and words from transcript
@@ -118,9 +125,11 @@ class MergeStage:
         # Write merged segments to JSON
         write_json_atomic(segments_output, output_data)
 
-        print(f"[{self.NAME}] Completed in {duration:.2f}s")
-        print(f"[{self.NAME}] Segments: {len(merged_segments)}")
-        print(f"[{self.NAME}] Output: {segments_output}")
+        logger.info(f"[{self.NAME}] Completed in {duration:.2f}s", extra={"stage": self.NAME})
+        logger.info(
+            f"[{self.NAME}] Segments: {len(merged_segments)}", extra={"stage": self.NAME}
+        )
+        logger.info(f"[{self.NAME}] Output: {segments_output}", extra={"stage": self.NAME})
 
         return {
             "stage": self.NAME,

@@ -1,5 +1,6 @@
 """Transcribe stage for WhisperX ASR and alignment."""
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -11,13 +12,16 @@ from diarrhizer.utils import write_json_atomic
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
 
+logger = logging.getLogger(__name__)
+
 
 # [SEMANTIC-BEGIN] STAGE:TRANSCRIBE
 # @purpose: Transcribe audio using WhisperX with word-level alignment
 # @description: Consumes normalized WAV from convert stage and produces transcript with timestamps
 # @inputs: artifacts/audio/normalized.wav
 # @outputs: artifacts/asr/transcript.json
-# @sideEffects: Loads WhisperX model, writes transcript JSON to disk
+# @sideEffects: Loads WhisperX model, writes transcript JSON to disk,
+#   logs progress via logging (INFO, extra={"stage": "transcribe"})
 # @errors: RuntimeError, FileNotFoundError
 # @see: ADAPTER:WHISPERX_ASR, STAGE:CONVERT, PIPELINE:RUNNER
 class TranscribeStage:
@@ -136,7 +140,7 @@ class TranscribeStage:
         # Build output paths
         transcript_output = job_dir / self.TRANSCRIPT_JSON
 
-        print(f"[{self.NAME}] Transcribing: {audio_input}")
+        logger.info(f"[{self.NAME}] Transcribing: {audio_input}", extra={"stage": self.NAME})
 
         # Check if input exists
         if not audio_input.exists():
@@ -213,11 +217,17 @@ class TranscribeStage:
         # Write transcript to JSON
         write_json_atomic(transcript_output, transcript_data)
 
-        print(f"[{self.NAME}] Completed in {duration:.2f}s")
-        print(f"[{self.NAME}] Language: {result.get('language', 'unknown')}")
-        print(f"[{self.NAME}] Output: {transcript_output}")
+        logger.info(f"[{self.NAME}] Completed in {duration:.2f}s", extra={"stage": self.NAME})
+        logger.info(
+            f"[{self.NAME}] Language: {result.get('language', 'unknown')}",
+            extra={"stage": self.NAME},
+        )
+        logger.info(f"[{self.NAME}] Output: {transcript_output}", extra={"stage": self.NAME})
         if result.get("text"):
-            print(f"[{self.NAME}] Text preview: {result['text'][:200]}...")
+            logger.info(
+                f"[{self.NAME}] Text preview: {result['text'][:200]}...",
+                extra={"stage": self.NAME},
+            )
 
         return {
             "stage": self.NAME,

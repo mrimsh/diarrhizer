@@ -1,6 +1,7 @@
 """Convert stage for audio normalization."""
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Union, List
@@ -11,6 +12,8 @@ from diarrhizer.utils import write_json_atomic
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
+
+logger = logging.getLogger(__name__)
 
 
 # [SEMANTIC-BEGIN] STAGE:CONVERT
@@ -26,7 +29,8 @@ if TYPE_CHECKING:
 # @inputs: job.input_path, config.audio_profile
 # @outputs: artifacts/audio/normalized.wav, meta/run.json, and for split-stereo also
 #   artifacts/audio/normalized_left.wav / normalized_right.wav
-# @sideEffects: Creates output directory structure, writes audio file(s) to disk
+# @sideEffects: Creates output directory structure, writes audio file(s) to disk,
+#   logs progress via logging (INFO, extra={"stage": "convert"})
 # @errors: RuntimeError, FileNotFoundError
 # @see: ADAPTER:FFMPEG, PIPELINE:RUNNER
 class ConvertStage:
@@ -67,7 +71,7 @@ class ConvertStage:
         job_dir = job.job_dir
         config = job.config
 
-        print(f"[{self.NAME}] Converting: {input_path}")
+        logger.info(f"[{self.NAME}] Converting: {input_path}", extra={"stage": self.NAME})
 
         # Get audio profile from config
         audio_profile = config.audio_profile
@@ -131,12 +135,15 @@ class ConvertStage:
 
         write_json_atomic(meta_output, meta_info)
 
-        print(f"[{self.NAME}] Completed in {duration:.2f}s")
-        print(f"[{self.NAME}] Profile: {audio_profile}")
+        logger.info(f"[{self.NAME}] Completed in {duration:.2f}s", extra={"stage": self.NAME})
+        logger.info(f"[{self.NAME}] Profile: {audio_profile}", extra={"stage": self.NAME})
         if isinstance(result_path, list):
-            print(f"[{self.NAME}] Outputs: {', '.join(str(p) for p in result_path)}")
+            logger.info(
+                f"[{self.NAME}] Outputs: {', '.join(str(p) for p in result_path)}",
+                extra={"stage": self.NAME},
+            )
         else:
-            print(f"[{self.NAME}] Output: {result_path}")
+            logger.info(f"[{self.NAME}] Output: {result_path}", extra={"stage": self.NAME})
 
         return {
             "stage": self.NAME,

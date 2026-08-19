@@ -1,6 +1,7 @@
 """Export stage for generating final output files."""
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +15,8 @@ from diarrhizer.utils import write_text_atomic
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext, PipelineConfig
+
+logger = logging.getLogger(__name__)
 
 
 # [SEMANTIC-BEGIN] STAGE:EXPORT
@@ -30,7 +33,8 @@ if TYPE_CHECKING:
 #   segments.json or with each other.
 # @inputs: artifacts/merged/segments.json
 # @outputs: one file per Exporter in EXPORTERS (artifacts/export/result.md, artifacts/export/result.json)
-# @sideEffects: Reads JSON files, writes export files to disk
+# @sideEffects: Reads JSON files, writes export files to disk,
+#   logs progress via logging (INFO, extra={"stage": "export"})
 # @errors: FileNotFoundError if input artifacts missing
 # @see: STAGE:MERGE, EXPORT:MARKDOWN, EXPORT:JSON
 @dataclass(frozen=True)
@@ -80,7 +84,7 @@ class ExportStage:
         # Build input path
         segments_input = job_dir / self.INPUT_SEGMENTS
 
-        print(f"[{self.NAME}] Exporting results")
+        logger.info(f"[{self.NAME}] Exporting results", extra={"stage": self.NAME})
 
         # Check if input exists
         if not segments_input.exists():
@@ -113,10 +117,13 @@ class ExportStage:
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
 
-        print(f"[{self.NAME}] Completed in {duration:.2f}s")
-        print(f"[{self.NAME}] Segments: {len(segments)}")
+        logger.info(f"[{self.NAME}] Completed in {duration:.2f}s", extra={"stage": self.NAME})
+        logger.info(f"[{self.NAME}] Segments: {len(segments)}", extra={"stage": self.NAME})
         for exporter in self.EXPORTERS:
-            print(f"[{self.NAME}] {exporter.name}: {outputs[exporter.name]}")
+            logger.info(
+                f"[{self.NAME}] {exporter.name}: {outputs[exporter.name]}",
+                extra={"stage": self.NAME},
+            )
 
         return {
             "stage": self.NAME,

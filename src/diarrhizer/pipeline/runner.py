@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 #   is_stale-based caching, not an unconditional recompute.
 # @inputs: input_path, config, out_dir, stages, job_dir, force, force_stage, from_stage, to_stage
 # @outputs: Artifacts on disk per stage definitions
-# @sideEffects: Creates job directory, writes artifacts to disk, deletes artifacts when force is used
+# @sideEffects: Creates job directory, writes artifacts to disk, deletes artifacts when force is used,
+#   logs pipeline/stage progress via logging (INFO; per-stage lines carry extra={"stage": <name>})
 # @errors: RuntimeError, FileNotFoundError, ValueError
 # @see: STAGE:CONVERT, STAGE:TRANSCRIBE, ARTIFACTS:LAYOUT, PIPELINE:CACHE, CONFIG:PIPELINE
 class StageProtocol(Protocol):
@@ -336,22 +337,22 @@ def run_pipeline(
         config=config,
     )
 
-    print(f"=" * 50)
-    print(f"Diarrhizer Pipeline")
-    print(f"=" * 50)
-    print(f"Input: {input_path}")
-    print(f"Output: {job_dir}")
-    print(f"Job ID: {job_id}")
-    print(f"Language: {language}")
-    print(f"Device: {device}")
-    print(f"Speakers: {min_speakers}-{max_speakers}")
+    logger.info(f"=" * 50)
+    logger.info(f"Diarrhizer Pipeline")
+    logger.info(f"=" * 50)
+    logger.info(f"Input: {input_path}")
+    logger.info(f"Output: {job_dir}")
+    logger.info(f"Job ID: {job_id}")
+    logger.info(f"Language: {language}")
+    logger.info(f"Device: {device}")
+    logger.info(f"Speakers: {min_speakers}-{max_speakers}")
     if from_stage or to_stage:
-        print(f"Stage range: {from_stage or stage_names[0]} -> {to_stage or stage_names[-1]}")
+        logger.info(f"Stage range: {from_stage or stage_names[0]} -> {to_stage or stage_names[-1]}")
     if force:
-        print(f"FORCE: Recomputing all stages")
+        logger.info(f"FORCE: Recomputing all stages")
     elif force_stage:
-        print(f"FORCE: Recomputing stage '{force_stage}' only")
-    print(f"=" * 50)
+        logger.info(f"FORCE: Recomputing stage '{force_stage}' only")
+    logger.info(f"=" * 50)
 
     # Run stages sequentially
     results: list[dict] = []
@@ -365,11 +366,14 @@ def run_pipeline(
         # which still go through the normal is_stale-based caching below
         # rather than being unconditionally recomputed.
         if index < from_index or index > to_index:
-            print(f"\n--- Stage: {stage_name} (skipped, outside stage range) ---")
+            logger.info(
+                f"\n--- Stage: {stage_name} (skipped, outside stage range) ---",
+                extra={"stage": stage_name},
+            )
             results.append({"stage": stage_name, "status": "skipped"})
             continue
 
-        print(f"\n--- Stage: {stage_name} ---")
+        logger.info(f"\n--- Stage: {stage_name} ---", extra={"stage": stage_name})
 
         # Determine if this stage should be forced
         should_force = force or (force_stage == stage_name)
@@ -389,9 +393,14 @@ def run_pipeline(
                         artifact_path = path
                         break
             if artifact_path:
-                print(f"Stage {stage_name}: using cached output from {artifact_path}")
+                logger.info(
+                    f"Stage {stage_name}: using cached output from {artifact_path}",
+                    extra={"stage": stage_name},
+                )
             else:
-                print(f"Stage {stage_name}: using cached output")
+                logger.info(
+                    f"Stage {stage_name}: using cached output", extra={"stage": stage_name}
+                )
             results.append({
                 "stage": stage_name,
                 "status": "cached",
@@ -403,7 +412,10 @@ def run_pipeline(
         # the latter also includes this stage's *inputs* (other stages'
         # outputs), which must never be deleted here.
         if should_force:
-            print(f"Stage {stage_name}: forcing recompute (--force flag)")
+            logger.info(
+                f"Stage {stage_name}: forcing recompute (--force flag)",
+                extra={"stage": stage_name},
+            )
             outputs = stage.get_output_paths(job_dir)
             if isinstance(outputs, dict):
                 for path in outputs.values():
@@ -414,7 +426,7 @@ def run_pipeline(
                         except OSError as e:
                             logger.warning(f"Could not delete {path}: {e}")
         else:
-            print(f"Stage {stage_name}: running...")
+            logger.info(f"Stage {stage_name}: running...", extra={"stage": stage_name})
 
         # Run the stage
         try:
@@ -427,10 +439,10 @@ def run_pipeline(
     end_time = datetime.now()
     total_duration = (end_time - start_time).total_seconds()
 
-    print(f"\n{'=' * 50}")
-    print(f"Pipeline completed in {total_duration:.2f}s")
-    print(f"Output directory: {job_dir}")
-    print(f"{'=' * 50}")
+    logger.info(f"\n{'=' * 50}")
+    logger.info(f"Pipeline completed in {total_duration:.2f}s")
+    logger.info(f"Output directory: {job_dir}")
+    logger.info(f"{'=' * 50}")
 
     return {
         "job_id": job_id,
