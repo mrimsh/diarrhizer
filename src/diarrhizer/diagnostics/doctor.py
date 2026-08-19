@@ -2,8 +2,9 @@
 
 import os
 import sys
-import shutil
 from typing import List, Tuple
+
+from diarrhizer.adapters.ffmpeg import ENV_FFMPEG_PATH, resolve_ffmpeg_path
 
 
 # [SEMANTIC-BEGIN] DIAGNOSTICS:DOCTOR
@@ -11,7 +12,7 @@ from typing import List, Tuple
 # @description: Checks for Python version, FFmpeg, torch/torchaudio, CUDA, torchcodec, HF token, and critical ML imports
 # @sideEffects: Reads environment variables, imports optional modules
 # @errors: Prints warnings for missing dependencies
-# @see: CLI:ENTRY
+# @see: CLI:ENTRY, ADAPTER:FFMPEG
 def run_doctor_checks() -> None:
     """Run all diagnostic checks and print results."""
     print("=" * 50)
@@ -71,13 +72,25 @@ def check_python_version() -> Tuple[str, bool, str]:
 
 
 def check_ffmpeg() -> Tuple[str, bool, str]:
-    """Check FFmpeg is available in PATH."""
-    ffmpeg_path = shutil.which("ffmpeg")
-    
+    """Check FFmpeg is resolvable via DIARRHIZER_FFMPEG_PATH or PATH.
+
+    Mirrors FFmpegAdapter's resolution order (minus the constructor's
+    explicit ffmpeg_path argument, which doctor has no way to know about).
+    """
+    try:
+        ffmpeg_path = resolve_ffmpeg_path()
+    except FileNotFoundError as e:
+        return ("FFmpeg", False, str(e))
+
     if ffmpeg_path:
-        return ("FFmpeg", True, f"Found at: {ffmpeg_path}")
+        source = f"via {ENV_FFMPEG_PATH}" if os.environ.get(ENV_FFMPEG_PATH) else "via PATH"
+        return ("FFmpeg", True, f"Found at: {ffmpeg_path} ({source})")
     else:
-        return ("FFmpeg", False, "Not found in PATH. Install FFmpeg and add to PATH.")
+        return (
+            "FFmpeg",
+            False,
+            f"Not found. Install FFmpeg and add to PATH, or set {ENV_FFMPEG_PATH}.",
+        )
 
 
 def check_torch() -> Tuple[str, bool, str]:

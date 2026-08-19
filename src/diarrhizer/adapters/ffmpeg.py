@@ -7,15 +7,62 @@ import subprocess
 from pathlib import Path
 from typing import Optional, List
 
+# Environment variable used to override the FFmpeg executable path.
+# See resolve_ffmpeg_path() for the full resolution order.
+ENV_FFMPEG_PATH = "DIARRHIZER_FFMPEG_PATH"
+
+
+def resolve_ffmpeg_path(explicit: Optional[str | Path] = None) -> Optional[str]:
+    """Resolve the path to the FFmpeg executable.
+
+    Resolution order:
+        1. `explicit` argument (e.g. FFmpegAdapter(ffmpeg_path=...))
+        2. `DIARRHIZER_FFMPEG_PATH` environment variable
+        3. `ffmpeg` found on PATH (shutil.which)
+
+    An override from (1) or (2) that points at a nonexistent file raises
+    immediately instead of silently falling back to the next priority
+    level - a misconfigured override should fail loudly, not get masked
+    by a PATH lookup the user didn't intend to use.
+
+    Returns:
+        The resolved path as a string, or None if nothing on PATH resolves
+        and no override was given.
+
+    Raises:
+        FileNotFoundError: `explicit` or the env var is set but the path
+            does not point to an existing file.
+    """
+    if explicit is not None:
+        explicit_path = Path(explicit)
+        if not explicit_path.is_file():
+            raise FileNotFoundError(
+                f"FFmpeg not found at explicit path (ffmpeg_path argument): {explicit_path}"
+            )
+        return str(explicit_path)
+
+    env_value = os.environ.get(ENV_FFMPEG_PATH)
+    if env_value:
+        env_path = Path(env_value)
+        if not env_path.is_file():
+            raise FileNotFoundError(
+                f"FFmpeg not found at path from {ENV_FFMPEG_PATH}: {env_path}"
+            )
+        return str(env_path)
+
+    return shutil.which("ffmpeg")
+
 
 # [SEMANTIC-BEGIN] ADAPTER:FFMPEG
 # @purpose: Wrap FFmpeg calls for audio normalization and format conversion
-# @description: Provides a clean interface to FFmpeg for converting media files to WAV with optional profiles
-# @inputs: input_path (str or Path), output_path (str or Path), audio_profile
+# @description: Provides a clean interface to FFmpeg for converting media files to WAV with optional profiles.
+#   Locates the ffmpeg executable via resolve_ffmpeg_path(): explicit ffmpeg_path arg > DIARRHIZER_FFMPEG_PATH
+#   env var > PATH lookup.
+# @inputs: input_path (str or Path), output_path (str or Path), audio_profile, ffmpeg_path (optional override)
 # @outputs: Path to converted audio file(s)
-# @sideEffects: Executes FFmpeg subprocess, creates output file(s) on disk
+# @sideEffects: Executes FFmpeg subprocess, creates output file(s) on disk, reads DIARRHIZER_FFMPEG_PATH env var
 # @errors: RuntimeError if FFmpeg is not found or conversion fails
-# @see: STAGE:CONVERT
+# @see: STAGE:CONVERT, DIAGNOSTICS:DOCTOR
 class FFmpegAdapter:
     """Adapter for FFmpeg audio conversion operations."""
 
@@ -29,20 +76,30 @@ class FFmpegAdapter:
     PROFILE_DENOISE_LIGHT = "denoise-light"
     PROFILE_SPLIT_STEREO = "split-stereo"
 
-    def __init__(self) -> None:
-        """Initialize the FFmpeg adapter and verify FFmpeg availability."""
-        self._ffmpeg_path: Optional[str] = None
-        self._verify_ffmpeg()
+    def __init__(self, ffmpeg_path: Optional[str | Path] = None) -> None:
+        """Initialize the FFmpeg adapter and verify FFmpeg availability.
 
-    def _verify_ffmpeg(self) -> None:
-        """Verify FFmpeg is available in PATH."""
-        ffmpeg_path = shutil.which("ffmpeg")
-        if ffmpeg_path is None:
+        Args:
+            ffmpeg_path: Explicit path to the ffmpeg executable. Takes priority
+                over the DIARRHIZER_FFMPEG_PATH environment variable and PATH.
+        """
+        self._ffmpeg_path: Optional[str] = None
+        self._verify_ffmpeg(ffmpeg_path)
+
+    def _verify_ffmpeg(self, ffmpeg_path: Optional[str | Path] = None) -> None:
+        """Resolve and verify FFmpeg is available (explicit arg > env var > PATH)."""
+        try:
+            resolved = resolve_ffmpeg_path(ffmpeg_path)
+        except FileNotFoundError as e:
+            raise RuntimeError(str(e)) from e
+
+        if resolved is None:
             raise RuntimeError(
-                "FFmpeg not found in PATH. Please install FFmpeg and add it to your system PATH. "
-                "See: https://ffmpeg.org/download.html"
+                "FFmpeg not found. Install FFmpeg and add it to your system PATH, "
+                f"set the {ENV_FFMPEG_PATH} environment variable, or pass "
+                "ffmpeg_path=... to FFmpegAdapter(). See: https://ffmpeg.org/download.html"
             )
-        self._ffmpeg_path = ffmpeg_path
+        self._ffmpeg_path = resolved
 
     @property
     def ffmpeg_path(self) -> str:
