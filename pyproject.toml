@@ -16,6 +16,7 @@ dependencies = [
     "torch>=2.3.0,<2.4.0",
     "torchaudio>=2.3.0,<2.4.0",
     "whisperx>=3.0",
+    "huggingface-hub<1.0",
 ]
 
 [project.optional-dependencies]
