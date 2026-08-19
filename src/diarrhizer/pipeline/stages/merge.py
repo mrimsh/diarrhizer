@@ -15,11 +15,15 @@ if TYPE_CHECKING:
 
 # [SEMANTIC-BEGIN] STAGE:MERGE
 # @purpose: Merge ASR transcripts with speaker diarization to create speaker-annotated segments
-# @description: Consumes transcript.json and diarization.json, produces segments.json with speaker labels
-# @inputs: artifacts/asr/transcript.json, artifacts/diar/diarization.json
+# @description: Consumes transcript.json and, if present, diarization.json, produces segments.json
+#   with speaker labels. A missing diarization.json is treated as "no diarization data" (empty
+#   diar_segments) rather than an error - assign_speakers already defaults every segment to
+#   Speaker_00 in that case - so ASR-only pipelines (no diarize stage) still produce readable
+#   merged/exported output instead of failing.
+# @inputs: artifacts/asr/transcript.json (required), artifacts/diar/diarization.json (optional)
 # @outputs: artifacts/merged/segments.json
 # @sideEffects: Reads JSON files, writes merged segments to disk
-# @errors: FileNotFoundError if input artifacts missing
+# @errors: FileNotFoundError if transcript.json is missing
 # @see: STAGE:TRANSCRIBE, STAGE:DIARIZE, MERGE:ASSIGN_SPEAKERS
 class MergeStage:
     """Stage for merging ASR transcripts with speaker diarization."""
@@ -62,12 +66,6 @@ class MergeStage:
                 "Please run the transcribe stage first."
             )
 
-        if not diar_input.exists():
-            raise FileNotFoundError(
-                f"Diarization not found: {diar_input}. "
-                "Please run the diarize stage first."
-            )
-
         # Ensure output directory exists
         segments_output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -75,15 +73,20 @@ class MergeStage:
         with open(transcript_input, "r", encoding="utf-8") as f:
             transcript_data = json.load(f)
 
-        with open(diar_input, "r", encoding="utf-8") as f:
-            diar_data = json.load(f)
+        # Diarization is optional: if it hasn't been run, treat it as no
+        # diarization data (assign_speakers already defaults every segment to
+        # Speaker_00 in that case) instead of failing the whole pipeline.
+        if diar_input.exists():
+            with open(diar_input, "r", encoding="utf-8") as f:
+                diar_data = json.load(f)
+            diar_segments = diar_data.get("segments", [])
+        else:
+            print(f"[{self.NAME}] No diarization found at {diar_input}; defaulting to Speaker_00")
+            diar_segments = []
 
         # Extract segments and words from transcript
         transcript_segments = transcript_data.get("segments", [])
         transcript_words = transcript_data.get("words", [])
-
-        # Extract diarization segments
-        diar_segments = diar_data.get("segments", [])
 
         start_time = datetime.now()
 

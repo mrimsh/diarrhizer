@@ -248,6 +248,39 @@ def test_job_dir_explicit_input_overrides_meta(tmp_path):
     assert data["metadata"]["input_file"] == str(new_input)
 
 
+# --- run_pipeline: merge tolerates a missing diarization stage -------------
+
+def test_pipeline_runs_merge_and_export_without_diarization(tmp_path):
+    """merge -> export must succeed even when the diarize stage never ran
+    (no diar/diarization.json on disk), producing readable output with every
+    segment defaulted to Speaker_00 instead of crashing the pipeline.
+    """
+    input_file = tmp_path / "input.wav"
+    input_file.write_bytes(b"fake")
+    out_dir = tmp_path / "out"
+    job_id = "input_20260101_000000"
+    job_dir = out_dir / job_id
+    (job_dir / "asr").mkdir(parents=True)
+    (job_dir / "asr" / "transcript.json").write_text(json.dumps({
+        "segments": [{"start": 0, "end": 1, "text": "NO DIARIZATION"}],
+        "words": [],
+    }), encoding="utf-8")
+    assert not (job_dir / "diar" / "diarization.json").exists()
+
+    with mock.patch("diarrhizer.pipeline.runner.generate_job_id", return_value=job_id):
+        result = run_pipeline(
+            input_path=input_file,
+            out_dir=out_dir,
+            stages=[MergeStage(), ExportStage()],
+        )
+
+    assert _statuses(result) == {"merge": "completed", "export": "completed"}
+    segments = json.loads((job_dir / "merged" / "segments.json").read_text(encoding="utf-8"))
+    assert segments["segments"][0]["speaker_id"] == "Speaker_00"
+    md = (job_dir / "export" / "result.md").read_text(encoding="utf-8")
+    assert "NO DIARIZATION" in md
+
+
 # --- run_pipeline: --from-stage / --to-stage -------------------------------
 
 def test_to_stage_merge_skips_export(fixed_job):

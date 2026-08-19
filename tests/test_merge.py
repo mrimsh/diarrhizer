@@ -1,8 +1,13 @@
 """Tests for the speaker-assignment algorithm in diarrhizer.pipeline.stages.merge."""
 
+import json
 import random
+from types import SimpleNamespace
+
+import pytest
 
 from diarrhizer.pipeline.stages.merge import (
+    MergeStage,
     assign_speakers,
     _find_overlapping_speaker,
     _DiarizationSweep,
@@ -107,6 +112,65 @@ def test_missing_diarization_keys_default_gracefully():
     diar = [{"start": 0, "end": 1}]  # no "speaker" key
     result = assign_speakers(segments, [], diar)
     assert result[0]["speaker_id"] == "Speaker_00"
+
+
+# --- MergeStage.run() -------------------------------------------------------
+
+def _job(job_dir):
+    return SimpleNamespace(job_dir=job_dir)
+
+
+def test_run_without_diarization_file_defaults_all_segments_to_speaker_00(tmp_path):
+    # No diarize stage has run: diar/diarization.json doesn't exist at all.
+    # This must not raise - it should behave like an empty diarization input.
+    job_dir = tmp_path / "job"
+    (job_dir / "asr").mkdir(parents=True)
+    (job_dir / "asr" / "transcript.json").write_text(json.dumps({
+        "segments": [
+            {"start": 0, "end": 1, "text": "hello"},
+            {"start": 1, "end": 2, "text": "world"},
+        ],
+        "words": [],
+    }), encoding="utf-8")
+
+    assert not (job_dir / "diar" / "diarization.json").exists()
+
+    result = MergeStage().run(_job(job_dir))
+
+    assert result["status"] == "completed"
+    segments_path = job_dir / "merged" / "segments.json"
+    assert segments_path.exists()
+    output = json.loads(segments_path.read_text(encoding="utf-8"))
+    assert [s["speaker_id"] for s in output["segments"]] == ["Speaker_00", "Speaker_00"]
+
+
+def test_run_without_transcript_file_still_raises_file_not_found(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+
+    with pytest.raises(FileNotFoundError, match="Transcript not found"):
+        MergeStage().run(_job(job_dir))
+
+
+def test_run_with_diarization_file_present_assigns_real_speakers(tmp_path):
+    # Regression guard: presence of diar/diarization.json must still be used
+    # (not silently ignored now that its absence is tolerated).
+    job_dir = tmp_path / "job"
+    (job_dir / "asr").mkdir(parents=True)
+    (job_dir / "diar").mkdir(parents=True)
+    (job_dir / "asr" / "transcript.json").write_text(json.dumps({
+        "segments": [{"start": 0, "end": 5, "text": "hi"}],
+        "words": [],
+    }), encoding="utf-8")
+    (job_dir / "diar" / "diarization.json").write_text(json.dumps({
+        "segments": [{"start": 0, "end": 5, "speaker": "Speaker_01"}],
+    }), encoding="utf-8")
+
+    result = MergeStage().run(_job(job_dir))
+
+    assert result["status"] == "completed"
+    output = json.loads((job_dir / "merged" / "segments.json").read_text(encoding="utf-8"))
+    assert output["segments"][0]["speaker_id"] == "Speaker_01"
 
 
 # --- _find_overlapping_speaker ---------------------------------------------
