@@ -16,6 +16,7 @@ from diarrhizer_gui.screens.history_screen import HistoryScreen
 from diarrhizer_gui.screens.monitor_screen import MonitorScreen
 from diarrhizer_gui.screens.new_job_screen import NewJobScreen
 from diarrhizer_gui.screens.placeholder_screen import PlaceholderScreen
+from diarrhizer_gui.screens.result_screen import ResultScreen
 
 NAV_ITEMS = [
     ("Доктор", "doctor"),
@@ -66,14 +67,22 @@ class MainWindow(QMainWindow):
         self._new_job = NewJobScreen()
         self._new_job.run_requested.connect(self._on_run_requested)
 
+        self._history = HistoryScreen()
+        self._history.view_result_requested.connect(self._show_result)
+
         self._monitor = MonitorScreen()
         self._monitor.back_requested.connect(self._go_to_history)
+        self._monitor.view_result_requested.connect(self._show_result)
+
+        self._result = ResultScreen()
+        self._result.back_requested.connect(self._go_to_history)
+        self._result.reexport_requested.connect(self._on_reexport_requested)
 
         screens = {
             "doctor": DoctorScreen(),
             "models": PlaceholderScreen("Модели"),
             "new_job": self._new_job,
-            "history": HistoryScreen(),
+            "history": self._history,
             "settings": PlaceholderScreen("Настройки"),
         }
         for label, key in NAV_ITEMS:
@@ -82,14 +91,29 @@ class MainWindow(QMainWindow):
             self._nav.addItem(item)
             self._stack.addWidget(screens[key])
 
-        # Not a nav destination - only reachable by starting a run from
-        # "Новое задание"; the nav row selection is left wherever it was.
+        # Not nav destinations - only reachable from "Новое задание" (Monitor)
+        # or "Результат"/"Просмотреть результат" (Result); nav row selection
+        # is left wherever it was.
         self._stack.addWidget(self._monitor)
+        self._stack.addWidget(self._result)
 
     def _go_to_history(self) -> None:
         self._nav.setCurrentRow(HISTORY_ROW)
 
+    def _show_result(self, job_dir) -> None:
+        self._result.load(job_dir)
+        self._stack.setCurrentWidget(self._result)
+
     def _on_run_requested(self, mode: str, kwargs: dict) -> None:
+        self._start_worker(mode, kwargs)
+
+    def _on_reexport_requested(self, kwargs: dict) -> None:
+        # build_stages("full") already returns all 5 stages, which is what
+        # from_stage/to_stage="export" need to slice against - re-export
+        # doesn't need its own build_stages() mode.
+        self._start_worker("full", kwargs)
+
+    def _start_worker(self, mode: str, kwargs: dict) -> None:
         if self._job_running:
             return
         self._job_running = True

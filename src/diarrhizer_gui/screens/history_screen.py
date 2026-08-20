@@ -7,7 +7,7 @@ there's nothing to run in a background thread here.
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -53,6 +53,8 @@ class StageDots(QWidget):
 
 
 class RowActions(QWidget):
+    open_result_requested = Signal(Path)
+
     def __init__(self, job: JobSummary) -> None:
         super().__init__()
         layout = QHBoxLayout(self)
@@ -66,8 +68,8 @@ class RowActions(QWidget):
         open_result = QPushButton("Результат")
         open_result.setEnabled(job.result_path is not None)
         if job.result_path is not None:
-            result_path = job.result_path
-            open_result.clicked.connect(lambda: os.startfile(str(result_path)))
+            job_dir = job.job_dir
+            open_result.clicked.connect(lambda: self.open_result_requested.emit(job_dir))
         layout.addWidget(open_result)
 
         layout.addStretch(1)
@@ -75,6 +77,7 @@ class RowActions(QWidget):
 
 class HistoryScreen(QWidget):
     COLUMNS = ["Дата", "Файл", "Язык", "Спикеры", "Модель", "Этапы", "Действия"]
+    view_result_requested = Signal(Path)
 
     def __init__(self) -> None:
         super().__init__()
@@ -155,4 +158,6 @@ class HistoryScreen(QWidget):
             self._table.setItem(row, 3, QTableWidgetItem(job.speakers))
             self._table.setItem(row, 4, QTableWidgetItem(job.asr_model))
             self._table.setCellWidget(row, 5, StageDots(job.stage_done))
-            self._table.setCellWidget(row, 6, RowActions(job))
+            row_actions = RowActions(job)
+            row_actions.open_result_requested.connect(self.view_result_requested)
+            self._table.setCellWidget(row, 6, row_actions)

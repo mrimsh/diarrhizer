@@ -8,6 +8,8 @@ from logs (runner.py's except-block around stage.run() still uses print(),
 not logger) - they arrive only via PipelineWorker's `failed` signal.
 """
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -90,6 +92,7 @@ class StageStep(QWidget):
 
 class MonitorScreen(QWidget):
     back_requested = Signal()
+    view_result_requested = Signal(Path)
 
     def __init__(self) -> None:
         super().__init__()
@@ -115,15 +118,25 @@ class MonitorScreen(QWidget):
         self._back_button.clicked.connect(self.back_requested)
         self._back_button.setEnabled(False)
 
+        self._view_result_button = QPushButton("Просмотреть результат")
+        self._view_result_button.clicked.connect(self._emit_view_result)
+        self._view_result_button.hide()
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        footer.addWidget(self._view_result_button)
+        footer.addWidget(self._back_button)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.addWidget(title)
         layout.addWidget(self._status_label)
         layout.addLayout(stepper_row)
         layout.addWidget(self._log, stretch=1)
-        layout.addWidget(self._back_button, alignment=Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(footer)
 
         self._current_stage: str | None = None
+        self._result_job_dir: Path | None = None
 
     def reset(self, mode: str) -> None:
         """Prepare the screen for a fresh run. `mode` decides which stages
@@ -138,7 +151,9 @@ class MonitorScreen(QWidget):
         self._status_label.setText("Выполняется…")
         self._status_label.setStyleSheet("color: #565c6b;")
         self._back_button.setEnabled(False)
+        self._view_result_button.hide()
         self._current_stage = None
+        self._result_job_dir = None
 
     def on_progress(self, stage: str, message: str) -> None:
         self._log.appendPlainText(f"[{stage}] {message}" if stage != "-" else message)
@@ -156,6 +171,15 @@ class MonitorScreen(QWidget):
         else:
             self._status_label.setText("Готово")
         self._back_button.setEnabled(True)
+
+        job_dir = Path(result["job_dir"])
+        if (job_dir / "export" / "result.json").exists():
+            self._result_job_dir = job_dir
+            self._view_result_button.show()
+
+    def _emit_view_result(self) -> None:
+        if self._result_job_dir is not None:
+            self.view_result_requested.emit(self._result_job_dir)
 
     def on_failed(self, error_type: str, message: str) -> None:
         if self._current_stage is not None and self._current_stage in self._steps:
