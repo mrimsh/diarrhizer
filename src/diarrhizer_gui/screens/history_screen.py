@@ -22,9 +22,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from diarrhizer_gui import settings_keys
 from diarrhizer_gui.job_scan import STAGE_ARTIFACTS, JobSummary, scan_jobs
-
-SETTINGS_KEY_OUT_DIR = "history/out_dir"
 
 STAGE_LABELS = [name[0].upper() for name, _ in STAGE_ARTIFACTS]  # C T D M E
 
@@ -123,9 +122,13 @@ class HistoryScreen(QWidget):
         layout.addWidget(self._empty_label)
 
         default_out = str(Path.cwd() / "out")
-        out_dir = self._settings.value(SETTINGS_KEY_OUT_DIR, default_out)
+        out_dir = self._settings.value(settings_keys.OUT_DIR, default_out)
         self._path_field.setText(out_dir)
 
+        self._refresh()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
         self._refresh()
 
     def _browse(self) -> None:
@@ -133,7 +136,7 @@ class HistoryScreen(QWidget):
         chosen = QFileDialog.getExistingDirectory(self, "Папка результатов", current)
         if chosen:
             self._path_field.setText(chosen)
-            self._settings.setValue(SETTINGS_KEY_OUT_DIR, chosen)
+            self._settings.setValue(settings_keys.OUT_DIR, chosen)
             self._refresh()
 
     def _refresh(self) -> None:
