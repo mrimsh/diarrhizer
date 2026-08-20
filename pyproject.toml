@@ -24,6 +24,9 @@ cuda = [
     # Use with: pip install -e .[cuda]
     # Then install CUDA wheels separately (see requirements/cuda-cu121.txt)
 ]
+gui = [
+    "PySide6>=6.6,<7.0",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.1",
@@ -31,12 +34,14 @@ dev = [
 
 [project.scripts]
 diarrhizer = "diarrhizer.cli:main"
+diarrhizer-gui = "diarrhizer_gui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-dir]
 diarrhizer = "src/diarrhizer"
+diarrhizer_gui = "src/diarrhizer_gui"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
