@@ -8,6 +8,7 @@ at import time - same pattern as the other screens).
 """
 
 import os
+from pathlib import Path
 
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from diarrhizer.diagnostics import doctor
+from diarrhizer.diagnostics import models as model_cache
 from diarrhizer_gui import env_file, settings_keys
 from diarrhizer_gui.screens.new_job_screen import ASR_MODELS
 
@@ -100,11 +102,32 @@ class SettingsScreen(QWidget):
         self._ffmpeg_status_label = QLabel()
         self._ffmpeg_status_label.setStyleSheet("color: #7d8394;")
 
+        # --- Model cache directory (HF_HOME) ---
+        self._cache_dir_field = QLineEdit()
+        self._cache_dir_field.setReadOnly(True)
+        cache_dir_browse = QPushButton("Обзор…")
+        cache_dir_browse.clicked.connect(self._browse_cache_dir)
+        cache_dir_save = QPushButton("Сохранить")
+        cache_dir_save.clicked.connect(self._save_cache_dir)
+        cache_dir_clear = QPushButton("Сбросить")
+        cache_dir_clear.clicked.connect(self._clear_cache_dir)
+        cache_dir_row = QHBoxLayout()
+        cache_dir_row.addWidget(self._cache_dir_field, stretch=1)
+        cache_dir_row.addWidget(cache_dir_browse)
+        cache_dir_row.addWidget(cache_dir_save)
+        cache_dir_row.addWidget(cache_dir_clear)
+
+        self._cache_dir_status_label = QLabel()
+        self._cache_dir_status_label.setStyleSheet("color: #7d8394;")
+        self._cache_dir_status_label.setWordWrap(True)
+
         env_form = QFormLayout()
         env_form.addRow("HF-токен:", hf_row)
         env_form.addRow("", self._hf_status_label)
         env_form.addRow("Путь к FFmpeg:", ffmpeg_row)
         env_form.addRow("", self._ffmpeg_status_label)
+        env_form.addRow("Каталог кэша моделей:", cache_dir_row)
+        env_form.addRow("", self._cache_dir_status_label)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -120,9 +143,6 @@ class SettingsScreen(QWidget):
         self._load()
 
     def _load(self) -> None:
-        import os as _os
-        from pathlib import Path
-
         default_out = str(Path.cwd() / "out")
         self._out_field.setText(self._settings.value(settings_keys.OUT_DIR, default_out))
 
@@ -138,11 +158,14 @@ class SettingsScreen(QWidget):
             self._model_combo.setCurrentText(model)
             self._model_combo.blockSignals(False)
 
-        self._hf_field.setText(_os.environ.get("HF_TOKEN", ""))
+        self._hf_field.setText(os.environ.get("HF_TOKEN", ""))
         self._refresh_hf_status()
 
-        self._ffmpeg_field.setText(_os.environ.get("DIARRHIZER_FFMPEG_PATH", ""))
+        self._ffmpeg_field.setText(os.environ.get("DIARRHIZER_FFMPEG_PATH", ""))
         self._refresh_ffmpeg_status()
+
+        self._cache_dir_field.setText(os.environ.get("HF_HOME", ""))
+        self._refresh_cache_dir_status()
 
     def _refresh_hf_status(self) -> None:
         _, ok, message = doctor.check_hf_token()
@@ -153,6 +176,13 @@ class SettingsScreen(QWidget):
         _, ok, message = doctor.check_ffmpeg()
         self._ffmpeg_status_label.setText(message)
         self._ffmpeg_status_label.setStyleSheet("color: #2f7d52;" if ok else "color: #b23b35;")
+
+    def _refresh_cache_dir_status(self) -> None:
+        resolved = model_cache.resolve_cache_dir()
+        self._cache_dir_status_label.setText(
+            f"Фактически используется: {resolved}. Новые модели скачиваются сюда; "
+            "уже скачанные в прежнем расположении сами не переносятся."
+        )
 
     def _browse_out(self) -> None:
         chosen = QFileDialog.getExistingDirectory(self, "Папка результатов", self._out_field.text())
@@ -199,3 +229,25 @@ class SettingsScreen(QWidget):
         env_file.write_env_file(ENV_PATH, {"DIARRHIZER_FFMPEG_PATH": ""})
         os.environ.pop("DIARRHIZER_FFMPEG_PATH", None)
         self._refresh_ffmpeg_status()
+
+    def _browse_cache_dir(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Каталог кэша моделей", self._cache_dir_field.text()
+        )
+        if chosen:
+            self._cache_dir_field.setText(chosen)
+
+    def _save_cache_dir(self) -> None:
+        path = self._cache_dir_field.text().strip()
+        env_file.write_env_file(ENV_PATH, {"HF_HOME": path})
+        if path:
+            os.environ["HF_HOME"] = path
+        else:
+            os.environ.pop("HF_HOME", None)
+        self._refresh_cache_dir_status()
+
+    def _clear_cache_dir(self) -> None:
+        self._cache_dir_field.setText("")
+        env_file.write_env_file(ENV_PATH, {"HF_HOME": ""})
+        os.environ.pop("HF_HOME", None)
+        self._refresh_cache_dir_status()
