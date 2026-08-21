@@ -89,19 +89,16 @@ class NewJobScreen(QWidget):
         self._model_combo = QComboBox()
         self._model_combo.setEditable(True)
         self._model_combo.addItems(ASR_MODELS)
-        self._model_combo.setCurrentText("large-v3")
 
         self._device_combo = QComboBox()
         self._device_combo.addItem("cuda")
         self._device_combo.addItem("cpu")
         _, cuda_ok, cuda_message = doctor.check_cuda()
-        if cuda_ok:
-            self._device_combo.setCurrentIndex(0)
-        else:
+        if not cuda_ok:
             cuda_item = self._device_combo.model().item(0)
             cuda_item.setEnabled(False)
             cuda_item.setToolTip(cuda_message)
-            self._device_combo.setCurrentIndex(1)
+        self._cuda_available = cuda_ok
 
         form = QFormLayout()
         form.addRow("Файл:", input_row)
@@ -127,15 +124,24 @@ class NewJobScreen(QWidget):
         layout.addWidget(self._run_button)
         layout.addStretch(1)
 
-        default_out = str(Path.cwd() / "out")
-        self._out_field.setText(self._settings.value(settings_keys.OUT_DIR, default_out))
-
+        self._apply_defaults()
         self._validate()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self._apply_defaults()
+
+    def _apply_defaults(self) -> None:
         default_out = str(Path.cwd() / "out")
         self._out_field.setText(self._settings.value(settings_keys.OUT_DIR, default_out))
+
+        default_model = self._settings.value(settings_keys.DEFAULT_ASR_MODEL, "") or "large-v3"
+        self._model_combo.setCurrentText(default_model)
+
+        default_device = self._settings.value(settings_keys.DEFAULT_DEVICE, "")
+        if not default_device:
+            default_device = "cuda" if self._cuda_available else "cpu"
+        self._device_combo.setCurrentText(default_device)
 
     def _browse_input(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Медиафайл", "", MEDIA_FILTER)

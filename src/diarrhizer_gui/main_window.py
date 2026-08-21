@@ -16,8 +16,8 @@ from diarrhizer_gui.screens.history_screen import HistoryScreen
 from diarrhizer_gui.screens.models_screen import ModelsScreen
 from diarrhizer_gui.screens.monitor_screen import MonitorScreen
 from diarrhizer_gui.screens.new_job_screen import NewJobScreen
-from diarrhizer_gui.screens.placeholder_screen import PlaceholderScreen
 from diarrhizer_gui.screens.result_screen import ResultScreen
+from diarrhizer_gui.screens.settings_screen import SettingsScreen
 
 NAV_ITEMS = [
     ("Доктор", "doctor"),
@@ -84,7 +84,7 @@ class MainWindow(QMainWindow):
             "models": ModelsScreen(),
             "new_job": self._new_job,
             "history": self._history,
-            "settings": PlaceholderScreen("Настройки"),
+            "settings": SettingsScreen(),
         }
         for label, key in NAV_ITEMS:
             item = QListWidgetItem(label)
