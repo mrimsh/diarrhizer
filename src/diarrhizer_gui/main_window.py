@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from diarrhizer_gui.pipeline_worker import PipelineWorker, SignalBridge
 from diarrhizer_gui.screens.doctor_screen import DoctorScreen
 from diarrhizer_gui.screens.history_screen import HistoryScreen
+from diarrhizer_gui.screens.models_screen import ModelsScreen
 from diarrhizer_gui.screens.monitor_screen import MonitorScreen
 from diarrhizer_gui.screens.new_job_screen import NewJobScreen
 from diarrhizer_gui.screens.placeholder_screen import PlaceholderScreen
@@ -80,7 +81,7 @@ class MainWindow(QMainWindow):
 
         screens = {
             "doctor": DoctorScreen(),
-            "models": PlaceholderScreen("Модели"),
+            "models": ModelsScreen(),
             "new_job": self._new_job,
             "history": self._history,
             "settings": PlaceholderScreen("Настройки"),
