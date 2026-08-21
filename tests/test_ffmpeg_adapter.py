@@ -6,6 +6,7 @@ env var > PATH) and FFmpegAdapter's use of it. No real ffmpeg binary is required
 """
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -174,3 +175,43 @@ def test_split_stereo_also_writes_standard_mono_downmix(tmp_path, monkeypatch):
     assert result == expected
     for path in expected:
         assert path.exists(), f"expected {path} to be written"
+
+
+# --- audio profiles: real ffmpeg invocation catches invalid filter syntax ---
+#
+# Every other test in this file fakes subprocess.run, so none of them can
+# catch "the constructed -af string is invalid ffmpeg syntax" - that's
+# exactly how denoise-light's afftdn=nr=12:nt=auto shipped and stayed broken:
+# nt (noise_type) is an enum (white/vinyl/shellac/custom), "auto" was never a
+# valid value, and ffmpeg only rejects it once actually invoked. These tests
+# run a real ffmpeg binary end to end and are skipped where one isn't on PATH.
+
+REQUIRES_REAL_FFMPEG = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None, reason="requires a real ffmpeg binary on PATH"
+)
+
+_FIXTURE_AUDIO = Path(__file__).resolve().parent.parent / "test_speech.mp3"
+
+
+@REQUIRES_REAL_FFMPEG
+@pytest.mark.skipif(not _FIXTURE_AUDIO.exists(), reason="test_speech.mp3 fixture not present")
+@pytest.mark.parametrize(
+    "profile",
+    [
+        FFmpegAdapter.PROFILE_RAW,
+        FFmpegAdapter.PROFILE_VOICE_CALL,
+        FFmpegAdapter.PROFILE_DENOISE_LIGHT,
+        FFmpegAdapter.PROFILE_SPLIT_STEREO,
+    ],
+)
+def test_audio_profile_filters_are_valid_ffmpeg_syntax(tmp_path, profile):
+    output_path = tmp_path / "normalized.wav"
+    adapter = FFmpegAdapter()
+
+    result = adapter.convert_to_wav(_FIXTURE_AUDIO, output_path, audio_profile=profile)
+
+    written = result if isinstance(result, list) else [result]
+    for path in written:
+        path = Path(path)
+        assert path.exists(), f"expected {path} to be written"
+        assert path.stat().st_size > 0, f"{path} was written but is empty"

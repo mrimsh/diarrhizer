@@ -179,7 +179,13 @@ class FFmpegAdapter:
         if audio_profile == self.PROFILE_VOICE_CALL:
             afilters.append("lowpass=7000,highpass=200,equalizer=f=3000:width_type=q:w=1:g=3")
         elif audio_profile == self.PROFILE_DENOISE_LIGHT:
-            afilters.append("afftdn=nr=12:nt=auto")
+            # afftdn's noise_type/nt option is an enum (white/vinyl/shellac/
+            # custom) - "auto" was never a valid value, so this profile
+            # always failed the moment it actually ran (confirmed against
+            # `ffmpeg -h filter=afftdn`). Dropping nt leaves the filter's own
+            # default, "white", which is what a generic light-denoise preset
+            # should use anyway.
+            afilters.append("afftdn=nr=12")
 
         if afilters:
             cmd.extend(["-af", ",".join(afilters)])
@@ -240,12 +246,17 @@ class FFmpegAdapter:
             str(output_path),
         ]
 
-        # Extract left channel
+        # Extract left/right channels. -map_channel is deprecated and this
+        # build of ffmpeg (9.0) rejects it outright ("Unrecognized option
+        # 'map_channel'") - confirmed against a real binary, not just docs.
+        # The `pan` audio filter is the modern replacement: pan=mono|c0=c0
+        # takes input channel 0 (left) as the sole output channel, c1 (right)
+        # likewise.
         cmd_left = [
             self._ffmpeg_path,
             "-y",
             "-i", str(input_path),
-            "-map_channel", "0.0.0",  # Left channel
+            "-af", "pan=mono|c0=c0",  # Left channel
             "-ar", str(self.TARGET_SAMPLE_RATE),
             "-acodec", "pcm_s16le",
             str(left_path),
@@ -256,7 +267,7 @@ class FFmpegAdapter:
             self._ffmpeg_path,
             "-y",
             "-i", str(input_path),
-            "-map_channel", "0.0.1",  # Right channel
+            "-af", "pan=mono|c0=c1",  # Right channel
             "-ar", str(self.TARGET_SAMPLE_RATE),
             "-acodec", "pcm_s16le",
             str(right_path),
