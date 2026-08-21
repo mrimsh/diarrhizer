@@ -32,7 +32,7 @@ from huggingface_hub import CacheNotFound, scan_cache_dir
 CacheDirArg = Optional[Union[str, Path]]
 
 
-def _resolve_cache_dir(cache_dir: CacheDirArg = None) -> Path:
+def resolve_cache_dir(cache_dir: CacheDirArg = None) -> Path:
     """Resolve the HF Hub cache directory, honoring HF_HUB_CACHE/HF_HOME.
 
     Reads environment variables at call time rather than relying on
@@ -71,13 +71,13 @@ def list_cached_models(cache_dir: CacheDirArg = None) -> List[CachedModelInfo]:
 
     Args:
         cache_dir: Cache directory to scan. Defaults to the resolved
-            HF_HUB_CACHE/HF_HOME location (see _resolve_cache_dir).
+            HF_HUB_CACHE/HF_HOME location (see resolve_cache_dir).
 
     Returns:
         CachedModelInfo entries sorted by repo_id, or an empty list if the
         cache directory doesn't exist yet (nothing downloaded so far).
     """
-    resolved = _resolve_cache_dir(cache_dir)
+    resolved = resolve_cache_dir(cache_dir)
     try:
         cache_info = scan_cache_dir(resolved)
     except CacheNotFound:
@@ -187,7 +187,7 @@ def clear_cache(model_id: Optional[str] = None, cache_dir: CacheDirArg = None) -
     Returns:
         Number of bytes freed. 0 if there was nothing to delete.
     """
-    resolved = _resolve_cache_dir(cache_dir)
+    resolved = resolve_cache_dir(cache_dir)
     try:
         cache_info = scan_cache_dir(resolved)
     except CacheNotFound:

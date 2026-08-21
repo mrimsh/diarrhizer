@@ -55,32 +55,32 @@ def make_cache_info(repos) -> HFCacheInfo:
     )
 
 
-# --- _resolve_cache_dir -------------------------------------------------
+# --- resolve_cache_dir -------------------------------------------------
 
 
 def test_resolve_cache_dir_explicit_arg_wins(monkeypatch):
     monkeypatch.setenv("HF_HUB_CACHE", "C:/should-not-be-used")
-    assert models._resolve_cache_dir("C:/explicit/path") == Path("C:/explicit/path")
+    assert models.resolve_cache_dir("C:/explicit/path") == Path("C:/explicit/path")
 
 
 def test_resolve_cache_dir_uses_hf_hub_cache_env(monkeypatch):
     monkeypatch.delenv("HF_HOME", raising=False)
     monkeypatch.setenv("HF_HUB_CACHE", "C:/from/hub/cache")
-    assert models._resolve_cache_dir() == Path("C:/from/hub/cache")
+    assert models.resolve_cache_dir() == Path("C:/from/hub/cache")
 
 
 def test_resolve_cache_dir_uses_hf_home_env(monkeypatch):
     monkeypatch.delenv("HF_HUB_CACHE", raising=False)
     monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
     monkeypatch.setenv("HF_HOME", "C:/from/hf/home")
-    assert models._resolve_cache_dir() == Path("C:/from/hf/home") / "hub"
+    assert models.resolve_cache_dir() == Path("C:/from/hf/home") / "hub"
 
 
 def test_resolve_cache_dir_falls_back_to_default(monkeypatch):
     monkeypatch.delenv("HF_HUB_CACHE", raising=False)
     monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
     monkeypatch.delenv("HF_HOME", raising=False)
-    assert models._resolve_cache_dir() == Path.home() / ".cache" / "huggingface" / "hub"
+    assert models.resolve_cache_dir() == Path.home() / ".cache" / "huggingface" / "hub"
 
 
 # --- list_cached_models / is_model_cached -------------------------------
