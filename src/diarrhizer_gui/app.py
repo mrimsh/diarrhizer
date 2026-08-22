@@ -25,6 +25,12 @@ QListWidget#NavList::item:selected {{
     background: {ACCENT};
     color: white;
 }}
+QLabel#CreditLabel {{
+    padding: 8px;
+    color: #8a8f98;
+    background: #f2f3f6;
+    font-size: 11px;
+}}
 """
 
 

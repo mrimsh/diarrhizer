@@ -1,5 +1,7 @@
 # Diarrhizer
 
+By MRIMSH, L. L. MRIMSH and all other LLMs
+
 A local (on-prem) Windows tool for processing call recordings:
 input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker diarization (pyannote via WhisperX) → export (`.md/.txt/.json`).
 
@@ -297,6 +299,10 @@ See `docs/troubleshooting.md` for detailed diagnostics.
 5. GUI + additional features
 
 ---
+
+## Author
+
+By MRIMSH, L. L. MRIMSH and all other LLMs
 
 ## License
 

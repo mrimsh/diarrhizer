@@ -1,12 +1,14 @@
 """Main application window: sidebar navigation + stacked screens."""
 
-from PySide6.QtCore import QSize, QThread
+from PySide6.QtCore import QSize, Qt, QThread
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QStackedWidget,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -46,11 +48,23 @@ class MainWindow(QMainWindow):
         self._nav.currentRowChanged.connect(self._stack.setCurrentIndex)
         self._nav.setCurrentRow(0)
 
+        credit = QLabel("By MRIMSH, L. L. MRIMSH and all other LLMs")
+        credit.setObjectName("CreditLabel")
+        credit.setAlignment(Qt.AlignCenter)
+        credit.setWordWrap(True)
+
+        sidebar = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(0)
+        sidebar_layout.addWidget(self._nav, stretch=1)
+        sidebar_layout.addWidget(credit)
+
         central = QWidget()
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._nav)
+        layout.addWidget(sidebar)
         layout.addWidget(self._stack, stretch=1)
         self.setCentralWidget(central)
 
