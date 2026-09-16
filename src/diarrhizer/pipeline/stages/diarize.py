@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 # @description: Consumes normalized WAV from convert stage and produces speaker segments
 # @inputs: artifacts/audio/normalized.wav
 # @outputs: artifacts/diar/diarization.json
-# @sideEffects: Loads pyannote model, writes diarization JSON to disk,
+# @sideEffects: Loads pyannote model, writes diarization JSON to disk, unloads the
+#   model and clears the CUDA cache when the stage finishes,
 #   logs progress via logging (INFO, extra={"stage": "diarize"})
 # @errors: RuntimeError if HF_TOKEN missing, FileNotFoundError
 # @see: ADAPTER:WHISPERX_DIARIZE, STAGE:CONVERT, PIPELINE:RUNNER
@@ -133,6 +134,10 @@ class DiarizeStage:
             raise RuntimeError(
                 f"Diarization failed: {e}"
             ) from e
+        finally:
+            if self._diarize_adapter is not None:
+                self._diarize_adapter.unload()
+                self._diarize_adapter = None
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()

@@ -57,6 +57,9 @@ class _FakeWhisperXAdapter:
             "language": "en",
         }
 
+    def unload(self) -> None:
+        return
+
 
 class _FakeWhisperXDiarizeAdapter:
     """Stand-in for WhisperXDiarizeAdapter that skips loading pyannote and
@@ -72,6 +75,9 @@ class _FakeWhisperXDiarizeAdapter:
             "num_speakers": 1,
             "speakers": ["SPEAKER_00"],
         }
+
+    def unload(self) -> None:
+        return
 
 
 @pytest.fixture

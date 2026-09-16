@@ -6,14 +6,26 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
+import gc
+
 import torch
+
+from diarrhizer.adapters.transcript_result import extract_transcript_fields
+
+
+def _release_cuda() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 # [SEMANTIC-BEGIN] ADAPTER:WHISPERX_ASR
 # @purpose: Wrap WhisperX for ASR transcription and word-level alignment
-# @description: Provides a clean interface to WhisperX for transcribing audio with timestamps
+# @description: Provides a clean interface to WhisperX for transcribing audio with timestamps.
+#   extract_transcript_fields() normalizes align()/transcribe() payloads (word_segments or
+#   per-segment words, plus concatenated text) into our text/segments/words shape.
 # @inputs: audio_path, language, device, compute_type, beam_size, temperature, initial_prompt, vad_params
 # @outputs: Transcript dictionary with segments and word-level timestamps
-# @sideEffects: Loads WhisperX model into memory (GPU/CPU), creates output artifacts
+# @sideEffects: Loads WhisperX model into memory (GPU/CPU); unload() releases it and empties the CUDA cache
 # @errors: RuntimeError if whisperx/torch is missing, model download fails, or transcription fails
 # @see: STAGE:TRANSCRIBE, CONFIG:INITIAL_PROMPT
 class WhisperXAdapter:
@@ -219,7 +231,9 @@ class WhisperXAdapter:
         current_condition = condition_on_previous_text if condition_on_previous_text is not None else self._condition_on_previous_text
         current_initial_prompt = initial_prompt or self._initial_prompt
         current_vad_filter = vad_filter if vad_filter is not None else self._vad_filter
-        current_vad_min_silence = vad_min_silence_ms or self._vad_min_silence_ms
+        current_vad_min_silence = (
+            self._vad_min_silence_ms if vad_min_silence_ms is None else vad_min_silence_ms
+        )
 
         self._load_whisperx()
 
@@ -269,6 +283,7 @@ class WhisperXAdapter:
 
             # Align words if language detected
             alignment_result = result
+            align_model = None
             if detected_language and detected_language != "unknown":
                 try:
                     # Load alignment model
@@ -288,11 +303,17 @@ class WhisperXAdapter:
                 except Exception as e:
                     # Alignment is best-effort, log but continue
                     logging.warning(f"Word alignment failed: {e}")
+                finally:
+                    del align_model
+
+            extracted = extract_transcript_fields(alignment_result)
+            if not extracted["text"] and alignment_result is not result:
+                extracted["text"] = extract_transcript_fields(result)["text"]
 
             return {
-                "text": alignment_result.get("text", ""),
-                "segments": alignment_result.get("segments", []),
-                "words": alignment_result.get("words", []),
+                "text": extracted["text"],
+                "segments": extracted["segments"],
+                "words": extracted["words"],
                 "language": detected_language,
             }
 
@@ -310,6 +331,13 @@ class WhisperXAdapter:
     def model(self) -> str:
         """Get the model being used."""
         return self._model
+
+    def unload(self) -> None:
+        """Drop the loaded ASR model and free GPU memory if possible."""
+        self._whisper_model = None
+        self._whisperx = None
+        self._model_loaded = False
+        _release_cuda()
 
 
 # [SEMANTIC-END] ADAPTER:WHISPERX_ASR
@@ -367,7 +395,7 @@ def transcribe_audio(
 # @description: Provides diarization capability via WhisperX's integration with pyannote
 # @inputs: audio_path, min_speakers, max_speakers, device
 # @outputs: Diarization result with speaker segments and timestamps
-# @sideEffects: Loads pyannote model, accesses HF_TOKEN for gated models
+# @sideEffects: Loads pyannote model, accesses HF_TOKEN for gated models; unload() releases GPU memory
 # @errors: RuntimeError if HF_TOKEN missing, model fails, audio decoding fails
 # @see: STAGE:DIARIZE
 class WhisperXDiarizeAdapter:
@@ -581,6 +609,11 @@ class WhisperXDiarizeAdapter:
     def device(self) -> str:
         """Get the device being used."""
         return self._device
+
+    def unload(self) -> None:
+        """Drop the loaded diarization model and free GPU memory if possible."""
+        self._diarize_model = None
+        _release_cuda()
 
 
 # [SEMANTIC-END] ADAPTER:WHISPERX_DIARIZE

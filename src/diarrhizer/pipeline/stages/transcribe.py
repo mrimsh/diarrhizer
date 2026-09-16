@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 # @description: Consumes normalized WAV from convert stage and produces transcript with timestamps
 # @inputs: artifacts/audio/normalized.wav
 # @outputs: artifacts/asr/transcript.json
-# @sideEffects: Loads WhisperX model, writes transcript JSON to disk,
+# @sideEffects: Loads WhisperX model, writes transcript JSON to disk, unloads the
+#   model and clears the CUDA cache when the stage finishes,
 #   logs progress via logging (INFO, extra={"stage": "transcribe"})
 # @errors: RuntimeError, FileNotFoundError
 # @see: ADAPTER:WHISPERX_ASR, STAGE:CONVERT, PIPELINE:RUNNER
@@ -184,6 +185,10 @@ class TranscribeStage:
             raise RuntimeError(
                 f"Transcription failed: {e}"
             ) from e
+        finally:
+            if self._whisperx_adapter is not None:
+                self._whisperx_adapter.unload()
+                self._whisperx_adapter = None
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
