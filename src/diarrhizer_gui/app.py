@@ -35,11 +35,8 @@ QLabel#CreditLabel {{
 
 
 def main() -> int:
-    # Core diarrhizer never auto-loads .env (confirmed: no python-dotenv
-    # anywhere in src/diarrhizer) - this is GUI-only, additive behavior, and
-    # runs before MainWindow so Doctor/New Job see a persisted HF_TOKEN /
-    # DIARRHIZER_FFMPEG_PATH immediately without a manual export first.
-    env_file.apply_env_file(env_file.REPO_ROOT / ".env")
+    # Same load as the CLI (repo-root .env, then cwd .env; process env wins).
+    env_file.load_project_env()
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")

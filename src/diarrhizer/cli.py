@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from diarrhizer.diagnostics.doctor import run_doctor_checks
+from diarrhizer.env_file import load_project_env
 
 # Pipeline stage names in execution order. Shared by --force-stage,
 # --from-stage, and --to-stage so the three choices lists can't drift apart.
@@ -35,13 +36,14 @@ def _configure_logging() -> None:
 # [SEMANTIC-BEGIN] CLI:ENTRY
 # @purpose: CLI entry point for Diarrhizer commands
 # @description: Provides doctor and run commands for diagnostics and processing
-# @sideEffects: Parses args, runs diagnostics or pipeline, configures a StreamHandler
+# @sideEffects: Loads project .env, parses args, runs diagnostics or pipeline, configures a StreamHandler
 #   (stdout, "%(message)s") on the "diarrhizer" package logger so stage/pipeline
 #   progress logged via logging (see PIPELINE:RUNNER) prints like the old print()s did
 # @errors: Exits with code 1 on invalid arguments
 # @see: DIAGNOSTICS:DOCTOR, PIPELINE:RUNNER
 def main() -> int:
     """Main CLI entry point."""
+    load_project_env()
     _configure_logging()
 
     parser = argparse.ArgumentParser(

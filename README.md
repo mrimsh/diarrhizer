@@ -121,6 +121,7 @@ You should see `cudnn_ops_infer64_8.dll` (cuDNN 8) in the last command. If you s
 
 The token is **not stored in code** and must never be committed.
 Use either a Windows environment variable or a local `.env` file (ignored by git).
+Both `python -m diarrhizer` and the GUI load `.env` automatically (process env wins, then cwd `.env`, then the repo-root `.env`).
 
 Example `.env`:
 
