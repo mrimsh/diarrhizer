@@ -157,23 +157,16 @@ The Markdown output follows this format:
 **Device:** cuda
 
 [00:00:00 → 00:00:05] **Speaker_00:** Hello, how are you today?
-    - [00:00:00] Hello,
-    - [00:00:00] how
-    - [00:00:01] are
-    - [00:00:01] you
-    - [00:00:02] today?
 
 [00:00:05 → 00:00:10] **Speaker_01:** I'm doing great, thanks for asking.
-    - [00:00:05] I'm
-    - [00:00:06] doing
-    ...
 ```
 
 ### Format Rules
 
 - Timecodes are in `[HH:MM:SS]` format
 - Speaker labels are bolded
-- Word-level details are indented with dashes (only shown if word timestamps are available)
+- One line per segment — word-level timings are **not** repeated here; they are
+  available in full (with per-word `speaker_id`) in `result.json`
 
 ---
 

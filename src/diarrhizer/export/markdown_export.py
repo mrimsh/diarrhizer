@@ -1,7 +1,6 @@
 """Markdown export functionality for diarized transcripts."""
 
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from diarrhizer.export.speakers import resolve_speaker_name
@@ -12,12 +11,16 @@ if TYPE_CHECKING:
 
 # [SEMANTIC-BEGIN] EXPORT:MARKDOWN
 # @purpose: Export merged segments to human-readable Markdown format
-# @description: Creates a transcript with timecodes and speaker labels. Supports speaker name mapping via config.speakers
+# @description: Creates a transcript with timecodes and speaker labels. Supports speaker name mapping via config.speakers.
+#   One line per segment and nothing else: the per-word timestamp dump that used
+#   to follow each segment restated timings the segment line already carries and
+#   buried the actual text, so word-level data now lives only in result.json
+#   (EXPORT:JSON), which keeps every word's start/end/speaker_id in full.
 # @inputs: segments data from merge stage, config metadata (including optional speakers mapping)
 # @outputs: Markdown-formatted string
 # @sideEffects: None (pure function)
 # @errors: None
-# @see: STAGE:EXPORT, EXPORT:JSON, CONFIG:PIPELINE
+# @see: STAGE:EXPORT, EXPORT:JSON, EXPORT:TEXT, CONFIG:PIPELINE
 def export_to_markdown(
     segments: list[dict[str, Any]],
     config: "PipelineConfig",
@@ -28,7 +31,7 @@ def export_to_markdown(
     Format:
     - Timecodes in [HH:MM:SS] format
     - Speaker labels followed by transcript text
-    - Word-level details if available (optional, indented)
+    - One line per segment; word-level timings are in result.json only
 
     Args:
         segments: List of segment dictionaries with start, end, speaker_id, text
@@ -60,20 +63,6 @@ def export_to_markdown(
 
         # Main segment line
         lines.append(f"[{start_time} → {end_time}] **{speaker_name}:** {text}")
-
-        # Word-level details if available
-        words = seg.get("words")
-        if words:
-            for word in words:
-                word_start = _format_timestamp(word.get("start", 0))
-                word_text = word.get("word", "")
-                word_speaker_id = word.get("speaker_id", speaker_id)
-                word_speaker_name = resolve_speaker_name(word_speaker_id, speakers)
-                if word_speaker_id != speaker_id:
-                    lines.append(f"    - [{word_start}] {word_text} ({word_speaker_name})")
-                else:
-                    lines.append(f"    - [{word_start}] {word_text}")
-
         lines.append("")
 
     return "\n".join(lines)
