@@ -17,13 +17,14 @@ def build_stages(mode: str) -> list:
     from diarrhizer.pipeline.stages.convert import ConvertStage
     from diarrhizer.pipeline.stages.transcribe import TranscribeStage
 
+    from diarrhizer.pipeline.stages.export import ExportStage
+    from diarrhizer.pipeline.stages.merge import MergeStage
+
     if mode == "asr_only":
-        return [ConvertStage(), TranscribeStage()]
+        return [ConvertStage(), TranscribeStage(), MergeStage(), ExportStage()]
 
     if mode == "full":
         from diarrhizer.pipeline.stages.diarize import DiarizeStage
-        from diarrhizer.pipeline.stages.export import ExportStage
-        from diarrhizer.pipeline.stages.merge import MergeStage
 
         return [
             ConvertStage(),

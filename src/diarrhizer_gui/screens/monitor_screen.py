@@ -143,10 +143,17 @@ class MonitorScreen(QWidget):
         actually participate ("asr_only" runs only convert+transcribe) -
         the rest are shown as not participating (pending, never updated).
         """
-        stages_in_run = set(STAGE_NAMES) if mode == "full" else {"convert", "transcribe"}
+        if mode == "full":
+            stages_in_run = set(STAGE_NAMES)
+        else:
+            stages_in_run = {"convert", "transcribe", "merge", "export"}
         for name, step in self._steps.items():
-            step.set_state("pending")
-            step.setEnabled(name in stages_in_run)
+            if name in stages_in_run:
+                step.set_state("pending")
+                step.setEnabled(True)
+            else:
+                step.set_state("skipped")
+                step.setEnabled(False)
         self._log.clear()
         self._status_label.setText("Выполняется…")
         self._status_label.setStyleSheet("color: #565c6b;")
