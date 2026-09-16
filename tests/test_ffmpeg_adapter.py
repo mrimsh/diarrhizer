@@ -215,3 +215,68 @@ def test_audio_profile_filters_are_valid_ffmpeg_syntax(tmp_path, profile):
         path = Path(path)
         assert path.exists(), f"expected {path} to be written"
         assert path.stat().st_size > 0, f"{path} was written but is empty"
+
+
+# --- audio profiles: the -af string itself ----------------------------------
+#
+# The real-ffmpeg tests above only prove the constructed filter string parses.
+# These pin the values themselves, so silently widening the voice-call
+# passband or dropping a filter is caught on any machine, ffmpeg or not.
+
+
+def _capture_ffmpeg_cmds(monkeypatch) -> list:
+    """Record every argv passed to subprocess.run, still faking the output file."""
+    calls = []
+
+    def recording_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return _fake_ffmpeg_run(cmd, **kwargs)
+
+    monkeypatch.setattr(ffmpeg_module.subprocess, "run", recording_run)
+    return calls
+
+
+def _audio_filter(cmd: list) -> str | None:
+    """The -af value of an ffmpeg argv, or None when no filter was added."""
+    if "-af" not in cmd:
+        return None
+    return cmd[cmd.index("-af") + 1]
+
+
+def _convert_with_profile(tmp_path, monkeypatch, profile: str) -> list:
+    ffmpeg_path = make_fake_ffmpeg(tmp_path)
+    input_file = tmp_path / "input.mp4"
+    input_file.write_bytes(b"fake media")
+    calls = _capture_ffmpeg_cmds(monkeypatch)
+
+    adapter = FFmpegAdapter(ffmpeg_path=ffmpeg_path)
+    adapter.convert_to_wav(
+        input_file, tmp_path / "job" / "audio" / "normalized.wav", audio_profile=profile
+    )
+    return calls
+
+
+def test_voice_call_profile_uses_the_telephone_passband(tmp_path, monkeypatch):
+    """300 Hz-7 kHz, not 200: the telephone band starts at 300 Hz, and the
+    100 Hz below it is mains hum and handling noise, not speech.
+    """
+    calls = _convert_with_profile(tmp_path, monkeypatch, FFmpegAdapter.PROFILE_VOICE_CALL)
+
+    assert len(calls) == 1
+    assert _audio_filter(calls[0]) == (
+        "lowpass=7000,highpass=300,equalizer=f=3000:width_type=q:w=1:g=3"
+    )
+
+
+def test_denoise_light_profile_leaves_afftdn_noise_type_at_its_default(tmp_path, monkeypatch):
+    """nt= must stay off the string - see the note above about nt=auto."""
+    calls = _convert_with_profile(tmp_path, monkeypatch, FFmpegAdapter.PROFILE_DENOISE_LIGHT)
+
+    assert _audio_filter(calls[0]) == "afftdn=nr=12"
+    assert "nt=" not in calls[0][calls[0].index("-af") + 1]
+
+
+def test_raw_profile_adds_no_audio_filter(tmp_path, monkeypatch):
+    calls = _convert_with_profile(tmp_path, monkeypatch, FFmpegAdapter.PROFILE_RAW)
+
+    assert _audio_filter(calls[0]) is None

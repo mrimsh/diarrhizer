@@ -177,7 +177,7 @@ class FFmpegAdapter:
         # Add profile-specific audio filters
         afilters = []
         if audio_profile == self.PROFILE_VOICE_CALL:
-            afilters.append("lowpass=7000,highpass=200,equalizer=f=3000:width_type=q:w=1:g=3")
+            afilters.append("lowpass=7000,highpass=300,equalizer=f=3000:width_type=q:w=1:g=3")
         elif audio_profile == self.PROFILE_DENOISE_LIGHT:
             # afftdn's noise_type/nt option is an enum (white/vinyl/shellac/
             # custom) - "auto" was never a valid value, so this profile
