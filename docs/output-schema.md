@@ -175,6 +175,11 @@ The Markdown output follows this format:
 - Speaker identifiers (e.g., `Speaker_00`, `Speaker_01`) are assigned by the diarization model
 - Real name mapping is a separate layer on top of this output
 - Timestamps are in seconds (float values)
+- Each segment has exactly one speaker: `speaker_id` always matches the `speaker_id`
+  of every entry in its `words`. An ASR segment that spans a speaker change is split
+  into one segment per speaker at merge time, so segments here can outnumber the
+  segments WhisperX produced. `--min-turn-duration` (default `0.4`s) sets how short a
+  turn may be before it is folded back into its neighbours as diarization jitter
 - The `words` array is optional — it is only present when WhisperX provides word-level alignment data
 
 ---

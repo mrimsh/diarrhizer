@@ -133,7 +133,7 @@ class NewJobScreen(QWidget):
         form.addRow("Устройство:", self._device_combo)
         form.addRow("Предобработка звука:", self._audio_profile_combo)
 
-        self._advanced_toggle = QPushButton("▸ Продвинутые параметры ASR")
+        self._advanced_toggle = QPushButton("▸ Продвинутые параметры")
         self._advanced_toggle.setCheckable(True)
         self._advanced_toggle.setStyleSheet(
             "QPushButton { text-align: left; border: none; font-weight: 600; padding: 4px 0; }"
@@ -166,6 +166,19 @@ class NewJobScreen(QWidget):
         self._vad_silence_spin.setValue(1000)
         self._vad_silence_spin.setSuffix(" мс")
 
+        self._min_turn_spin = QDoubleSpinBox()
+        self._min_turn_spin.setRange(0.0, 5.0)
+        self._min_turn_spin.setSingleStep(0.1)
+        self._min_turn_spin.setDecimals(2)
+        self._min_turn_spin.setValue(0.4)
+        self._min_turn_spin.setSuffix(" с")
+        self._min_turn_spin.setToolTip(
+            "Сегмент ASR, задевающий смену говорящего, режется на реплики.\n"
+            "Отрезки короче этого порога, зажатые между двумя отрезками\n"
+            "одного и того же другого спикера, считаются дрожанием\n"
+            "диаризации и приклеиваются обратно. 0 — резать на каждой смене."
+        )
+
         self._prompt_edit = QPlainTextEdit()
         self._prompt_edit.setPlaceholderText(
             "Глоссарий/начальный промпт (необязательно) — термины, имена, "
@@ -181,6 +194,12 @@ class NewJobScreen(QWidget):
         advanced_form.addRow(self._vad_checkbox)
         advanced_form.addRow("Мин. тишина для VAD:", self._vad_silence_spin)
         advanced_form.addRow("Промпт/глоссарий:", self._prompt_edit)
+        # Everything above is ASR; this one belongs to the merge stage, so it
+        # gets its own heading rather than reading as another Whisper knob.
+        diarization_header = QLabel("Диаризация")
+        diarization_header.setStyleSheet("font-weight: 600; padding-top: 8px;")
+        advanced_form.addRow(diarization_header)
+        advanced_form.addRow("Мин. длительность реплики:", self._min_turn_spin)
 
         self._advanced_container = QWidget()
         self._advanced_container.setLayout(advanced_form)
@@ -240,7 +259,7 @@ class NewJobScreen(QWidget):
     def _toggle_advanced(self, checked: bool) -> None:
         self._advanced_container.setVisible(checked)
         arrow = "▾" if checked else "▸"
-        self._advanced_toggle.setText(f"{arrow} Продвинутые параметры ASR")
+        self._advanced_toggle.setText(f"{arrow} Продвинутые параметры")
 
     def _browse_input(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Медиафайл", "", MEDIA_FILTER)
@@ -291,6 +310,7 @@ class NewJobScreen(QWidget):
             "asr_condition_on_previous_text": self._condition_checkbox.isChecked(),
             "asr_vad_filter": self._vad_checkbox.isChecked(),
             "asr_vad_min_silence_ms": self._vad_silence_spin.value(),
+            "min_turn_duration": self._min_turn_spin.value(),
         }
         prompt = self._prompt_edit.toPlainText().strip()
         if prompt:

@@ -103,6 +103,16 @@ def main() -> int:
         help="Maximum number of speakers (default: 10)"
     )
     run_parser.add_argument(
+        "--min-turn-duration",
+        type=float,
+        default=0.4,
+        help="Shortest speaker turn in seconds the merge stage splits out on "
+             "its own; shorter word runs between two runs of the same other "
+             "speaker are folded back in as diarization jitter. Raise it if "
+             "noisy diarization shreds sentences, use 0 to split on every "
+             "word-level speaker change (default: 0.4)"
+    )
+    run_parser.add_argument(
         "--lang",
         default="auto",
         help="Language code or 'auto' for detection (default: auto)"
@@ -224,7 +234,7 @@ def main() -> int:
         #   recorded it in meta/run.json); --from-stage/--to-stage select a stage range to run,
         #   skipping stages outside it entirely - e.g. --from-stage export re-exports without
         #   recomputing ASR/diarization.
-        # @inputs: args.input, args.out, args.job_dir, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.from_stage, args.to_stage, args.speakers, ASR params, audio_profile
+        # @inputs: args.input, args.out, args.job_dir, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.from_stage, args.to_stage, args.speakers, args.min_turn_duration, ASR params, audio_profile
         # @outputs: Artifacts in out/ directory
         # @sideEffects: Creates job directory, writes artifacts to disk
         # @errors: Exits with code 1 on failure
@@ -313,6 +323,7 @@ def main() -> int:
                 asr_vad_filter=_parse_bool(args.asr_vad_filter),
                 asr_vad_min_silence_ms=args.asr_vad_min_silence_ms,
                 audio_profile=args.audio_profile,
+                min_turn_duration=args.min_turn_duration,
             )
             print(f"\nPipeline completed successfully!")
             print(f"Job ID: {result['job_id']}")

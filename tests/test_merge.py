@@ -6,7 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from diarrhizer.pipeline.runner import PipelineConfig
 from diarrhizer.pipeline.stages.merge import (
+    DEFAULT_MIN_TURN_DURATION,
     MergeStage,
     assign_speakers,
     _find_overlapping_speaker,
@@ -30,6 +32,13 @@ def test_empty_diarization_defaults_all_segments_to_speaker_00():
     assert [s["text"] for s in result] == ["hello", "world"]
 
 
+def test_pyannote_speaker_ids_are_normalized():
+    segments = [{"start": 0, "end": 5, "text": "hi"}]
+    diar = [{"start": 0, "end": 5, "speaker": "SPEAKER_01"}]
+    result = assign_speakers(segments, [], diar)
+    assert result[0]["speaker_id"] == "Speaker_01"
+
+
 def test_segment_assigned_to_fully_overlapping_speaker():
     segments = [{"start": 0, "end": 5, "text": "hi"}]
     diar = [{"start": 0, "end": 5, "speaker": "Speaker_01"}]
@@ -51,17 +60,174 @@ def test_words_get_per_word_speaker_ids():
     segments = [{"start": 0, "end": 10, "text": "hi there"}]
     words = [
         {"start": 0, "end": 1, "word": "hi"},
-        {"start": 6, "end": 7, "word": "there"},
+        {"start": 2, "end": 3, "word": "there"},
+    ]
+    diar = [{"start": 0, "end": 10, "speaker": "Speaker_00"}]
+    result = assign_speakers(segments, words, diar)
+    assert result[0]["words"] == [
+        {"start": 0, "end": 1, "word": "hi", "speaker_id": "Speaker_00"},
+        {"start": 2, "end": 3, "word": "there", "speaker_id": "Speaker_00"},
+    ]
+
+
+def test_homogeneous_segment_keeps_original_text_and_timings():
+    # Nothing to split: the ASR text must survive verbatim rather than being
+    # rebuilt from word tokens (which would lose the original spacing).
+    segments = [{"start": 0, "end": 10, "text": "Hello,   how are you?"}]
+    words = [
+        {"start": 1, "end": 2, "word": "Hello,"},
+        {"start": 2, "end": 3, "word": "how"},
+        {"start": 3, "end": 4, "word": "are"},
+        {"start": 4, "end": 5, "word": "you?"},
+    ]
+    diar = [{"start": 0, "end": 10, "speaker": "Speaker_01"}]
+    result = assign_speakers(segments, words, diar)
+    assert len(result) == 1
+    assert result[0]["text"] == "Hello,   how are you?"
+    assert (result[0]["start"], result[0]["end"]) == (0, 10)
+
+
+def test_segment_speaker_comes_from_its_words_not_whole_segment_overlap():
+    # Whole-segment overlap says Speaker_00 (6s vs 4s), but every word lands in
+    # Speaker_01's stretch. The label must follow the words, or the segment
+    # would contradict its own word list.
+    segments = [{"start": 0, "end": 10, "text": "hi there"}]
+    words = [
+        {"start": 7, "end": 8, "word": "hi"},
+        {"start": 8, "end": 9, "word": "there"},
+    ]
+    diar = [
+        {"start": 0, "end": 6, "speaker": "Speaker_00"},
+        {"start": 6, "end": 10, "speaker": "Speaker_01"},
+    ]
+    result = assign_speakers(segments, words, diar)
+    assert len(result) == 1
+    assert result[0]["speaker_id"] == "Speaker_01"
+
+
+# --- splitting segments that span a speaker change -------------------------
+
+def test_segment_spanning_speaker_change_is_split_into_two():
+    segments = [{"start": 0, "end": 10, "text": "da ladno nastolko shutka"}]
+    words = [
+        {"start": 0, "end": 1, "word": "da"},
+        {"start": 1, "end": 2, "word": "ladno"},
+        {"start": 6, "end": 7, "word": "nastolko"},
+        {"start": 7, "end": 8, "word": "shutka"},
+    ]
+    diar = [
+        {"start": 0, "end": 5, "speaker": "Speaker_05"},
+        {"start": 5, "end": 10, "speaker": "Speaker_06"},
+    ]
+    result = assign_speakers(segments, words, diar)
+
+    assert [s["speaker_id"] for s in result] == ["Speaker_05", "Speaker_06"]
+    assert [s["text"] for s in result] == ["da ladno", "nastolko shutka"]
+    # Original segment bounds are preserved at the outer edges.
+    assert (result[0]["start"], result[0]["end"]) == (0, 2)
+    assert (result[1]["start"], result[1]["end"]) == (6, 10)
+
+
+def test_split_segments_stay_homogeneous():
+    # The whole point: no word may carry a speaker_id its segment doesn't.
+    segments = [{"start": 0, "end": 12, "text": "a b c d"}]
+    words = [
+        {"start": 0, "end": 1, "word": "a"},
+        {"start": 4, "end": 5, "word": "b"},
+        {"start": 8, "end": 9, "word": "c"},
+        {"start": 9, "end": 10, "word": "d"},
+    ]
+    diar = [
+        {"start": 0, "end": 3, "speaker": "Speaker_00"},
+        {"start": 3, "end": 7, "speaker": "Speaker_01"},
+        {"start": 7, "end": 12, "speaker": "Speaker_00"},
+    ]
+    result = assign_speakers(segments, words, diar)
+
+    assert [s["speaker_id"] for s in result] == ["Speaker_00", "Speaker_01", "Speaker_00"]
+    for seg in result:
+        assert {w["speaker_id"] for w in seg["words"]} == {seg["speaker_id"]}
+
+
+def test_split_segments_are_chronological_and_non_overlapping():
+    segments = [{"start": 0, "end": 12, "text": "a b c d"}]
+    words = [
+        {"start": 0, "end": 1, "word": "a"},
+        {"start": 4, "end": 5, "word": "b"},
+        {"start": 8, "end": 9, "word": "c"},
+        {"start": 9, "end": 10, "word": "d"},
+    ]
+    diar = [
+        {"start": 0, "end": 3, "speaker": "Speaker_00"},
+        {"start": 3, "end": 7, "speaker": "Speaker_01"},
+        {"start": 7, "end": 12, "speaker": "Speaker_00"},
+    ]
+    result = assign_speakers(segments, words, diar)
+
+    for seg in result:
+        assert seg["start"] <= seg["end"]
+    for earlier, later in zip(result, result[1:]):
+        assert earlier["end"] <= later["start"]
+
+
+def test_short_speaker_blip_between_same_speaker_is_absorbed():
+    # One 0.2s word flips speaker mid-sentence: diarization jitter, not a turn.
+    # The sentence must stay in one piece and the word must be relabelled.
+    segments = [{"start": 0, "end": 10, "text": "one two three"}]
+    words = [
+        {"start": 0, "end": 1, "word": "one"},
+        {"start": 5.05, "end": 5.25, "word": "two"},
+        {"start": 8, "end": 9, "word": "three"},
+    ]
+    diar = [
+        {"start": 0, "end": 5, "speaker": "Speaker_00"},
+        {"start": 5, "end": 5.3, "speaker": "Speaker_01"},
+        {"start": 5.3, "end": 10, "speaker": "Speaker_00"},
+    ]
+    result = assign_speakers(segments, words, diar)
+
+    assert len(result) == 1
+    assert result[0]["speaker_id"] == "Speaker_00"
+    assert result[0]["text"] == "one two three"
+    assert [w["speaker_id"] for w in result[0]["words"]] == ["Speaker_00"] * 3
+
+
+def test_short_blip_at_segment_edge_is_not_absorbed():
+    # Only interior runs are smoothed - a short run at the edge has no evidence
+    # on both sides, and may well be the tail of a real turn.
+    segments = [{"start": 0, "end": 10, "text": "yes go on"}]
+    words = [
+        {"start": 0, "end": 0.2, "word": "yes"},
+        {"start": 6, "end": 7, "word": "go"},
+        {"start": 7, "end": 8, "word": "on"},
     ]
     diar = [
         {"start": 0, "end": 5, "speaker": "Speaker_00"},
         {"start": 5, "end": 10, "speaker": "Speaker_01"},
     ]
     result = assign_speakers(segments, words, diar)
-    assert result[0]["words"] == [
-        {"start": 0, "end": 1, "word": "hi", "speaker_id": "Speaker_00"},
-        {"start": 6, "end": 7, "word": "there", "speaker_id": "Speaker_01"},
+
+    assert [s["speaker_id"] for s in result] == ["Speaker_00", "Speaker_01"]
+    assert [s["text"] for s in result] == ["yes", "go on"]
+
+
+def test_longer_interior_turn_is_not_absorbed():
+    # Same shape as the jitter case but the middle run is a real turn -
+    # it must survive as its own segment.
+    segments = [{"start": 0, "end": 12, "text": "one two three"}]
+    words = [
+        {"start": 0, "end": 1, "word": "one"},
+        {"start": 4, "end": 6, "word": "two"},
+        {"start": 9, "end": 10, "word": "three"},
     ]
+    diar = [
+        {"start": 0, "end": 3, "speaker": "Speaker_00"},
+        {"start": 3, "end": 7, "speaker": "Speaker_01"},
+        {"start": 7, "end": 12, "speaker": "Speaker_00"},
+    ]
+    result = assign_speakers(segments, words, diar)
+
+    assert [s["speaker_id"] for s in result] == ["Speaker_00", "Speaker_01", "Speaker_00"]
 
 
 def test_word_outside_all_segments_is_dropped():
@@ -114,10 +280,60 @@ def test_missing_diarization_keys_default_gracefully():
     assert result[0]["speaker_id"] == "Speaker_00"
 
 
+# --- min_turn_duration ------------------------------------------------------
+
+def _blip_case():
+    """A 0.2s interior speaker flip - jitter at the default threshold, a real
+    turn once the threshold is lowered below it."""
+    segments = [{"start": 0, "end": 10, "text": "one two three"}]
+    words = [
+        {"start": 0, "end": 1, "word": "one"},
+        {"start": 5.05, "end": 5.25, "word": "two"},
+        {"start": 8, "end": 9, "word": "three"},
+    ]
+    diar = [
+        {"start": 0, "end": 5, "speaker": "Speaker_00"},
+        {"start": 5, "end": 5.3, "speaker": "Speaker_01"},
+        {"start": 5.3, "end": 10, "speaker": "Speaker_00"},
+    ]
+    return segments, words, diar
+
+
+def test_min_turn_duration_zero_splits_on_every_speaker_change():
+    segments, words, diar = _blip_case()
+    result = assign_speakers(segments, words, diar, min_turn_duration=0)
+    assert [s["speaker_id"] for s in result] == ["Speaker_00", "Speaker_01", "Speaker_00"]
+
+
+def test_raising_min_turn_duration_absorbs_a_turn_the_default_would_keep():
+    # A 2s interior turn survives the 0.4s default but not a 3s threshold.
+    segments = [{"start": 0, "end": 12, "text": "one two three"}]
+    words = [
+        {"start": 0, "end": 1, "word": "one"},
+        {"start": 4, "end": 6, "word": "two"},
+        {"start": 9, "end": 10, "word": "three"},
+    ]
+    diar = [
+        {"start": 0, "end": 3, "speaker": "Speaker_00"},
+        {"start": 3, "end": 7, "speaker": "Speaker_01"},
+        {"start": 7, "end": 12, "speaker": "Speaker_00"},
+    ]
+    assert len(assign_speakers(segments, words, diar)) == 3
+    assert len(assign_speakers(segments, words, diar, min_turn_duration=3.0)) == 1
+
+
+def test_assign_speakers_defaults_to_the_documented_threshold():
+    segments, words, diar = _blip_case()
+    assert assign_speakers(segments, words, diar) == assign_speakers(
+        segments, words, diar, min_turn_duration=DEFAULT_MIN_TURN_DURATION
+    )
+
+
 # --- MergeStage.run() -------------------------------------------------------
 
-def _job(job_dir):
-    return SimpleNamespace(job_dir=job_dir)
+def _job(job_dir, **config_overrides):
+    config = PipelineConfig(job_id="job", input_file="input.wav", **config_overrides)
+    return SimpleNamespace(job_dir=job_dir, config=config)
 
 
 def test_run_without_diarization_file_defaults_all_segments_to_speaker_00(tmp_path):
@@ -171,6 +387,49 @@ def test_run_with_diarization_file_present_assigns_real_speakers(tmp_path):
     assert result["status"] == "completed"
     output = json.loads((job_dir / "merged" / "segments.json").read_text(encoding="utf-8"))
     assert output["segments"][0]["speaker_id"] == "Speaker_01"
+
+
+def _split_job_dir(tmp_path):
+    """A job dir whose single ASR segment straddles a speaker change, with a
+    0.2s interior blip that the threshold decides the fate of."""
+    job_dir = tmp_path / "job"
+    (job_dir / "asr").mkdir(parents=True)
+    (job_dir / "diar").mkdir(parents=True)
+    (job_dir / "asr" / "transcript.json").write_text(json.dumps({
+        "segments": [{"start": 0, "end": 10, "text": "one two three"}],
+        "words": [
+            {"start": 0, "end": 1, "word": "one"},
+            {"start": 5.05, "end": 5.25, "word": "two"},
+            {"start": 8, "end": 9, "word": "three"},
+        ],
+    }), encoding="utf-8")
+    (job_dir / "diar" / "diarization.json").write_text(json.dumps({
+        "segments": [
+            {"start": 0, "end": 5, "speaker": "Speaker_00"},
+            {"start": 5, "end": 5.3, "speaker": "Speaker_01"},
+            {"start": 5.3, "end": 10, "speaker": "Speaker_00"},
+        ],
+    }), encoding="utf-8")
+    return job_dir
+
+
+def test_run_uses_min_turn_duration_from_config(tmp_path):
+    job_dir = _split_job_dir(tmp_path)
+
+    MergeStage().run(_job(job_dir, min_turn_duration=0.0))
+    output = json.loads((job_dir / "merged" / "segments.json").read_text(encoding="utf-8"))
+    assert output["num_segments"] == 3
+
+    MergeStage().run(_job(job_dir, min_turn_duration=1.0))
+    output = json.loads((job_dir / "merged" / "segments.json").read_text(encoding="utf-8"))
+    assert output["num_segments"] == 1
+
+
+def test_run_records_min_turn_duration_in_metadata(tmp_path):
+    job_dir = _split_job_dir(tmp_path)
+    MergeStage().run(_job(job_dir, min_turn_duration=0.75))
+    output = json.loads((job_dir / "merged" / "segments.json").read_text(encoding="utf-8"))
+    assert output["metadata"]["min_turn_duration"] == 0.75
 
 
 # --- _find_overlapping_speaker ---------------------------------------------

@@ -2,11 +2,15 @@
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Protocol, Sequence
+
+# Light import: merge.py pulls in nothing heavier than the stdlib, so importing
+# the algorithm's own default here keeps config and implementation in sync
+# without dragging torch/whisperx into every runner import.
+from diarrhizer.pipeline.stages.merge import DEFAULT_MIN_TURN_DURATION
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -86,6 +90,9 @@ class PipelineConfig:
         asr_vad_filter: Enable VAD filtering
         asr_vad_min_silence_ms: VAD minimum silence in milliseconds
         audio_profile: Audio preprocessing profile
+        min_turn_duration: Shortest speaker turn, in seconds, the merge stage
+            will split out on its own; shorter word runs between two runs of
+            the same other speaker are folded back in as diarization jitter
     """
 
     job_id: str
@@ -109,6 +116,7 @@ class PipelineConfig:
     asr_vad_filter: bool = True
     asr_vad_min_silence_ms: int = 1000
     audio_profile: str = "raw"
+    min_turn_duration: float = DEFAULT_MIN_TURN_DURATION
 # [SEMANTIC-END] CONFIG:PIPELINE
 
 
@@ -192,6 +200,7 @@ def run_pipeline(
     asr_vad_filter: bool = PipelineConfig.asr_vad_filter,
     asr_vad_min_silence_ms: int = PipelineConfig.asr_vad_min_silence_ms,
     audio_profile: str = PipelineConfig.audio_profile,
+    min_turn_duration: float = PipelineConfig.min_turn_duration,
 ) -> dict:
     """Run the processing pipeline for a media file.
 
@@ -221,12 +230,17 @@ def run_pipeline(
         asr_vad_filter: Enable VAD filtering
         asr_vad_min_silence_ms: VAD minimum silence in milliseconds
         audio_profile: Audio preprocessing profile
+        min_turn_duration: Shortest speaker turn (seconds) the merge stage will
+            split out on its own; 0 splits on every word-level speaker change
 
     Returns:
         Dictionary with pipeline execution results
     """
     input_path = Path(input_path) if input_path is not None else None
     out_dir = Path(out_dir)
+
+    if min_turn_duration < 0:
+        raise ValueError(f"min_turn_duration ({min_turn_duration}) cannot be negative")
 
     # Validate speaker range
     if min_speakers > max_speakers:
@@ -328,6 +342,7 @@ def run_pipeline(
         asr_vad_filter=asr_vad_filter,
         asr_vad_min_silence_ms=asr_vad_min_silence_ms,
         audio_profile=audio_profile,
+        min_turn_duration=min_turn_duration,
     )
 
     # Create job context

@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.pipeline.cache import is_stale
 from diarrhizer.utils import write_json_atomic
 
@@ -22,13 +23,15 @@ logger = logging.getLogger(__name__)
 #   with speaker labels. A missing diarization.json is treated as "no diarization data" (empty
 #   diar_segments) rather than an error - assign_speakers already defaults every segment to
 #   Speaker_00 in that case - so ASR-only pipelines (no diarize stage) still produce readable
-#   merged/exported output instead of failing.
+#   merged/exported output instead of failing. Output segments are one-speaker-each and so may
+#   outnumber the ASR segments they came from, since an ASR segment spanning a speaker change
+#   is split at that boundary (MERGE:SPEAKER_TURNS).
 # @inputs: artifacts/asr/transcript.json (required), artifacts/diar/diarization.json (optional)
 # @outputs: artifacts/merged/segments.json
 # @sideEffects: Reads JSON files, writes merged segments to disk,
 #   logs progress via logging (INFO, extra={"stage": "merge"})
 # @errors: FileNotFoundError if transcript.json is missing
-# @see: STAGE:TRANSCRIBE, STAGE:DIARIZE, MERGE:ASSIGN_SPEAKERS
+# @see: STAGE:TRANSCRIBE, STAGE:DIARIZE, MERGE:ASSIGN_SPEAKERS, MERGE:SPEAKER_TURNS
 class MergeStage:
     """Stage for merging ASR transcripts with speaker diarization."""
 
@@ -95,6 +98,8 @@ class MergeStage:
         transcript_segments = transcript_data.get("segments", [])
         transcript_words = transcript_data.get("words", [])
 
+        min_turn_duration = job.config.min_turn_duration
+
         start_time = datetime.now()
 
         # Perform merge
@@ -102,6 +107,7 @@ class MergeStage:
             transcript_segments=transcript_segments,
             transcript_words=transcript_words,
             diar_segments=diar_segments,
+            min_turn_duration=min_turn_duration,
         )
 
         end_time = datetime.now()
@@ -116,6 +122,7 @@ class MergeStage:
                 "input_transcript": str(transcript_input),
                 "input_diarization": str(diar_input),
                 "output_path": str(segments_output),
+                "min_turn_duration": min_turn_duration,
                 "start_time": start_time.isoformat(),
                 "end_time": end_time.isoformat(),
                 "duration_seconds": duration,
@@ -127,7 +134,9 @@ class MergeStage:
 
         logger.info(f"[{self.NAME}] Completed in {duration:.2f}s", extra={"stage": self.NAME})
         logger.info(
-            f"[{self.NAME}] Segments: {len(merged_segments)}", extra={"stage": self.NAME}
+            f"[{self.NAME}] Segments: {len(merged_segments)} "
+            f"(from {len(transcript_segments)} ASR segments)",
+            extra={"stage": self.NAME},
         )
         logger.info(f"[{self.NAME}] Output: {segments_output}", extra={"stage": self.NAME})
 
@@ -184,28 +193,49 @@ class MergeStage:
 # [SEMANTIC-END] STAGE:MERGE
 
 
+# Default for PipelineConfig.min_turn_duration (--min-turn-duration): word runs
+# shorter than this that sit between two runs of the same other speaker are
+# treated as diarization jitter, not a real turn, and absorbed into their
+# neighbours (see _absorb_jitter_runs). Kept deliberately small: a short
+# backchannel ("да", "ага") is a genuine turn and must survive, so only blips
+# below a fraction of a second are smoothed away by default. Raise it when
+# diarization is noisy and shreds sentences; set 0 to split on every flip.
+DEFAULT_MIN_TURN_DURATION = 0.4
+
+
 # [SEMANTIC-BEGIN] MERGE:ASSIGN_SPEAKERS
 # @purpose: Assign speaker labels to ASR segments based on overlap with diarization
 # @description: For each segment/word (processed in chronological order), finds the
 #   speaker with max overlap via a sweep over sorted, time-ordered queries
 #   (see _DiarizationSweep) instead of rescanning all diarization segments per
-#   query - matters for long calls with many words/diarization segments
+#   query - matters for long calls with many words/diarization segments.
+#   An ASR segment can straddle a speaker change (Whisper segments on pauses and
+#   punctuation, not on who is talking), which used to produce one segment
+#   labelled with the majority speaker while some of its words carried a
+#   different speaker_id. Such segments are now split into one output segment
+#   per speaker run (MERGE:SPEAKER_TURNS), so every emitted segment is
+#   homogeneous: seg["speaker_id"] always equals the speaker_id of every word
+#   in seg["words"]. Output segments can therefore outnumber input ASR segments.
 # @inputs: transcript_segments, transcript_words, diar_segments
-# @outputs: List of merged segments with speaker_id
+# @outputs: List of merged segments with speaker_id, one speaker per segment
 # @sideEffects: None (pure function)
 # @errors: None
-# @see: STAGE:MERGE
+# @see: STAGE:MERGE, MERGE:SPEAKER_TURNS
 def assign_speakers(
     transcript_segments: list[dict],
     transcript_words: list[dict],
     diar_segments: list[dict],
+    min_turn_duration: float = DEFAULT_MIN_TURN_DURATION,
 ) -> list[dict]:
     """Assign speaker labels to transcript segments based on diarization overlap.
 
     Algorithm:
-    1. For each transcript segment, find the diarization segment with maximum time overlap
-    2. Assign that speaker to the entire segment
-    3. For each word within a segment, find the speaker with maximum overlap
+    1. For each word within a transcript segment, find the diarization speaker
+       with maximum time overlap
+    2. Split the segment into consecutive runs of same-speaker words, emitting
+       one output segment per run (see _split_into_speaker_turns)
+    3. For a segment with no word timestamps, fall back to matching the whole
+       segment against diarization and emit it unsplit
 
     Assumptions:
     - Diarization segments may overlap with each other (pyannote allows overlapping speakers)
@@ -223,9 +253,14 @@ def assign_speakers(
         transcript_segments: List of ASR segments with start/end/text
         transcript_words: List of words with start/end/word (optional)
         diar_segments: List of diarization segments with start/end/speaker
+        min_turn_duration: Shortest word run, in seconds, that may stand as its
+            own speaker turn; shorter runs between two runs of the same other
+            speaker are absorbed as diarization jitter. 0 splits on every flip.
 
     Returns:
-        List of merged segments with speaker_id and optional word-level data
+        List of merged segments with speaker_id and optional word-level data.
+        May be longer than transcript_segments when a segment spans a speaker
+        change.
     """
     # Handle empty inputs
     if not transcript_segments:
@@ -287,38 +322,35 @@ def assign_speakers(
         seg_end = seg.get("end", 0)
         seg_text = seg.get("text", "")
 
-        speaker_id = speaker_lookup.find(seg_start, seg_end)
+        words = word_segment_map.get(seg_idx)
 
-        # Build merged segment
-        merged_seg = {
-            "start": seg_start,
-            "end": seg_end,
-            "speaker_id": speaker_id,
-            "text": seg_text,
-        }
+        # No word timestamps for this segment: nothing to split on, so match
+        # the segment as a whole against diarization as before.
+        if not words:
+            merged_segments.append({
+                "start": seg_start,
+                "end": seg_end,
+                "speaker_id": speaker_lookup.find(seg_start, seg_end),
+                "text": seg_text,
+            })
+            continue
 
-        # Add word-level data if available for this segment
-        if seg_idx in word_segment_map:
-            words = word_segment_map[seg_idx]
-            merged_words = []
+        merged_words = []
+        for word in words:
+            word_start = word.get("start", 0)
+            word_end = word.get("end", 0)
+            merged_words.append({
+                "start": word_start,
+                "end": word_end,
+                "word": word.get("word", ""),
+                "speaker_id": speaker_lookup.find(word_start, word_end),
+            })
 
-            for word in words:
-                word_start = word.get("start", 0)
-                word_end = word.get("end", 0)
-                word_text = word.get("word", "")
-
-                word_speaker = speaker_lookup.find(word_start, word_end)
-
-                merged_words.append({
-                    "start": word_start,
-                    "end": word_end,
-                    "word": word_text,
-                    "speaker_id": word_speaker,
-                })
-
-            merged_seg["words"] = merged_words
-
-        merged_segments.append(merged_seg)
+        merged_segments.extend(
+            _split_into_speaker_turns(
+                seg_start, seg_end, seg_text, merged_words, min_turn_duration
+            )
+        )
 
     return merged_segments
 
@@ -349,7 +381,7 @@ def _find_overlapping_speaker(
     for diar_seg in diar_segments:
         diar_start = diar_seg.get("start", 0)
         diar_end = diar_seg.get("end", 0)
-        speaker = diar_seg.get("speaker", default_speaker)
+        speaker = normalize_speaker_id(diar_seg.get("speaker", default_speaker))
 
         # Calculate overlap
         overlap_start = max(start, diar_start)
@@ -366,7 +398,7 @@ def _find_overlapping_speaker(
         for diar_seg in diar_segments:
             diar_start = diar_seg.get("start", 0)
             diar_end = diar_seg.get("end", 0)
-            speaker = diar_seg.get("speaker", default_speaker)
+            speaker = normalize_speaker_id(diar_seg.get("speaker", default_speaker))
 
             # Calculate distance from our segment to this diar segment
             if diar_end < start:
@@ -459,7 +491,9 @@ class _DiarizationSweep:
                 or (seg_end == self._before_end and orig_idx < self._before_orig_index)
             ):
                 self._before_end = seg_end
-                self._before_speaker = segments[self._left].get("speaker", self.DEFAULT_SPEAKER)
+                self._before_speaker = normalize_speaker_id(
+                    segments[self._left].get("speaker", self.DEFAULT_SPEAKER)
+                )
                 self._before_orig_index = orig_idx
             self._left += 1
 
@@ -477,7 +511,7 @@ class _DiarizationSweep:
             orig_idx = self._orig_index[i]
             if overlap > max_overlap or (overlap == max_overlap and overlap > 0 and orig_idx < best_orig_index):
                 max_overlap = overlap
-                best_speaker = seg.get("speaker", self.DEFAULT_SPEAKER)
+                best_speaker = normalize_speaker_id(seg.get("speaker", self.DEFAULT_SPEAKER))
                 best_orig_index = orig_idx
 
         if max_overlap > 0:
@@ -491,8 +525,125 @@ class _DiarizationSweep:
         if before_gap <= after_gap and self._before_speaker is not None:
             return self._before_speaker
         if right < n:
-            return segments[right].get("speaker", self.DEFAULT_SPEAKER)
+            return normalize_speaker_id(segments[right].get("speaker", self.DEFAULT_SPEAKER))
         return self.DEFAULT_SPEAKER
 
 
 # [SEMANTIC-END] MERGE:ASSIGN_SPEAKERS
+
+
+# [SEMANTIC-BEGIN] MERGE:SPEAKER_TURNS
+# @purpose: Split one ASR segment into one output segment per speaker turn
+# @description: Whisper cuts segments on pauses and punctuation, not on who is
+#   talking, so a single ASR segment can span a speaker change. Left alone it
+#   gets one speaker label (whoever overlaps it most) while its words carry
+#   two, which reads as a misattribution: the losing speaker's words appear
+#   under the winner's name. This splits the segment at the boundaries between
+#   consecutive same-speaker word runs.
+#   Text: the original ASR text is kept verbatim when there's nothing to split.
+#   Only when a segment really is split is text rebuilt per run by joining word
+#   tokens, since the ASR text can't be sliced reliably.
+#   Time: the original segment's start and end are preserved on the first and
+#   last run so a split never shrinks the transcript's coverage; interior
+#   boundaries use word timings, which leaves honest gaps at pauses between turns.
+# @inputs: segment start/end/text, its merged words (each with speaker_id)
+# @outputs: List of segments, each with a single speaker_id matching all its words
+# @sideEffects: None (relabels only the word dicts it was handed, which
+#   assign_speakers builds fresh per segment)
+# @errors: None
+# @see: MERGE:ASSIGN_SPEAKERS, STAGE:MERGE
+def _split_into_speaker_turns(
+    seg_start: float,
+    seg_end: float,
+    seg_text: str,
+    merged_words: list[dict],
+    min_turn_duration: float = DEFAULT_MIN_TURN_DURATION,
+) -> list[dict]:
+    """Split a segment into one segment per consecutive same-speaker word run.
+
+    Args:
+        seg_start: Original segment start time in seconds
+        seg_end: Original segment end time in seconds
+        seg_text: Original ASR text for the whole segment
+        merged_words: The segment's words, each already carrying a speaker_id
+        min_turn_duration: Jitter threshold in seconds (see _absorb_jitter_runs)
+
+    Returns:
+        One segment per speaker turn, in chronological order. A segment whose
+        words all share one speaker comes back as a single segment with its
+        original text and timings untouched.
+    """
+    runs = _absorb_jitter_runs(_speaker_runs(merged_words), min_turn_duration)
+
+    # Homogeneous segment: keep the ASR text and timings exactly as they were.
+    # The speaker comes from the words rather than from a separate whole-segment
+    # overlap query, so the segment label can't disagree with its own words.
+    if len(runs) == 1:
+        return [{
+            "start": seg_start,
+            "end": seg_end,
+            "speaker_id": runs[0][0]["speaker_id"],
+            "text": seg_text,
+            "words": merged_words,
+        }]
+
+    last = len(runs) - 1
+    turns = []
+    for i, run in enumerate(runs):
+        start = seg_start if i == 0 else run[0]["start"]
+        # Words can extend past the ASR segment's own end; keep whichever is later.
+        end = max(seg_end, run[-1]["end"]) if i == last else run[-1]["end"]
+        turns.append({
+            "start": start,
+            "end": max(end, start),
+            "speaker_id": run[0]["speaker_id"],
+            "text": " ".join(w["word"].strip() for w in run if w["word"].strip()),
+            "words": run,
+        })
+    return turns
+
+
+def _speaker_runs(merged_words: list[dict]) -> list[list[dict]]:
+    """Group words into maximal runs of consecutive same-speaker words."""
+    runs: list[list[dict]] = []
+    for word in merged_words:
+        if runs and runs[-1][0]["speaker_id"] == word["speaker_id"]:
+            runs[-1].append(word)
+        else:
+            runs.append([word])
+    return runs
+
+
+def _absorb_jitter_runs(
+    runs: list[list[dict]],
+    min_turn_duration: float = DEFAULT_MIN_TURN_DURATION,
+) -> list[list[dict]]:
+    """Fold runs shorter than min_turn_duration that are sandwiched between two
+    runs of the same other speaker back into that speaker.
+
+    A word near a diarization boundary can pick up the wrong speaker on max
+    overlap, and splitting on every such blip would shred a sentence into
+    fragments. Only interior runs are considered, and only when both neighbours
+    agree on who is really talking - a run at either edge of the segment is
+    never absorbed, because there's no evidence on both sides that it's jitter
+    rather than the start or end of a genuine turn. Absorbed words are
+    relabelled to the surrounding speaker so seg["words"] can't contradict the
+    segment they end up in.
+    """
+    changed = True
+    while changed and len(runs) >= 3:
+        changed = False
+        for i in range(1, len(runs) - 1):
+            previous, run, following = runs[i - 1], runs[i], runs[i + 1]
+            speaker = previous[0]["speaker_id"]
+            if speaker != following[0]["speaker_id"]:
+                continue
+            if run[-1]["end"] - run[0]["start"] >= min_turn_duration:
+                continue
+            for word in run:
+                word["speaker_id"] = speaker
+            runs[i - 1:i + 2] = [previous + run + following]
+            changed = True
+            break
+    return runs
+# [SEMANTIC-END] MERGE:SPEAKER_TURNS

@@ -157,6 +157,19 @@ Real names are applied through a separate mapping layer.
 
 The "stitched" result: text + timestamps + speaker at segment (and/or word) level.
 
+Every merged segment has exactly one speaker: `speaker_id` always matches the
+`speaker_id` of each entry in its `words`. Whisper cuts segments on pauses and
+punctuation rather than on who is talking, so an ASR segment can span a speaker
+change; the merge stage splits such a segment at the boundary between
+consecutive same-speaker word runs. Merged segments can therefore outnumber the
+ASR segments they came from. Word-level speaker flips shorter than
+`min_turn_duration` (`--min-turn-duration`, default `0.4`s) that sit between two
+runs of the same other speaker are treated as diarization jitter and folded back
+in, so a stray word can't fragment a sentence. Raise it when noisy diarization
+shreds sentences; `0` splits on every word-level speaker change. The value is
+recorded in `metadata.min_turn_duration`, and changing it invalidates the
+merge stage's cache.
+
 ```json
 {
   "stage": "merge",
@@ -185,7 +198,10 @@ The "stitched" result: text + timestamps + speaker at segment (and/or word) leve
 }
 ```
 
-**Algorithm:** For each transcript segment, the speaker with maximum time overlap is chosen. Word-level speakers are assigned similarly if word timestamps are available.
+**Algorithm:** Each word is assigned the diarization speaker with maximum time
+overlap; the segment is then split into consecutive same-speaker word runs, one
+output segment per run. A segment with no word timestamps is matched as a whole
+and emitted unsplit.
 
 **Edge cases:**
 - No diarization data: defaults to "Speaker_00"
@@ -306,6 +322,7 @@ python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 
 | `--job-dir` | string | — | Resume an existing job directory instead of starting a new one, e.g. `out/meeting_20260101_120000` |
 | `--min-speakers` | int | `1` | Minimum number of speakers |
 | `--max-speakers` | int | `10` | Maximum number of speakers |
+| `--min-turn-duration` | float | `0.4` | Shortest speaker turn (s) split out on its own |
 | `--lang` | string | `"auto"` | Language code or `"auto"` for detection |
 | `--device` | choice | `"cuda"` | Device: `cuda` or `cpu` |
 | `--asr-model` | string | `"large-v3"` | WhisperX model (or HF repo); use a smaller size (e.g. `base`) for faster/cheaper runs |

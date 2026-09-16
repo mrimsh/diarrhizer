@@ -50,6 +50,18 @@ def test_min_speakers_greater_than_max_raises_value_error(tmp_path):
         )
 
 
+def test_negative_min_turn_duration_raises_value_error(tmp_path):
+    input_file = tmp_path / "input.wav"
+    input_file.write_bytes(b"fake")
+    with pytest.raises(ValueError, match="min_turn_duration"):
+        run_pipeline(
+            input_path=input_file,
+            out_dir=tmp_path / "out",
+            stages=[],
+            min_turn_duration=-1.0,
+        )
+
+
 def test_missing_input_raises_file_not_found_error(tmp_path):
     with pytest.raises(FileNotFoundError):
         run_pipeline(

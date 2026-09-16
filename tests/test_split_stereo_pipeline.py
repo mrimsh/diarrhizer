@@ -71,9 +71,9 @@ class _FakeWhisperXDiarizeAdapter:
 
     def diarize(self, audio_path):
         return {
-            "segments": [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}],
+            "segments": [{"start": 0.0, "end": 1.0, "speaker": "Speaker_00"}],
             "num_speakers": 1,
-            "speakers": ["SPEAKER_00"],
+            "speakers": ["Speaker_00"],
         }
 
     def unload(self) -> None:
@@ -145,7 +145,7 @@ def test_split_stereo_runs_end_to_end_through_export(tmp_path, fake_heavy_deps):
 
     segments = json.loads((job_dir / "merged" / "segments.json").read_text(encoding="utf-8"))
     assert segments["num_segments"] == 1
-    assert segments["segments"][0]["speaker_id"] == "SPEAKER_00"
+    assert segments["segments"][0]["speaker_id"] == "Speaker_00"
     assert segments["segments"][0]["text"] == "hello world"
 
     md = (job_dir / "export" / "result.md").read_text(encoding="utf-8")

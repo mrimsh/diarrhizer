@@ -11,6 +11,7 @@ import gc
 import torch
 
 from diarrhizer.adapters.transcript_result import extract_transcript_fields
+from diarrhizer.export.speakers import normalize_speaker_id
 
 
 def _release_cuda() -> None:
@@ -564,7 +565,7 @@ class WhisperXDiarizeAdapter:
                 segments.append({
                     "start": float(row["start"]),
                     "end": float(row["end"]),
-                    "speaker": str(row["speaker"]),
+                    "speaker": normalize_speaker_id(str(row["speaker"])),
                 })
 
             # Get unique speakers

@@ -37,6 +37,14 @@ def test_uses_speaker_mapping():
     assert "Speaker_00" not in out
 
 
+def test_normalizes_pyannote_speaker_ids():
+    """Diarization can still hand us SPEAKER_00; the documented form is Speaker_00."""
+    segments = [{"start": 0, "end": 1, "speaker_id": "SPEAKER_01", "text": "hello"}]
+    out = export_to_text(segments, _config(language="en", device="cpu"), "input.wav")
+    assert "Speaker_01: hello" in out
+    assert "SPEAKER_01" not in out
+
+
 def test_has_no_markdown_markup():
     segments = [{"start": 0, "end": 1, "speaker_id": "Speaker_00", "text": "hello"}]
     out = export_to_text(segments, _config(language="en", device="cpu"), "input.wav")

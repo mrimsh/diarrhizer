@@ -175,6 +175,7 @@ All options:
 | `--job-dir` | Resume an existing job directory instead of starting a new job | none |
 | `--min-speakers` | Minimum number of speakers | 1 |
 | `--max-speakers` | Maximum number of speakers | 10 |
+| `--min-turn-duration` | Shortest speaker turn (seconds) the `merge` stage splits out on its own; `0` splits on every word-level speaker change | 0.4 |
 | `--lang` | Language code or `auto` | `auto` |
 | `--device` | Device to use (`cuda` or `cpu`) | `cuda` |
 | `--asr-model` | WhisperX/Whisper model size or HF repo (e.g. `base`, `small`, `medium`, `large-v3`) — bigger models are more accurate but slower and need more VRAM | `large-v3` |
