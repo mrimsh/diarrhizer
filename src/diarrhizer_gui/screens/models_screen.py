@@ -11,9 +11,9 @@ run through a small QThread worker, not on the UI thread.
 """
 
 import os
-from typing import Optional
+from typing import Callable, Optional
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QSettings, QThread, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from diarrhizer.diagnostics import doctor
 from diarrhizer.diagnostics import models as model_cache
+from diarrhizer_gui import custom_models
 
 # Mirrors faster_whisper.utils._MODELS (faster-whisper==1.1.0, pinned in
 # requirements/constraints-stable.txt) for just the presets offered elsewhere
@@ -73,7 +74,10 @@ class ModelActionWorker(QObject):
 
 
 class ModelsScreen(QWidget):
-    ASR_COLUMNS = ["Модель", "Статус", "Размер", ""]
+    # Trailing two unnamed columns are the per-row action buttons: "Прогреть"
+    # for every row, "Убрать" only for user-added ones (presets can't be
+    # removed from the list).
+    ASR_COLUMNS = ["Модель", "Статус", "Размер", "", ""]
     CACHE_COLUMNS = ["Repo", "Размер", "Использовано", ""]
 
     def __init__(self) -> None:
@@ -81,7 +85,9 @@ class ModelsScreen(QWidget):
         self._busy = False
         self._thread: Optional[QThread] = None
         self._worker: Optional[ModelActionWorker] = None
+        self._pending_success: Optional[Callable[[], None]] = None
         self._diar_device = "cpu"
+        self._settings = QSettings("Diarrhizer", "DiarrhizerGUI")
 
         title = QLabel("Модели")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
@@ -102,6 +108,10 @@ class ModelsScreen(QWidget):
             "Свой HF repo id (например koekaverna/faster-whisper-podlodka-turbo)"
         )
         self._custom_warm_button = QPushButton("Прогреть")
+        self._custom_warm_button.setToolTip(
+            "После успешного прогрева модель добавится в список выше "
+            "и в выбор модели ASR в «Новом задании»."
+        )
         self._custom_warm_button.clicked.connect(self._warm_custom_model)
         custom_row = QHBoxLayout()
         custom_row.addWidget(self._custom_model_field, stretch=1)
@@ -162,17 +172,35 @@ class ModelsScreen(QWidget):
         cached = model_cache.list_cached_models()
         cached_by_id = {m.repo_id: m for m in cached}
 
+        # Presets are addressed by alias (faster-whisper resolves those to a
+        # Systran repo itself); user-added models are addressed by their repo
+        # id, so for those the label and the id passed to warm_up are the same.
+        entries = [(alias, repo_id, False) for alias, repo_id in ASR_MODEL_REPOS.items()]
+        entries += [
+            (repo_id, repo_id, True)
+            for repo_id in custom_models.load_custom_models(self._settings)
+            if repo_id not in ASR_MODEL_REPOS
+        ]
+
         self._asr_table.setRowCount(0)
-        for row, (alias, repo_id) in enumerate(ASR_MODEL_REPOS.items()):
+        for row, (label, repo_id, removable) in enumerate(entries):
             self._asr_table.insertRow(row)
-            self._asr_table.setItem(row, 0, QTableWidgetItem(alias))
+            self._asr_table.setItem(row, 0, QTableWidgetItem(label))
             info = cached_by_id.get(repo_id)
             self._asr_table.setItem(row, 1, QTableWidgetItem("В кэше" if info else "Не скачано"))
             self._asr_table.setItem(row, 2, QTableWidgetItem(format_size(info.size_on_disk) if info else "—"))
             warm_button = QPushButton("Прогреть")
             warm_button.setEnabled(not self._busy)
-            warm_button.clicked.connect(lambda checked=False, a=alias: self._warm_asr(a))
+            warm_button.clicked.connect(lambda checked=False, m=label: self._warm_asr(m))
             self._asr_table.setCellWidget(row, 3, warm_button)
+            if removable:
+                forget_button = QPushButton("Убрать")
+                forget_button.setToolTip("Убрать из списка. Скачанные файлы останутся в кэше.")
+                forget_button.setEnabled(not self._busy)
+                forget_button.clicked.connect(
+                    lambda checked=False, r=repo_id: self._forget_custom_model(r)
+                )
+                self._asr_table.setCellWidget(row, 4, forget_button)
 
         _, cuda_ok, _ = doctor.check_cuda()
         self._diar_device = "cuda" if cuda_ok else "cpu"
@@ -200,12 +228,12 @@ class ModelsScreen(QWidget):
             total_size += info.size_on_disk
         self._cache_size_label.setText(f"({format_size(total_size)})")
 
-    def _warm_asr(self, alias: str) -> None:
+    def _warm_asr(self, model: str) -> None:
         device = "cuda" if doctor.check_cuda()[1] else "cpu"
         self._run_action(
-            f"Прогреваю «{alias}»… (без индикатора прогресса — huggingface_hub не отдаёт колбэк, см. docstring warm_up_asr_model)",
+            f"Прогреваю «{model}»… (без индикатора прогресса — huggingface_hub не отдаёт колбэк, см. docstring warm_up_asr_model)",
             model_cache.warm_up_asr_model,
-            alias,
+            model,
             device=device,
         )
 
@@ -219,7 +247,19 @@ class ModelsScreen(QWidget):
             model_cache.warm_up_asr_model,
             repo_id,
             device=device,
+            on_success=lambda: self._register_custom_model(repo_id),
         )
+
+    def _register_custom_model(self, repo_id: str) -> None:
+        # Deliberately only reached on a successful warm-up: a repo WhisperX
+        # cannot load (a transformers checkpoint without a CTranslate2
+        # model.bin, a typo in the id) never makes it into the list.
+        custom_models.add_custom_model(self._settings, repo_id)
+        self._custom_model_field.clear()
+
+    def _forget_custom_model(self, repo_id: str) -> None:
+        custom_models.remove_custom_model(self._settings, repo_id)
+        self.refresh()
 
     def _warm_diarization(self) -> None:
         token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
@@ -236,9 +276,17 @@ class ModelsScreen(QWidget):
         model_cache.clear_cache(repo_id)
         self.refresh()
 
-    def _run_action(self, message: str, fn, *args, **kwargs) -> None:
+    def _run_action(
+        self,
+        message: str,
+        fn,
+        *args,
+        on_success: Optional[Callable[[], None]] = None,
+        **kwargs,
+    ) -> None:
         if self._busy:
             return
+        self._pending_success = on_success
         self._set_busy(True, message)
 
         worker = ModelActionWorker(fn, *args, **kwargs)
@@ -271,9 +319,15 @@ class ModelsScreen(QWidget):
         self._worker = None
 
     def _on_worker_finished(self) -> None:
+        # Take the callback before running it: it may persist a new custom
+        # model, and the _set_busy() below re-reads that list via refresh().
+        callback, self._pending_success = self._pending_success, None
+        if callback is not None:
+            callback()
         self._set_busy(False, "")
 
     def _on_worker_failed(self, error_type: str, message: str) -> None:
+        self._pending_success = None
         self._set_busy(False, f"Ошибка ({error_type}): {message}")
         self._status_label.setStyleSheet("color: #b23b35;")
 

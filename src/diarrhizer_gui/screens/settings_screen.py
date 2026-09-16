@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 
 from diarrhizer.diagnostics import doctor
 from diarrhizer.diagnostics import models as model_cache
-from diarrhizer_gui import env_file, settings_keys
+from diarrhizer_gui import custom_models, env_file, settings_keys
 from diarrhizer_gui.screens.new_job_screen import ASR_MODELS
 
 ENV_PATH = env_file.REPO_ROOT / ".env"
@@ -152,11 +152,15 @@ class SettingsScreen(QWidget):
             self._device_combo.setCurrentText(device)
             self._device_combo.blockSignals(False)
 
+        # Rebuilding the item list and setting the text both fire
+        # currentTextChanged, which would write a half-applied value back to
+        # QSettings - block signals around the whole thing.
+        self._model_combo.blockSignals(True)
+        self._reload_asr_models()
         model = self._settings.value(settings_keys.DEFAULT_ASR_MODEL, "")
         if model:
-            self._model_combo.blockSignals(True)
             self._model_combo.setCurrentText(model)
-            self._model_combo.blockSignals(False)
+        self._model_combo.blockSignals(False)
 
         self._hf_field.setText(os.environ.get("HF_TOKEN", ""))
         self._refresh_hf_status()
@@ -166,6 +170,16 @@ class SettingsScreen(QWidget):
 
         self._cache_dir_field.setText(os.environ.get("HF_HOME", ""))
         self._refresh_cache_dir_status()
+
+    def _reload_asr_models(self) -> None:
+        """Presets + models added on the Models screen. Caller blocks signals."""
+        choices = custom_models.asr_model_choices(self._settings, ASR_MODELS)
+        if [self._model_combo.itemText(i) for i in range(self._model_combo.count())] == choices:
+            return
+        current = self._model_combo.currentText()
+        self._model_combo.clear()
+        self._model_combo.addItems(choices)
+        self._model_combo.setCurrentText(current)
 
     def _refresh_hf_status(self) -> None:
         _, ok, message = doctor.check_hf_token()

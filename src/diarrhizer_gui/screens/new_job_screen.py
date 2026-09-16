@@ -29,10 +29,12 @@ from PySide6.QtWidgets import (
 )
 
 from diarrhizer.diagnostics import doctor
-from diarrhizer_gui import settings_keys
+from diarrhizer_gui import custom_models, settings_keys
 
 MEDIA_FILTER = "Медиафайлы (*.mp3 *.wav *.m4a *.mp4 *.mkv *.webm);;Все файлы (*.*)"
 
+# Built-in faster-whisper presets. Models the user warmed up themselves on the
+# Models screen are appended at show time - see _reload_asr_models().
 ASR_MODELS = ["tiny", "base", "small", "medium", "large-v2", "large-v3"]
 
 MODES = [
@@ -212,6 +214,7 @@ class NewJobScreen(QWidget):
         default_out = str(Path.cwd() / "out")
         self._out_field.setText(self._settings.value(settings_keys.OUT_DIR, default_out))
 
+        self._reload_asr_models()
         default_model = self._settings.value(settings_keys.DEFAULT_ASR_MODEL, "") or "large-v3"
         self._model_combo.setCurrentText(default_model)
 
@@ -219,6 +222,20 @@ class NewJobScreen(QWidget):
         if not default_device:
             default_device = "cuda" if self._cuda_available else "cpu"
         self._device_combo.setCurrentText(default_device)
+
+    def _reload_asr_models(self) -> None:
+        """Rebuild the model dropdown from presets + models added on the Models
+        screen. Called from showEvent(), so a model warmed up mid-session shows
+        up here without restarting the app.
+        """
+        choices = custom_models.asr_model_choices(self._settings, ASR_MODELS)
+        if [self._model_combo.itemText(i) for i in range(self._model_combo.count())] == choices:
+            return
+        # clear() wipes the edit line too, so restore whatever was typed there.
+        current = self._model_combo.currentText()
+        self._model_combo.clear()
+        self._model_combo.addItems(choices)
+        self._model_combo.setCurrentText(current)
 
     def _toggle_advanced(self, checked: bool) -> None:
         self._advanced_container.setVisible(checked)

@@ -5,3 +5,4 @@
 OUT_DIR = "app/out_dir"
 DEFAULT_DEVICE = "app/default_device"
 DEFAULT_ASR_MODEL = "app/default_asr_model"
+CUSTOM_ASR_MODELS = "app/custom_asr_models"
