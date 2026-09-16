@@ -283,9 +283,9 @@ See `docs/troubleshooting.md` for detailed diagnostics.
 ## Development
 
 * CLI entry point: [`src/diarrhizer/cli.py`](src/diarrhizer/cli.py)
-* Pipeline runner: [`src/diarrhizer/pipeline/runner.py`](src/diarrhizer/pipeline/runner.py) (to be implemented)
-* Pipeline stages: [`src/diarrhizer/pipeline/stages/`](src/diarrhizer/pipeline/stages/) (to be implemented)
-* External integrations (adapters): [`src/diarrhizer/adapters/`](src/diarrhizer/adapters/) (to be implemented)
+* Pipeline runner: [`src/diarrhizer/pipeline/runner.py`](src/diarrhizer/pipeline/runner.py)
+* Pipeline stages: [`src/diarrhizer/pipeline/stages/`](src/diarrhizer/pipeline/stages/)
+* External integrations (adapters): [`src/diarrhizer/adapters/`](src/diarrhizer/adapters/)
 * Diagnostics: [`src/diarrhizer/diagnostics/doctor.py`](src/diarrhizer/diagnostics/doctor.py)
 
 ---
