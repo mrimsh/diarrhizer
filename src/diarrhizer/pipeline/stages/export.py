@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING, Any
 
 from diarrhizer.export.json_export import export_to_json
 from diarrhizer.export.markdown_export import export_to_markdown
+from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.export.text_export import export_to_text
 from diarrhizer.pipeline.cache import is_stale
-from diarrhizer.utils import write_text_atomic
+from diarrhizer.utils import read_json, write_text_atomic
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext, PipelineConfig
@@ -160,24 +161,32 @@ class ExportStage:
         """
         return {exporter.name: job_dir / exporter.output_path for exporter in self.EXPORTERS}
 
-    def is_cache_valid(self, job_dir: Path) -> bool:
-        """Check if stage output exists and is up to date relative to its input segments.
-
-        All registered formats are one atomic group: if any single one is
-        missing or older than segments.json, the whole stage is considered
-        stale and every format is re-rendered.
-
-        Args:
-            job_dir: Job directory path
-
-        Returns:
-            True if every registered output exists and is valid
+    def is_cache_valid(self, job: "JobContext") -> bool:
+        """Check if every registered output exists, is newer than segments.json,
+        and was rendered with the same speaker mapping as this run.
         """
+        job_dir = job.job_dir
         artifacts = self.get_artifact_paths(job_dir)
-        return not is_stale(
+        if is_stale(
             outputs=list(self.get_output_paths(job_dir).values()),
             inputs=[artifacts["segments"]],
-        )
+        ):
+            return False
+        return not self._speakers_mismatch(job)
+
+    def _speakers_mismatch(self, job: "JobContext") -> bool:
+        data = read_json(job.job_dir / "export" / "result.json")
+        if not isinstance(data, dict):
+            return True
+        stored = (data.get("metadata") or {}).get("speakers")
+        expected = job.config.speakers or {}
+        if stored is None:
+            return bool(expected)
+        return _normalized_speakers(stored) != _normalized_speakers(expected)
+
+
+def _normalized_speakers(mapping: dict) -> dict:
+    return {normalize_speaker_id(str(k)): v for k, v in mapping.items()}
 
 
 # [SEMANTIC-END] STAGE:EXPORT

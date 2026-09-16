@@ -2,7 +2,6 @@
 
 import json
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from diarrhizer.export.speakers import resolve_speaker_name
@@ -88,6 +87,7 @@ def export_to_json(
                 "min_speakers": config.min_speakers,
                 "max_speakers": config.max_speakers,
             },
+            "speakers": config.speakers or {},
         },
         "segments": enriched_segments,
     }

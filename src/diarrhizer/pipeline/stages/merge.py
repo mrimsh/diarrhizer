@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from diarrhizer.export.speakers import normalize_speaker_id
-from diarrhizer.pipeline.cache import is_stale
-from diarrhizer.utils import write_json_atomic
+from diarrhizer.pipeline.cache import config_mismatch, is_stale
+from diarrhizer.utils import read_json, write_json_atomic
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -174,19 +174,22 @@ class MergeStage:
         """
         return {"segments": job_dir / self.SEGMENTS_JSON}
 
-    def is_cache_valid(self, job_dir: Path) -> bool:
-        """Check if stage output exists and is up to date relative to its inputs.
-
-        Args:
-            job_dir: Job directory path
-
-        Returns:
-            True if output exists and is valid
-        """
+    def is_cache_valid(self, job: "JobContext") -> bool:
+        """Check if stage output exists, is up to date relative to its inputs,
+        and was merged with the same turn-splitting threshold as this run."""
+        job_dir = job.job_dir
         artifacts = self.get_artifact_paths(job_dir)
-        return not is_stale(
+        if is_stale(
             outputs=list(self.get_output_paths(job_dir).values()),
             inputs=[artifacts["transcript"], artifacts["diarization"]],
+        ):
+            return False
+        data = read_json(artifacts["segments"])
+        if not isinstance(data, dict):
+            return False
+        return not config_mismatch(
+            data.get("metadata") or {},
+            {"min_turn_duration": job.config.min_turn_duration},
         )
 
 

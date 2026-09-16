@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Union, List
+from typing import TYPE_CHECKING
 
 from diarrhizer.adapters.ffmpeg import FFmpegAdapter
 from diarrhizer.pipeline.cache import is_stale
@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 #   get_output_paths()/is_cache_valid() only expect those two extras once a prior run's meta/run.json recorded
 #   audio_profile="split-stereo" (see _read_recorded_audio_profile) - on a first run, before meta/run.json
 #   exists, only normalized.wav+meta are checked, which is still correct since a missing normalized.wav alone
-#   is enough to mark the stage stale.
+#   is enough to mark the stage stale. is_cache_valid() also compares the recorded audio_profile to the
+#   current job config and treats a newer source file as stale.
 # @inputs: job.input_path, config.audio_profile
 # @outputs: artifacts/audio/normalized.wav, meta/run.json, and for split-stereo also
 #   artifacts/audio/normalized_left.wav / normalized_right.wav
@@ -206,17 +207,15 @@ class ConvertStage:
         """
         return self.get_artifact_paths(job_dir)
 
-    def is_cache_valid(self, job_dir: Path) -> bool:
-        """Check if stage output exists and is up to date.
-
-        Args:
-            job_dir: Job directory path
-
-        Returns:
-            True if output exists and is valid
-        """
+    def is_cache_valid(self, job: "JobContext") -> bool:
+        """Check if output exists, matches the current audio_profile, and is newer than the source file."""
+        job_dir = job.job_dir
+        recorded = self._read_recorded_audio_profile(job_dir)
+        if recorded is not None and recorded != job.config.audio_profile:
+            return False
         outputs = list(self.get_output_paths(job_dir).values())
-        return not is_stale(outputs=outputs, inputs=[])
+        inputs = [job.input_path] if job.input_path.exists() else []
+        return not is_stale(outputs=outputs, inputs=inputs)
 
 
 # [SEMANTIC-END] STAGE:CONVERT

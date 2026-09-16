@@ -3,7 +3,7 @@
 import os
 import time
 
-from diarrhizer.pipeline.cache import is_stale
+from diarrhizer.pipeline.cache import config_mismatch, is_stale, prompt_digest
 
 
 def touch(path, content="x"):
@@ -86,3 +86,21 @@ def test_equal_mtime_is_not_stale(tmp_path):
     os.utime(inp, (t, t))
     os.utime(out, (t, t))
     assert is_stale(outputs=[out], inputs=[inp]) is False
+
+
+def test_config_mismatch_ignores_missing_legacy_keys():
+    assert config_mismatch({"asr_model": "large-v3"}, {"asr_model": "large-v3", "asr_beam_size": 5}) is False
+
+
+def test_config_mismatch_detects_changed_value():
+    assert config_mismatch({"asr_model": "large-v3"}, {"asr_model": "base"}) is True
+
+
+def test_config_mismatch_none_stored_is_not_a_mismatch():
+    assert config_mismatch(None, {"asr_model": "base"}) is False
+
+
+def test_prompt_digest_none_and_stable():
+    assert prompt_digest(None) is None
+    assert prompt_digest("hello") == prompt_digest("hello")
+    assert prompt_digest("hello") != prompt_digest("world")

@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from diarrhizer.adapters.whisperx import WhisperXDiarizeAdapter
-from diarrhizer.pipeline.cache import is_stale
-from diarrhizer.utils import write_json_atomic
+from diarrhizer.pipeline.cache import config_mismatch, is_stale
+from diarrhizer.utils import read_json, write_json_atomic
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -203,20 +203,28 @@ class DiarizeStage:
         """
         return {"diarization": job_dir / self.DIARIZATION_JSON}
 
-    def is_cache_valid(self, job_dir: Path) -> bool:
-        """Check if stage output exists and is up to date relative to its input audio.
-
-        Args:
-            job_dir: Job directory path
-
-        Returns:
-            True if output exists and is valid
-        """
+    def is_cache_valid(self, job: "JobContext") -> bool:
+        """Check if output exists, matches speaker-range config, and is newer than the input wav."""
+        job_dir = job.job_dir
         artifacts = self.get_artifact_paths(job_dir)
-        return not is_stale(
+        if is_stale(
             outputs=list(self.get_output_paths(job_dir).values()),
             inputs=[artifacts["input_audio"]],
-        )
+        ):
+            return False
+        data = read_json(artifacts["diarization"])
+        if not isinstance(data, dict):
+            return False
+        meta = data.get("metadata") or {}
+        stored = {
+            "min_speakers": meta.get("min_speakers"),
+            "max_speakers": meta.get("max_speakers"),
+        }
+        expected = {
+            "min_speakers": job.config.min_speakers,
+            "max_speakers": job.config.max_speakers,
+        }
+        return not config_mismatch(stored, expected)
 
 
 # [SEMANTIC-END] STAGE:DIARIZE

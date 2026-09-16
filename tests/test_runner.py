@@ -325,7 +325,7 @@ class _ExplodingStage:
     def run(self, job):
         raise AssertionError("should have been skipped by --from-stage")
 
-    def is_cache_valid(self, job_dir):
+    def is_cache_valid(self, job):
         raise AssertionError("should have been skipped by --from-stage")
 
     def get_artifact_paths(self, job_dir):
@@ -375,6 +375,25 @@ def test_unknown_stage_name_not_in_supplied_stages_raises_value_error(fixed_job)
 
     with pytest.raises(ValueError, match="Unknown --from-stage 'convert'"):
         _run(input_file, out_dir, from_stage="convert")
+
+
+def test_changed_speakers_invalidates_export_only(fixed_job):
+    input_file, out_dir, job_dir = fixed_job
+    _run(input_file, out_dir)
+    result2 = _run(input_file, out_dir, speakers={"Speaker_00": "Ivan"})
+    assert _statuses(result2) == {"merge": "cached", "export": "completed"}
+    md = (job_dir / "export" / "result.md").read_text(encoding="utf-8")
+    assert "Ivan" in md
+    txt = (job_dir / "export" / "result.txt").read_text(encoding="utf-8")
+    assert "Ivan" in txt
+
+
+def test_same_speakers_keeps_export_cached(fixed_job):
+    input_file, out_dir, job_dir = fixed_job
+    mapping = {"Speaker_00": "Ivan"}
+    _run(input_file, out_dir, speakers=mapping)
+    result2 = _run(input_file, out_dir, speakers=mapping)
+    assert _statuses(result2) == {"merge": "cached", "export": "cached"}
 
 
 def test_export_writes_result_txt(fixed_job):

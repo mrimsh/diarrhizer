@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from diarrhizer.adapters.whisperx import WhisperXAdapter
-from diarrhizer.pipeline.cache import is_stale
-from diarrhizer.utils import write_json_atomic
+from diarrhizer.pipeline.cache import config_mismatch, is_stale, prompt_digest
+from diarrhizer.utils import read_json, write_json_atomic
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -213,6 +213,7 @@ class TranscribeStage:
                 "vad_filter": self._vad_filter,
                 "vad_min_silence_ms": self._vad_min_silence_ms,
                 "initial_prompt": self._initial_prompt[:100] + "..." if self._initial_prompt and len(self._initial_prompt) > 100 else self._initial_prompt,
+                "initial_prompt_sha256": prompt_digest(self._initial_prompt),
                 "start_time": start_time.isoformat(),
                 "end_time": end_time.isoformat(),
                 "duration_seconds": duration,
@@ -267,20 +268,43 @@ class TranscribeStage:
         """
         return {"transcript": job_dir / self.TRANSCRIPT_JSON}
 
-    def is_cache_valid(self, job_dir: Path) -> bool:
-        """Check if stage output exists and is up to date relative to its input audio.
-
-        Args:
-            job_dir: Job directory path
-
-        Returns:
-            True if output exists and is valid
-        """
+    def is_cache_valid(self, job: "JobContext") -> bool:
+        """Check if output exists, matches current ASR config, and is newer than the input wav."""
+        job_dir = job.job_dir
         artifacts = self.get_artifact_paths(job_dir)
-        return not is_stale(
+        if is_stale(
             outputs=list(self.get_output_paths(job_dir).values()),
             inputs=[artifacts["input_audio"]],
-        )
+        ):
+            return False
+        data = read_json(artifacts["transcript"])
+        if not isinstance(data, dict):
+            return False
+        meta = data.get("metadata") or {}
+        stored = {
+            "asr_model": data.get("model"),
+            "asr_compute_type": data.get("compute_type"),
+            "language": meta.get("language_setting"),
+            "asr_beam_size": meta.get("beam_size"),
+            "asr_temperature": meta.get("temperature"),
+            "asr_condition_on_previous_text": meta.get("condition_on_previous_text"),
+            "asr_vad_filter": meta.get("vad_filter"),
+            "asr_vad_min_silence_ms": meta.get("vad_min_silence_ms"),
+        }
+        if "initial_prompt_sha256" in meta:
+            stored["initial_prompt_sha256"] = meta["initial_prompt_sha256"]
+        expected = {
+            "asr_model": job.config.asr_model,
+            "asr_compute_type": job.config.asr_compute_type,
+            "language": job.config.language,
+            "asr_beam_size": job.config.asr_beam_size,
+            "asr_temperature": job.config.asr_temperature,
+            "asr_condition_on_previous_text": job.config.asr_condition_on_previous_text,
+            "asr_vad_filter": job.config.asr_vad_filter,
+            "asr_vad_min_silence_ms": job.config.asr_vad_min_silence_ms,
+            "initial_prompt_sha256": prompt_digest(job.config.asr_initial_prompt),
+        }
+        return not config_mismatch(stored, expected)
 
 
 # [SEMANTIC-END] STAGE:TRANSCRIBE

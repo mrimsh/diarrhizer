@@ -234,13 +234,6 @@ class ResultScreen(QWidget):
             "from_stage": "export",
             "to_stage": "export",
             "speakers": names,
-            # ExportStage.is_cache_valid() only compares file mtimes
-            # (segments.json vs result.md/result.json) - it has no way to
-            # see that `speakers` changed, since that's an in-memory dict,
-            # not a tracked artifact. Without forcing, a re-export after a
-            # rename is silently a no-op (confirmed: this is also true of
-            # the bare CLI's own documented --from-stage export --speakers
-            # workflow in README.md, not something this GUI introduced).
             "force_stage": "export",
         }
         # Forward the original run's language/device/speaker-range so the

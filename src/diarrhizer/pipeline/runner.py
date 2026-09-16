@@ -39,8 +39,8 @@ class StageProtocol(Protocol):
         """Run the stage."""
         ...
 
-    def is_cache_valid(self, job_dir: Path) -> bool:
-        """Check if stage output is cached."""
+    def is_cache_valid(self, job: "JobContext") -> bool:
+        """Check if stage output is cached for this job's config and artifacts."""
         ...
 
     def get_artifact_paths(self, job_dir: Path) -> dict:
@@ -394,7 +394,7 @@ def run_pipeline(
         should_force = force or (force_stage == stage_name)
 
         # Check cache before running (skip if not forced and cache is valid)
-        if not should_force and stage.is_cache_valid(job_dir):
+        if not should_force and stage.is_cache_valid(job):
             # Get this stage's own output paths for the log message. Using
             # get_output_paths() (not get_artifact_paths()) matters here:
             # get_artifact_paths() also includes this stage's *inputs*, which

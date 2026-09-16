@@ -432,6 +432,31 @@ def test_run_records_min_turn_duration_in_metadata(tmp_path):
     assert output["metadata"]["min_turn_duration"] == 0.75
 
 
+def test_cache_is_invalidated_when_min_turn_duration_changes(tmp_path):
+    # Without this, changing the threshold would silently reuse segments.json
+    # merged under the old one - the inputs' mtimes haven't moved.
+    job_dir = _split_job_dir(tmp_path)
+    stage = MergeStage()
+    stage.run(_job(job_dir, min_turn_duration=0.4))
+
+    assert stage.is_cache_valid(_job(job_dir, min_turn_duration=0.4))
+    assert not stage.is_cache_valid(_job(job_dir, min_turn_duration=1.0))
+
+
+def test_cache_stays_valid_for_segments_written_before_the_field_existed(tmp_path):
+    # config_mismatch ignores keys a legacy artifact never stored; mtime rules.
+    job_dir = _split_job_dir(tmp_path)
+    stage = MergeStage()
+    stage.run(_job(job_dir))
+
+    segments_path = job_dir / "merged" / "segments.json"
+    data = json.loads(segments_path.read_text(encoding="utf-8"))
+    del data["metadata"]["min_turn_duration"]
+    segments_path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert stage.is_cache_valid(_job(job_dir, min_turn_duration=1.0))
+
+
 # --- _find_overlapping_speaker ---------------------------------------------
 
 def test_find_overlapping_speaker_no_diarization_returns_default():

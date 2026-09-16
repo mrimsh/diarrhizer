@@ -43,6 +43,7 @@ def test_run_writes_one_file_per_registered_exporter(tmp_path):
     assert "hello" in txt
     data = json.loads((job.job_dir / "export" / "result.json").read_text(encoding="utf-8"))
     assert data["segments"][0]["text"] == "hello"
+    assert data["metadata"]["speakers"] == {}
 
 
 # --- get_output_paths/get_artifact_paths derive from EXPORTERS -----------
@@ -105,10 +106,10 @@ def test_is_cache_valid_false_if_any_single_format_output_missing(tmp_path, monk
     job = _job(tmp_path)
     stage = ExportStage()
     stage.run(job)
-    assert stage.is_cache_valid(job.job_dir) is True
+    assert stage.is_cache_valid(job) is True
 
     # Delete only the new format's output - the whole stage should still be
     # considered stale even though markdown/json are untouched and fresh,
     # because registered formats are cached as one atomic group.
     (job.job_dir / "export" / "result.wordcount.txt").unlink()
-    assert stage.is_cache_valid(job.job_dir) is False
+    assert stage.is_cache_valid(job) is False
