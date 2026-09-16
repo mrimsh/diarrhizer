@@ -8,8 +8,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from diarrhizer.export.markdown_export import export_to_markdown
 from diarrhizer.export.json_export import export_to_json
+from diarrhizer.export.markdown_export import export_to_markdown
+from diarrhizer.export.text_export import export_to_text
 from diarrhizer.pipeline.cache import is_stale
 from diarrhizer.utils import write_text_atomic
 
@@ -32,11 +33,11 @@ logger = logging.getLogger(__name__)
 #   format is missing or stale, so formats can never drift out of sync with
 #   segments.json or with each other.
 # @inputs: artifacts/merged/segments.json
-# @outputs: one file per Exporter in EXPORTERS (artifacts/export/result.md, artifacts/export/result.json)
+# @outputs: one file per Exporter in EXPORTERS (result.md, result.txt, result.json)
 # @sideEffects: Reads JSON files, writes export files to disk,
 #   logs progress via logging (INFO, extra={"stage": "export"})
 # @errors: FileNotFoundError if input artifacts missing
-# @see: STAGE:MERGE, EXPORT:MARKDOWN, EXPORT:JSON
+# @see: STAGE:MERGE, EXPORT:MARKDOWN, EXPORT:TEXT, EXPORT:JSON
 @dataclass(frozen=True)
 class Exporter:
     """A single registered export format.
@@ -66,6 +67,7 @@ class ExportStage:
     # no other method in this class needs to change.
     EXPORTERS: tuple[Exporter, ...] = (
         Exporter("markdown", export_to_markdown, "export/result.md"),
+        Exporter("text", export_to_text, "export/result.txt"),
         Exporter("json", export_to_json, "export/result.json"),
     )
 
@@ -99,7 +101,6 @@ class ExportStage:
 
         # Extract segments list
         segments = segments_data.get("segments", [])
-        metadata = segments_data.get("metadata", {})
 
         # Get input path from config
         input_path = config.input_file

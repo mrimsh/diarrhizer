@@ -39,6 +39,8 @@ def test_run_writes_one_file_per_registered_exporter(tmp_path):
 
     md = (job.job_dir / "export" / "result.md").read_text(encoding="utf-8")
     assert "hello" in md
+    txt = (job.job_dir / "export" / "result.txt").read_text(encoding="utf-8")
+    assert "hello" in txt
     data = json.loads((job.job_dir / "export" / "result.json").read_text(encoding="utf-8"))
     assert data["segments"][0]["text"] == "hello"
 

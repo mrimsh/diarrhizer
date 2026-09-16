@@ -365,6 +365,14 @@ def test_unknown_stage_name_not_in_supplied_stages_raises_value_error(fixed_job)
         _run(input_file, out_dir, from_stage="convert")
 
 
+def test_export_writes_result_txt(fixed_job):
+    input_file, out_dir, job_dir = fixed_job
+    _run(input_file, out_dir)
+    txt_path = job_dir / "export" / "result.txt"
+    assert txt_path.exists()
+    assert "OLD TEXT" in txt_path.read_text(encoding="utf-8")
+
+
 def test_force_stage_outside_range_has_no_effect(fixed_job):
     """--force-stage naming a stage that --from-stage/--to-stage excludes
     from the active range must not touch that stage at all: range-skipping

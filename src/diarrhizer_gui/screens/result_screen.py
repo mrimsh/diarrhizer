@@ -92,6 +92,8 @@ class ResultScreen(QWidget):
         self._open_folder_button.clicked.connect(self._open_folder)
         self._open_md_button = QPushButton("Открыть result.md")
         self._open_md_button.clicked.connect(lambda: self._open_file(self._result_md_path))
+        self._open_txt_button = QPushButton("Открыть result.txt")
+        self._open_txt_button.clicked.connect(lambda: self._open_file(self._result_txt_path))
         self._open_json_button = QPushButton("Открыть result.json")
         self._open_json_button.clicked.connect(lambda: self._open_file(self._result_json_path))
 
@@ -100,6 +102,7 @@ class ResultScreen(QWidget):
         header.addStretch(1)
         header.addWidget(self._open_folder_button)
         header.addWidget(self._open_md_button)
+        header.addWidget(self._open_txt_button)
         header.addWidget(self._open_json_button)
 
         self._speakers_layout = QVBoxLayout()
@@ -124,6 +127,7 @@ class ResultScreen(QWidget):
         layout.addWidget(self._back_button, alignment=Qt.AlignmentFlag.AlignRight)
 
         self._result_md_path: Optional[Path] = None
+        self._result_txt_path: Optional[Path] = None
         self._result_json_path: Optional[Path] = None
 
     def load(self, job_dir: Path) -> None:
@@ -158,9 +162,14 @@ class ResultScreen(QWidget):
         input_path = meta.get("input_path")
         self._title_label.setText(Path(input_path).name if input_path else job_dir.name)
 
+        # One button per ExportStage.EXPORTERS entry, in the same order.
+        # Each is enabled only if that file was actually rendered - a job from
+        # before an exporter existed simply has it greyed out.
         self._result_md_path = job_dir / "export" / "result.md"
+        self._result_txt_path = job_dir / "export" / "result.txt"
         self._result_json_path = job_dir / "export" / "result.json"
         self._open_md_button.setEnabled(self._result_md_path.exists())
+        self._open_txt_button.setEnabled(self._result_txt_path.exists())
         self._open_json_button.setEnabled(self._result_json_path.exists())
 
         self._rebuild_speaker_panel()

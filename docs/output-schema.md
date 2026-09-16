@@ -6,8 +6,9 @@ This document describes the JSON schema for exported results from the Diarrhizer
 
 ## Overview
 
-The export stage produces two output files:
-- `export/result.md` — Human-readable Markdown transcript
+The export stage produces three output files:
+- `export/result.md` — Human-readable Markdown transcript (one line per segment)
+- `export/result.txt` — The same transcript without markup or metadata header
 - `export/result.json` — Structured machine-readable JSON
 
 Both exports contain the same underlying data: merged segments with speaker labels and timestamps.
