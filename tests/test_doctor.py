@@ -51,6 +51,23 @@ def test_check_ffmpeg_fails_with_clear_message_when_unresolved(monkeypatch):
     assert ENV_FFMPEG_PATH in message
 
 
+def test_check_cudnn_skips_on_cpu_only_torch(monkeypatch):
+    class _Cuda:
+        @staticmethod
+        def is_available():
+            return False
+
+    class _Torch:
+        cuda = _Cuda
+        __file__ = "unused"
+
+    monkeypatch.setitem(__import__("sys").modules, "torch", _Torch)
+    name, passed, message = doctor.check_cudnn()
+    assert name == "cuDNN"
+    assert passed is True
+    assert "CPU-only" in message
+
+
 def test_check_ffmpeg_reports_clear_error_for_invalid_env_var(tmp_path, monkeypatch):
     missing = tmp_path / "does-not-exist.exe"
     monkeypatch.setenv(ENV_FFMPEG_PATH, str(missing))

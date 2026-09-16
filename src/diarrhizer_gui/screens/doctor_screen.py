@@ -23,6 +23,7 @@ CHECKS = [
     doctor.check_ffmpeg,
     doctor.check_torch,
     doctor.check_cuda,
+    doctor.check_cudnn,
     doctor.check_torchcodec,
     doctor.check_critical_imports,
     doctor.check_hf_token,

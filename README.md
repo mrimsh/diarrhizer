@@ -139,13 +139,16 @@ HF_TOKEN=hf_xxx
 python -m diarrhizer doctor
 ```
 
-The `doctor` command performs 5 diagnostic checks:
+The `doctor` command performs these diagnostic checks:
 
 1. **Python version** — verifies Python 3.11+
-2. **FFmpeg** — checks availability in PATH
+2. **FFmpeg** — checks availability in PATH (or `DIARRHIZER_FFMPEG_PATH`)
 3. **PyTorch/Torchaudio** — verifies installation and reports version
 4. **CUDA** — checks GPU availability
-5. **Hugging Face token** — verifies `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN` is set
+5. **cuDNN** — checks cuDNN 8 DLLs needed by WhisperX/CTranslate2 (skipped on CPU-only)
+6. **torchcodec** — optional fast decoder
+7. **Critical imports** — whisperx / speechbrain / pyannote / transformers
+8. **Hugging Face token** — verifies `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN` is set (including from a local `.env`)
 
 ---
 

@@ -246,13 +246,16 @@ Therefore, a `doctor` command is provided to verify these conditions before runn
 
 ### Doctor Checks (Implemented)
 
-The [`doctor`](src/diarrhizer/diagnostics/doctor.py) command performs 5 checks:
+The [`doctor`](src/diarrhizer/diagnostics/doctor.py) command performs these checks:
 
 1. **Python version** — verifies Python 3.11+
-2. **FFmpeg** — checks availability in PATH using `shutil.which("ffmpeg")`
+2. **FFmpeg** — checks availability via `DIARRHIZER_FFMPEG_PATH` or PATH
 3. **PyTorch/Torchaudio** — verifies installation and reports version and CUDA status
 4. **CUDA** — checks GPU availability via `torch.cuda.is_available()`
-5. **Hugging Face token** — verifies `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN` environment variable is set
+5. **cuDNN** — looks for cuDNN 8 DLLs required by WhisperX/CTranslate2 (skipped on CPU-only)
+6. **torchcodec** — optional fast decoder
+7. **Critical imports** — whisperx / speechbrain / pyannote / transformers
+8. **Hugging Face token** — verifies `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN` (CLI and GUI load a local `.env`)
 
 Run with:
 ```powershell

@@ -2,6 +2,7 @@
 
 import os
 import sys
+from pathlib import Path
 from typing import List, Tuple
 
 from diarrhizer.adapters.ffmpeg import ENV_FFMPEG_PATH, resolve_ffmpeg_path
@@ -9,12 +10,16 @@ from diarrhizer.adapters.ffmpeg import ENV_FFMPEG_PATH, resolve_ffmpeg_path
 
 # [SEMANTIC-BEGIN] DIAGNOSTICS:DOCTOR
 # @purpose: Run environment diagnostics to verify Diarrhizer dependencies
-# @description: Checks for Python version, FFmpeg, torch/torchaudio, CUDA, torchcodec, HF token, and critical ML imports
-# @sideEffects: Reads environment variables, imports optional modules
-# @errors: Prints warnings for missing dependencies
-# @see: CLI:ENTRY, ADAPTER:FFMPEG
-def run_doctor_checks() -> None:
-    """Run all diagnostic checks and print results."""
+# @description: Checks for Python version, FFmpeg, torch/torchaudio, CUDA, cuDNN, torchcodec, HF token, and critical ML imports
+# @sideEffects: Reads environment variables, imports optional modules, scans torch/lib for cuDNN DLLs
+# @errors: Prints warnings for missing dependencies; returns False if any check failed
+# @see: CLI:ENTRY, ADAPTER:FFMPEG, CONFIG:ENV
+def run_doctor_checks() -> bool:
+    """Run all diagnostic checks and print results.
+
+    Returns:
+        True if every check passed.
+    """
     print("=" * 50)
     print("Diarrhizer Environment Diagnostics")
     print("=" * 50)
@@ -24,6 +29,7 @@ def run_doctor_checks() -> None:
         check_ffmpeg,
         check_torch,
         check_cuda,
+        check_cudnn,
         check_torchcodec,
         check_critical_imports,
         check_hf_token,
@@ -52,6 +58,7 @@ def run_doctor_checks() -> None:
         print("    pip install -c requirements/constraints-stable.txt -r requirements/base.txt")
         print("  Or reinstall PyTorch with a compatible version.")
     print("=" * 50)
+    return passed_count == total_count
 
 
 def check_python_version() -> Tuple[str, bool, str]:
@@ -134,6 +141,43 @@ def check_cuda() -> Tuple[str, bool, str]:
         return ("CUDA", True, f"{device_count} device(s): {device_name}")
     except ImportError:
         return ("CUDA", False, "torch not installed, cannot check CUDA")
+
+
+def check_cudnn() -> Tuple[str, bool, str]:
+    """Check that the cuDNN major version matches what WhisperX/CTranslate2 needs.
+
+    WhisperX 3.3.1 pins ctranslate2<4.5.0, which loads cuDNN 8
+    (cudnn_ops_infer64_8.dll). torch>=2.4.0+cu124 ships cuDNN 9 only, so
+    torch.cuda.is_available() can be True while transcription still crashes.
+    """
+    try:
+        import torch
+    except ImportError:
+        return ("cuDNN", False, "torch not installed, cannot check cuDNN")
+
+    if not torch.cuda.is_available():
+        return ("cuDNN", True, "Skipped (CPU-only torch; cuDNN only needed for CUDA)")
+
+    torch_lib = Path(torch.__file__).resolve().parent / "lib"
+    cudnn8 = list(torch_lib.glob("cudnn_ops_infer64_8.dll")) + list(
+        torch_lib.glob("libcudnn_ops_infer.so.8*")
+    )
+    cudnn9 = list(torch_lib.glob("cudnn*64_9.dll")) + list(torch_lib.glob("libcudnn*.so.9*"))
+
+    if cudnn8:
+        return ("cuDNN", True, f"cuDNN 8 found ({cudnn8[0].name}) — compatible with ctranslate2<4.5")
+    if cudnn9:
+        return (
+            "cuDNN",
+            False,
+            "cuDNN 9 found, but WhisperX/ctranslate2<4.5 needs cuDNN 8 "
+            "(cudnn_ops_infer64_8.dll). See docs/troubleshooting.md",
+        )
+    return (
+        "cuDNN",
+        False,
+        f"No cuDNN DLLs found in {torch_lib}. GPU transcription will likely fail.",
+    )
 
 
 def check_hf_token() -> Tuple[str, bool, str]:

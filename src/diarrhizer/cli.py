@@ -215,8 +215,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "doctor":
-        run_doctor_checks()
-        return 0
+        return 0 if run_doctor_checks() else 1
     elif args.command == "run":
         # [SEMANTIC-BEGIN] CLI:RUN
         # @purpose: Run the processing pipeline for a media file
