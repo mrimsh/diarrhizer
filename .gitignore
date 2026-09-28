@@ -39,6 +39,9 @@ ENV/
 .env.*
 !.env.example
 
+# Personal audio storage profiles (see audio_formats.example.json)
+audio_formats.json
+
 # ===== Outputs / artifacts =====
 out/
 artifacts/

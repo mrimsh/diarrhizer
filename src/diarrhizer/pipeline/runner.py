@@ -11,6 +11,7 @@ from typing import Protocol, Sequence
 # the algorithm's own default here keeps config and implementation in sync
 # without dragging torch/whisperx into every runner import.
 from diarrhizer.pipeline.stages.merge import DEFAULT_MIN_TURN_DURATION
+from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat, resolve_audio_format
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -23,10 +24,14 @@ logger = logging.getLogger(__name__)
 #   input_path from a prior convert stage's meta/run.json if not given explicitly), and
 #   from_stage/to_stage to skip stages outside a range entirely. Stages outside the range are
 #   never touched (not even cache-checked); stages inside it still go through the normal
-#   is_stale-based caching, not an unconditional recompute.
-# @inputs: input_path, config, out_dir, stages, job_dir, force, force_stage, from_stage, to_stage
+#   is_stale-based caching, not an unconditional recompute. Once a run reaches the last stage, every
+#   stage's optional finalize(job) hook runs (regardless of from_stage - it acts on the job's recorded
+#   state, e.g. convert dropping a working WAV that the audio format says not to keep); a failure
+#   there is logged, not raised, since the job itself already completed.
+# @inputs: input_path, config, out_dir, stages, job_dir, force, force_stage, from_stage, to_stage, audio_format
 # @outputs: Artifacts on disk per stage definitions
 # @sideEffects: Creates job directory, writes artifacts to disk, deletes artifacts when force is used,
+#   finalize hooks may delete intermediate artifacts, reads audio_formats.json for non-built-in format names,
 #   logs pipeline/stage progress via logging (INFO; per-stage lines carry extra={"stage": <name>})
 # @errors: RuntimeError, FileNotFoundError, ValueError
 # @see: STAGE:CONVERT, STAGE:TRANSCRIBE, ARTIFACTS:LAYOUT, PIPELINE:CACHE, CONFIG:PIPELINE
@@ -62,7 +67,7 @@ class StageProtocol(Protocol):
 # @outputs: PipelineConfig instance, carried as JobContext.config
 # @sideEffects: None (plain dataclass)
 # @errors: None
-# @see: PIPELINE:RUNNER, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, EXPORT:MARKDOWN, EXPORT:JSON, CLI:RUN
+# @see: PIPELINE:RUNNER, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, EXPORT:MARKDOWN, EXPORT:JSON, CLI:RUN, CONFIG:AUDIO_FORMATS
 @dataclass
 class PipelineConfig:
     """Pipeline configuration shared by all stages via JobContext.config.
@@ -90,6 +95,9 @@ class PipelineConfig:
         asr_vad_filter: Enable VAD filtering
         asr_vad_min_silence_ms: VAD minimum silence in milliseconds
         audio_profile: Audio preprocessing profile
+        audio_format: How the job's audio is stored: archive codec/quality and
+            whether the working WAV is kept (resolved from a profile name by
+            run_pipeline; see CONFIG:AUDIO_FORMATS)
         min_turn_duration: Shortest speaker turn, in seconds, the merge stage
             will split out on its own; shorter word runs between two runs of
             the same other speaker are folded back in as diarization jitter
@@ -116,6 +124,7 @@ class PipelineConfig:
     asr_vad_filter: bool = True
     asr_vad_min_silence_ms: int = 1000
     audio_profile: str = "raw"
+    audio_format: AudioFormat = WAV_FORMAT
     min_turn_duration: float = DEFAULT_MIN_TURN_DURATION
 # [SEMANTIC-END] CONFIG:PIPELINE
 
@@ -200,6 +209,8 @@ def run_pipeline(
     asr_vad_filter: bool = PipelineConfig.asr_vad_filter,
     asr_vad_min_silence_ms: int = PipelineConfig.asr_vad_min_silence_ms,
     audio_profile: str = PipelineConfig.audio_profile,
+    audio_format: AudioFormat | str | None = PipelineConfig.audio_format,
+    keep_wav: bool | None = None,
     min_turn_duration: float = PipelineConfig.min_turn_duration,
 ) -> dict:
     """Run the processing pipeline for a media file.
@@ -230,6 +241,10 @@ def run_pipeline(
         asr_vad_filter: Enable VAD filtering
         asr_vad_min_silence_ms: VAD minimum silence in milliseconds
         audio_profile: Audio preprocessing profile
+        audio_format: AudioFormat, a format profile name (built-in or from
+            audio_formats.json), or None for the store's default profile
+        keep_wav: Override the format's keep_wav for this run (None = as the
+            profile says)
         min_turn_duration: Shortest speaker turn (seconds) the merge stage will
             split out on its own; 0 splits on every word-level speaker change
 
@@ -241,6 +256,9 @@ def run_pipeline(
 
     if min_turn_duration < 0:
         raise ValueError(f"min_turn_duration ({min_turn_duration}) cannot be negative")
+
+    # Resolved before anything touches disk: an unknown profile name fails fast.
+    audio_format = resolve_audio_format(audio_format, keep_wav)
 
     # Validate speaker range
     if min_speakers > max_speakers:
@@ -342,6 +360,7 @@ def run_pipeline(
         asr_vad_filter=asr_vad_filter,
         asr_vad_min_silence_ms=asr_vad_min_silence_ms,
         audio_profile=audio_profile,
+        audio_format=audio_format,
         min_turn_duration=min_turn_duration,
     )
 
@@ -361,6 +380,10 @@ def run_pipeline(
     logger.info(f"Language: {language}")
     logger.info(f"Device: {device}")
     logger.info(f"Speakers: {min_speakers}-{max_speakers}")
+    logger.info(
+        f"Audio format: {audio_format.name}"
+        + ("" if audio_format.keeps_wav else " (working WAV not kept)")
+    )
     if from_stage or to_stage:
         logger.info(f"Stage range: {from_stage or stage_names[0]} -> {to_stage or stage_names[-1]}")
     if force:
@@ -450,6 +473,18 @@ def run_pipeline(
         except Exception as e:
             print(f"[{stage_name}] Error: {e}")
             raise
+
+    # The job is complete only once the last stage ran (or was cached) - a
+    # --to-stage run that stops early leaves intermediate files for later stages.
+    if stages and to_index == len(stages) - 1:
+        for stage in stages:
+            finalize = getattr(stage, "finalize", None)
+            if finalize is None:
+                continue
+            try:
+                finalize(job)
+            except OSError as e:
+                logger.warning(f"Stage {getattr(stage, 'NAME', 'unknown')}: cleanup failed: {e}")
 
     end_time = datetime.now()
     total_duration = (end_time - start_time).total_seconds()

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from diarrhizer.adapters.whisperx import WhisperXDiarizeAdapter
+from diarrhizer.audio_formats import find_job_audio
 from diarrhizer.pipeline.cache import config_mismatch, is_stale
 from diarrhizer.utils import read_json, write_json_atomic
 
@@ -17,14 +18,16 @@ logger = logging.getLogger(__name__)
 
 # [SEMANTIC-BEGIN] STAGE:DIARIZE
 # @purpose: Perform speaker diarization using WhisperX/pyannote
-# @description: Consumes normalized WAV from convert stage and produces speaker segments
-# @inputs: artifacts/audio/normalized.wav
+# @description: Consumes normalized WAV from convert stage and produces speaker segments.
+#   Once a keep_wav=false audio format dropped the WAV, decodes the archive copy instead
+#   (find_job_audio); cache staleness stays keyed on the WAV, so dropping it never invalidates diarization.
+# @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/diar/diarization.json
 # @sideEffects: Loads pyannote model, writes diarization JSON to disk, unloads the
 #   model and clears the CUDA cache when the stage finishes,
 #   logs progress via logging (INFO, extra={"stage": "diarize"})
 # @errors: RuntimeError if HF_TOKEN missing, FileNotFoundError
-# @see: ADAPTER:WHISPERX_DIARIZE, STAGE:CONVERT, PIPELINE:RUNNER
+# @see: ADAPTER:WHISPERX_DIARIZE, STAGE:CONVERT, ARTIFACTS:JOB_AUDIO, PIPELINE:RUNNER
 class DiarizeStage:
     """Stage for performing speaker diarization."""
 
@@ -93,8 +96,9 @@ class DiarizeStage:
         job_dir = job.job_dir
         config = job.config
 
-        # Get input audio path
-        audio_input = job_dir / self.INPUT_WAV
+        # The working WAV while it exists, else the archive copy a keep_wav=false
+        # format left behind (ARTIFACTS:JOB_AUDIO).
+        audio_input = find_job_audio(job_dir) or job_dir / self.INPUT_WAV
 
         # Build output paths
         diar_output = job_dir / self.DIARIZATION_JSON

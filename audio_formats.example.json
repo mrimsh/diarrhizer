@@ -1,0 +1,30 @@
+{
+  "default": "call-archive",
+  "profiles": {
+    "call-archive": {
+      "description": "MP3 VBR q5 of the call, working WAV deleted after the job",
+      "codec": "libmp3lame",
+      "extension": "mp3",
+      "quality": 5,
+      "sample_rate": 16000,
+      "channels": 1,
+      "keep_wav": false
+    },
+    "listening-hq": {
+      "description": "44.1 kHz stereo MP3 for listening, working WAV kept too",
+      "codec": "libmp3lame",
+      "extension": "mp3",
+      "quality": 2,
+      "sample_rate": 44100,
+      "channels": 2,
+      "keep_wav": true
+    },
+    "flac-max": {
+      "description": "Smallest lossless FLAC",
+      "codec": "flac",
+      "extension": "flac",
+      "extra_args": ["-sample_fmt", "s16", "-compression_level", "12"],
+      "keep_wav": false
+    }
+  }
+}

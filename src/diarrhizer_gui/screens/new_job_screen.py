@@ -1,7 +1,8 @@
 """New Job screen: a deliberately small subset of the full CLI parameter
 surface (see the GUI Blueprint) - just enough to start a brand-new job in
 one of two modes. Resuming a job and force/from-stage/to-stage are later
-passes; advanced ASR params and audio profiles are covered here.
+passes; advanced ASR params, audio profiles and audio storage formats are
+covered here (formats themselves are edited on the Settings screen).
 
 Only imports diarrhizer.diagnostics.doctor at module level (light, no torch
 at import time - same as the Doctor screen). Anything from
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from diarrhizer.audio_formats import AudioFormat, AudioFormatStore, store_path
 from diarrhizer.diagnostics import doctor
 from diarrhizer_gui import custom_models, settings_keys
 
@@ -48,6 +50,42 @@ AUDIO_PROFILES = [
     ("denoise-light", "Лёгкое шумоподавление"),
     ("split-stereo", "Доп. L/R-файлы (диаризация всё равно по моно-миксу)"),
 ]
+
+# Russian labels for the built-in storage formats (diarrhizer.audio_formats);
+# user profiles show their own name and description.
+AUDIO_FORMAT_LABELS = {
+    "wav": "WAV 16 кГц моно — без сжатия, только рабочий файл (≈115 МБ/ч)",
+    "flac": "FLAC — сжатие без потерь (≈50–75 МБ/ч)",
+    "mp3-q5": "MP3 VBR -q:a 5 (≈15–20 МБ/ч)",
+    "opus-24k": "Opus 24 кбит/с (≈11 МБ/ч)",
+}
+
+
+def audio_format_label(fmt: AudioFormat) -> str:
+    if fmt.name in AUDIO_FORMAT_LABELS:
+        return AUDIO_FORMAT_LABELS[fmt.name]
+    return f"{fmt.name} — {fmt.description}" if fmt.description else fmt.name
+
+
+def audio_format_hint(fmt: AudioFormat) -> str:
+    """One line on what ends up on disk and roughly how big it is."""
+    estimate = fmt.estimated_mb_per_hour()
+    size = f"≈{estimate:.0f} МБ/ч" if estimate is not None else "размер зависит от записи"
+    if not fmt.writes_archive:
+        return f"На диске остаётся audio/normalized.wav · {size}"
+    return (
+        f"Архив audio/archive.{fmt.extension} · {fmt.codec}, {fmt.sample_rate} Гц, "
+        f"{fmt.channels} кан. · {size}"
+    )
+
+
+def load_audio_format_store() -> tuple[AudioFormatStore, str]:
+    """The profile store, or built-ins only plus an error message if the file is broken."""
+    try:
+        return AudioFormatStore.load(), ""
+    except ValueError as e:
+        return AudioFormatStore(path=store_path()), f"Профили аудио не загружены: {e}"
+
 
 COMPUTE_TYPES = [
     ("авто", None),
@@ -123,6 +161,25 @@ class NewJobScreen(QWidget):
         for value, label in AUDIO_PROFILES:
             self._audio_profile_combo.addItem(label, value)
 
+        # Storage format: the pipeline always processes the lossless working
+        # WAV; this picks the archive copy kept next to it and whether the WAV
+        # itself survives the job.
+        self._audio_formats: dict = {}
+        self._audio_format_combo = QComboBox()
+        self._audio_format_combo.currentIndexChanged.connect(self._on_audio_format_changed)
+        self._keep_wav_checkbox = QCheckBox("Оставить рабочий WAV")
+        self._keep_wav_checkbox.setToolTip(
+            "Рабочий audio/normalized.wav (без сжатия) нужен только на время обработки.\n"
+            "Если его не оставлять, после завершения задания на диске остаётся\n"
+            "только архивная копия в выбранном формате."
+        )
+        audio_format_row = QHBoxLayout()
+        audio_format_row.addWidget(self._audio_format_combo, stretch=1)
+        audio_format_row.addWidget(self._keep_wav_checkbox)
+        self._audio_format_hint = QLabel()
+        self._audio_format_hint.setStyleSheet("color: #7d8394;")
+        self._audio_format_hint.setWordWrap(True)
+
         form = QFormLayout()
         form.addRow("Файл:", input_row)
         form.addRow("Папка результатов:", out_row)
@@ -132,6 +189,8 @@ class NewJobScreen(QWidget):
         form.addRow("Модель ASR:", self._model_combo)
         form.addRow("Устройство:", self._device_combo)
         form.addRow("Предобработка звука:", self._audio_profile_combo)
+        form.addRow("Хранение аудио:", audio_format_row)
+        form.addRow("", self._audio_format_hint)
 
         self._advanced_toggle = QPushButton("▸ Продвинутые параметры")
         self._advanced_toggle.setCheckable(True)
@@ -242,6 +301,37 @@ class NewJobScreen(QWidget):
             default_device = "cuda" if self._cuda_available else "cpu"
         self._device_combo.setCurrentText(default_device)
 
+        self._reload_audio_formats()
+
+    def _reload_audio_formats(self) -> None:
+        """Rebuild the storage-format list from audio_formats.json (profiles may
+        have been edited on the Settings screen) and select the default profile.
+        """
+        store, error = load_audio_format_store()
+        self._audio_formats = store.formats()
+        self._audio_format_combo.blockSignals(True)
+        self._audio_format_combo.clear()
+        for name, fmt in self._audio_formats.items():
+            self._audio_format_combo.addItem(audio_format_label(fmt), name)
+        self._audio_format_combo.setCurrentIndex(
+            max(0, self._audio_format_combo.findData(store.default().name))
+        )
+        self._audio_format_combo.blockSignals(False)
+        self._on_audio_format_changed()
+        if error:
+            self._audio_format_hint.setText(error)
+            self._audio_format_hint.setStyleSheet("color: #b23b35;")
+
+    def _on_audio_format_changed(self) -> None:
+        fmt = self._audio_formats.get(self._audio_format_combo.currentData())
+        if fmt is None:
+            return
+        # A WAV-only format has nothing else to keep, so the WAV always stays.
+        self._keep_wav_checkbox.setEnabled(fmt.writes_archive)
+        self._keep_wav_checkbox.setChecked(fmt.keeps_wav)
+        self._audio_format_hint.setText(audio_format_hint(fmt))
+        self._audio_format_hint.setStyleSheet("color: #7d8394;")
+
     def _reload_asr_models(self) -> None:
         """Rebuild the model dropdown from presets + models added on the Models
         screen. Called from showEvent(), so a model warmed up mid-session shows
@@ -304,6 +394,10 @@ class NewJobScreen(QWidget):
             "device": self._device_combo.currentText(),
             "asr_model": self._model_combo.currentText(),
             "audio_profile": self._audio_profile_combo.currentData(),
+            # Pass the resolved profile, not its name: the job must use what
+            # was on screen even if audio_formats.json changes before it runs.
+            "audio_format": self._audio_formats[self._audio_format_combo.currentData()],
+            "keep_wav": self._keep_wav_checkbox.isChecked(),
             "asr_compute_type": self._compute_type_combo.currentData(),
             "asr_beam_size": self._beam_size_spin.value(),
             "asr_temperature": self._temperature_spin.value(),

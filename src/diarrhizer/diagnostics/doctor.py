@@ -5,15 +5,18 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 
-from diarrhizer.adapters.ffmpeg import ENV_FFMPEG_PATH, resolve_ffmpeg_path
+from diarrhizer.adapters.ffmpeg import ENV_FFMPEG_PATH, list_audio_encoders, resolve_ffmpeg_path
+from diarrhizer.audio_formats import AudioFormatStore
 
 
 # [SEMANTIC-BEGIN] DIAGNOSTICS:DOCTOR
 # @purpose: Run environment diagnostics to verify Diarrhizer dependencies
-# @description: Checks for Python version, FFmpeg, torch/torchaudio, CUDA, cuDNN, torchcodec, HF token, and critical ML imports
-# @sideEffects: Reads environment variables, imports optional modules, scans torch/lib for cuDNN DLLs
+# @description: Checks for Python version, FFmpeg, audio format profiles (file parses, default profile's
+#   encoder is in this FFmpeg build), torch/torchaudio, CUDA, cuDNN, torchcodec, HF token, and critical ML imports
+# @sideEffects: Reads environment variables and audio_formats.json, runs `ffmpeg -encoders`, imports optional
+#   modules, scans torch/lib for cuDNN DLLs
 # @errors: Prints warnings for missing dependencies; returns False if any check failed
-# @see: CLI:ENTRY, ADAPTER:FFMPEG, CONFIG:ENV
+# @see: CLI:ENTRY, ADAPTER:FFMPEG, CONFIG:ENV, CONFIG:AUDIO_FORMATS
 def run_doctor_checks() -> bool:
     """Run all diagnostic checks and print results.
 
@@ -27,6 +30,7 @@ def run_doctor_checks() -> bool:
     checks = [
         check_python_version,
         check_ffmpeg,
+        check_audio_formats,
         check_torch,
         check_cuda,
         check_cudnn,
@@ -98,6 +102,41 @@ def check_ffmpeg() -> Tuple[str, bool, str]:
             False,
             f"Not found. Install FFmpeg and add to PATH, or set {ENV_FFMPEG_PATH}.",
         )
+
+
+def check_audio_formats() -> Tuple[str, bool, str]:
+    """Check audio_formats.json parses and the default profile's encoder exists.
+
+    Only the default profile can fail the check - a built-in preset the
+    user never picks (e.g. Opus on a build without libopus) is just listed.
+    """
+    name = "Audio formats"
+    try:
+        store = AudioFormatStore.load()
+    except ValueError as e:
+        return (name, False, str(e))
+
+    default = store.default()
+    try:
+        ffmpeg_path = resolve_ffmpeg_path()
+    except FileNotFoundError:
+        ffmpeg_path = None
+    if not ffmpeg_path:
+        return (name, False, f"Default '{default.name}': cannot check encoders without FFmpeg")
+    try:
+        encoders = list_audio_encoders(ffmpeg_path)
+    except RuntimeError as e:
+        return (name, False, str(e))
+
+    unusable = [fmt.name for fmt in store.formats().values() if fmt.codec not in encoders]
+    note = f"; unavailable in this FFmpeg build: {', '.join(unusable)}" if unusable else ""
+    if default.codec not in encoders:
+        return (
+            name,
+            False,
+            f"Default '{default.name}' needs encoder {default.codec}, missing from {ffmpeg_path}{note}",
+        )
+    return (name, True, f"Default '{default.name}' ({default.codec}), {len(store.formats())} profiles{note}")
 
 
 def check_torch() -> Tuple[str, bool, str]:

@@ -280,3 +280,73 @@ def test_raw_profile_adds_no_audio_filter(tmp_path, monkeypatch):
     calls = _convert_with_profile(tmp_path, monkeypatch, FFmpegAdapter.PROFILE_RAW)
 
     assert _audio_filter(calls[0]) is None
+
+
+# --- encode(): the archive copy ---------------------------------------------
+
+
+def _encode(tmp_path, monkeypatch, **kwargs) -> list:
+    from diarrhizer.audio_formats import BUILTIN_FORMATS
+
+    ffmpeg_path = make_fake_ffmpeg(tmp_path)
+    input_file = tmp_path / "input.mp4"
+    input_file.write_bytes(b"fake media")
+    calls = _capture_ffmpeg_cmds(monkeypatch)
+    fmt = BUILTIN_FORMATS["mp3-q5"]
+    FFmpegAdapter(ffmpeg_path=ffmpeg_path).encode(
+        input_file, tmp_path / "job" / "audio" / "archive.mp3", fmt.encoder_args(), **kwargs
+    )
+    return calls
+
+
+def test_encode_applies_the_profile_filter_and_encoder_args(tmp_path, monkeypatch):
+    """The archive must carry the same filtered signal as the working WAV."""
+    calls = _encode(tmp_path, monkeypatch, audio_profile=FFmpegAdapter.PROFILE_VOICE_CALL)
+
+    cmd = calls[0]
+    assert _audio_filter(cmd) == "lowpass=7000,highpass=300,equalizer=f=3000:width_type=q:w=1:g=3"
+    assert cmd[cmd.index("-c:a") + 1] == "libmp3lame"
+    assert cmd[cmd.index("-q:a") + 1] == "5"
+    assert "-vn" in cmd
+    assert cmd[-1].endswith("archive.mp3")
+
+
+def test_encode_channel_extracts_a_single_channel(tmp_path, monkeypatch):
+    calls = _encode(tmp_path, monkeypatch, audio_profile=FFmpegAdapter.PROFILE_SPLIT_STEREO, channel=1)
+
+    assert _audio_filter(calls[0]) == "pan=mono|c0=c1"
+
+
+def test_encode_raw_profile_adds_no_filter(tmp_path, monkeypatch):
+    calls = _encode(tmp_path, monkeypatch)
+
+    assert _audio_filter(calls[0]) is None
+
+
+@REQUIRES_REAL_FFMPEG
+@pytest.mark.skipif(not _FIXTURE_AUDIO.exists(), reason="test_speech.mp3 fixture not present")
+def test_builtin_formats_encode_with_real_ffmpeg_and_shrink_the_wav(tmp_path):
+    from diarrhizer.audio_formats import BUILTIN_FORMATS
+
+    adapter = FFmpegAdapter()
+    wav = adapter.convert_to_wav(_FIXTURE_AUDIO, tmp_path / "normalized.wav")
+    wav_size = Path(wav).stat().st_size
+
+    for fmt in BUILTIN_FORMATS.values():
+        if not fmt.writes_archive:
+            continue
+        out = adapter.encode(_FIXTURE_AUDIO, tmp_path / f"archive.{fmt.extension}", fmt.encoder_args())
+        size = out.stat().st_size
+        # FLAC is the telling one: without -sample_fmt s16 it came out bigger.
+        assert 0 < size < wav_size, f"{fmt.name}: {size} bytes vs WAV {wav_size}"
+
+
+@REQUIRES_REAL_FFMPEG
+def test_list_audio_encoders_reports_real_encoders():
+    from diarrhizer.adapters.ffmpeg import list_audio_encoders
+
+    encoders = list_audio_encoders(shutil.which("ffmpeg"))
+
+    assert "pcm_s16le" in encoders
+    assert "=" not in encoders  # the legend line above the list
+    assert "png" not in encoders  # a video encoder every build ships

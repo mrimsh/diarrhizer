@@ -185,6 +185,8 @@ All options:
 | `--to-stage` | Stop the pipeline after this stage, skipping later ones | none (runs through `export`) |
 | `--speakers` | Path to JSON speaker mapping file | none |
 | `--audio-profile` | Audio preprocessing profile: `raw`, `voice-call`, `denoise-light`, `split-stereo` | `raw` |
+| `--audio-format` | How the job keeps its audio on disk: `wav`, `flac`, `mp3-q5`, `opus-24k` or a profile from `audio_formats.json` | the default profile in `audio_formats.json`, else `wav` |
+| `--keep-wav` | Keep the working `audio/normalized.wav` after the job completes (overrides the format's setting) | as the format says |
 
 ---
 
@@ -203,6 +205,57 @@ reads, so switching profiles never changes which stages run:
   transcribe/diarize/merge - diarization still runs on the mono mix as usual.
 
 See [`docs/architecture.md`](docs/architecture.md#5-audio-profiles) for details.
+
+---
+
+### Audio Storage Formats (disk space vs. quality)
+
+Transcription and diarization always run on a lossless working file,
+`audio/normalized.wav` (PCM 16 kHz mono, ~115 MB per hour of audio).
+`--audio-format` decides what the job **keeps** on disk:
+
+| Format | Archive copy | Working WAV after the job | Size per hour |
+|--------|--------------|---------------------------|---------------|
+| `wav` (default) | none | kept (it is the only file) | ~115 MB |
+| `flac` | `audio/archive.flac`, lossless | deleted | ~50-75 MB |
+| `mp3-q5` | `audio/archive.mp3` (`-c:a libmp3lame -q:a 5`) | deleted | ~15-20 MB |
+| `opus-24k` | `audio/archive.opus` (`-c:a libopus -b:a 24k`) | deleted | ~11 MB |
+
+Sizes were measured at 16 kHz mono on a speech sample; VBR and lossless sizes vary with the recording.
+
+```powershell
+# Keep only a small MP3 of the call:
+python -m diarrhizer run "D:\records\call.m4a" --audio-format mp3-q5
+
+# Keep the MP3 and the WAV:
+python -m diarrhizer run "D:\records\call.m4a" --audio-format mp3-q5 --keep-wav true
+```
+
+* The archive is encoded from the original input, always with `-vn` (no video),
+  and gets the same `--audio-profile` filters as the WAV.
+* The WAV is deleted only once the whole job has completed (a `--to-stage` run
+  that stops early keeps it for the stages still to come), and only if the
+  archive exists. Later re-runs of transcribe/diarize decode the archive.
+* Changing the format of an existing job (`--job-dir … --audio-format opus-24k`)
+  re-encodes only the archive; ASR and diarization stay cached. Files left
+  behind by the previous format are removed. The exception: turning
+  `--keep-wav true` back on after the WAV was deleted recreates it, and
+  transcribe/diarize then run again.
+
+**Profiles.** Your own profiles and the default one live in `audio_formats.json`
+in the repo root (gitignored like `.env`; set `DIARRHIZER_AUDIO_FORMATS_FILE` to
+keep it elsewhere). The GUI edits it under Settings → «Хранение аудио», and the
+CLI uses the same default. To write one by hand, start from
+[`audio_formats.example.json`](audio_formats.example.json). Fields: `codec`
+(ffmpeg `-c:a`), `extension`, `quality` (`-q:a`) or `bitrate` (`-b:a`, e.g.
+`"32k"`), `sample_rate`, `channels`, `extra_args` (a list of extra ffmpeg output
+options), `keep_wav`, `description`. Built-in names cannot be redefined.
+`python -m diarrhizer doctor` checks that the file parses and that your FFmpeg
+build has the encoder the default profile needs.
+
+There is no AAC/M4A preset on purpose: diarization's torchaudio fallback cannot
+decode it on Windows, and the archive becomes the pipeline's input once the WAV
+is gone.
 
 ---
 
@@ -256,7 +309,7 @@ The processing pipeline consists of 5 stages:
 
 Each run will create a job-specific folder inside `--out`, containing artifacts by stage:
 
-* `audio/` — normalized WAV
+* `audio/` — normalized WAV and/or its archive copy (see [Audio Storage Formats](#audio-storage-formats-disk-space-vs-quality))
 * `asr/` — WhisperX transcript (timestamps/words)
 * `diar/` — diarization result
 * `merged/` — merged segments (text + speaker)

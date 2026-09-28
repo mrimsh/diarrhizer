@@ -77,3 +77,46 @@ def test_check_ffmpeg_reports_clear_error_for_invalid_env_var(tmp_path, monkeypa
 
     assert passed is False
     assert str(missing) in message
+
+
+# --- check_audio_formats ------------------------------------------------------
+
+
+@pytest.fixture
+def audio_formats_file(tmp_path, monkeypatch):
+    from diarrhizer.audio_formats import ENV_AUDIO_FORMATS_FILE
+
+    path = tmp_path / "audio_formats.json"
+    monkeypatch.setenv(ENV_AUDIO_FORMATS_FILE, str(path))
+    monkeypatch.setattr(doctor, "resolve_ffmpeg_path", lambda: "ffmpeg")
+    return path
+
+
+def test_check_audio_formats_passes_when_the_default_encoder_exists(audio_formats_file, monkeypatch):
+    audio_formats_file.write_text('{"default": "mp3-q5"}', encoding="utf-8")
+    monkeypatch.setattr(doctor, "list_audio_encoders", lambda path: {"pcm_s16le", "flac", "libmp3lame"})
+
+    name, passed, message = doctor.check_audio_formats()
+
+    assert passed
+    assert "mp3-q5" in message
+    assert "unavailable in this FFmpeg build: opus-24k" in message
+
+
+def test_check_audio_formats_fails_when_the_default_encoder_is_missing(audio_formats_file, monkeypatch):
+    audio_formats_file.write_text('{"default": "opus-24k"}', encoding="utf-8")
+    monkeypatch.setattr(doctor, "list_audio_encoders", lambda path: {"pcm_s16le"})
+
+    name, passed, message = doctor.check_audio_formats()
+
+    assert not passed
+    assert "libopus" in message
+
+
+def test_check_audio_formats_reports_a_broken_file(audio_formats_file):
+    audio_formats_file.write_text("{broken", encoding="utf-8")
+
+    name, passed, message = doctor.check_audio_formats()
+
+    assert not passed
+    assert str(audio_formats_file) in message

@@ -52,7 +52,7 @@ Planned high-level flow:
       |
       v
 (1) Convert (FFmpeg)  
-    -> artifacts/audio/normalized.wav
+    -> artifacts/audio/normalized.wav (+ archive.<ext> for non-wav storage formats)
       |
       v
 (2) Transcribe (WhisperX ASR + alignment)  
@@ -118,9 +118,11 @@ out/
     meta/                 # metadata (config, versions, timestamps, ASR params)
       run.json            # written by convert; records the original input_path
     audio/
-      normalized.wav      # always written, regardless of audio_profile
+      normalized.wav      # always written, regardless of audio_profile; deleted after the job
+                          # completes when the storage format has keep_wav=false
       normalized_left.wav  # split-stereo only: extra left-channel artifact (not consumed downstream)
       normalized_right.wav # split-stereo only: extra right-channel artifact (not consumed downstream)
+      archive.<ext>       # non-wav storage formats only: archive copy (+ archive_left/right.<ext>)
     asr/
       transcript.json     # includes ASR config in metadata
     diar/
@@ -225,6 +227,49 @@ unconditionally, so the pipeline shape never depends on `audio_profile`.
 | `voice-call` | Bandpass filter (300Hz-7kHz) + mild EQ boost at 3kHz | Phone call recordings, VoIP |
 | `denoise-light` | afftdn noise reduction | Noisy recordings with background noise |
 | `split-stereo` | Writes the standard mono downmix to `normalized.wav` (used by the rest of the pipeline) **and** additionally splits L/R channels into `normalized_left.wav`/`normalized_right.wav` | Keeping raw per-channel audio available for manual inspection; the channels themselves are not currently fed into transcribe/diarize/merge - diarization still runs as usual on the mono mix |
+
+### Audio storage formats
+
+Profiles decide *what the pipeline processes*; storage formats
+(`src/diarrhizer/audio_formats.py`, `--audio-format`) decide *what the job keeps*.
+Processing always uses the lossless working WAV. A format other than `wav` makes
+convert also write an archive copy, `audio/archive.<ext>` (plus
+`archive_left/right.<ext>` for `split-stereo`). Each copy is encoded from the
+original input with the format's codec, `-q:a` or `-b:a`, sample rate, channel
+count and extra args, with `-vn`, and gets the same profile filters as the WAV.
+Formats with `keep_wav: false` drop the working WAV(s) once the job completes.
+
+Lifecycle and cache rules:
+
+* **Deletion happens in a finalize hook.** The runner calls each stage's
+  optional `finalize(job)` once a run reaches the last stage.
+  `ConvertStage.finalize` deletes a WAV only if its archive exists. A run cut
+  short with `--to-stage` keeps the WAV for the stages still to come.
+* **Downstream decoding.** Transcribe and diarize decode `find_job_audio()`: the
+  WAV while it exists, otherwise the archive. Their cache staleness stays keyed
+  on the WAV path, and a missing input is never "newer", so dropping the WAV
+  never invalidates ASR or diarization.
+* **Convert's cache** follows what `meta/run.json` recorded in
+  `config.audio_format`: the archive is an expected output, and the WAV only
+  while the format keeps it. A different encoding or `keep_wav` makes convert
+  re-run. Jobs from before formats existed count as `wav`.
+* **Changing only the storage** re-encodes the archive without touching the WAV,
+  as long as the source file and `audio_profile` are unchanged. A WAV that
+  exists is reused as is (same mtime). A WAV that was already dropped stays
+  dropped. Either way ASR and diarization stay cached. A newer source, a
+  profile change, `--force`, or restoring a dropped WAV with `keep_wav: true`
+  rewrites the WAV, and the later stages re-run.
+* **Cleanup of old files.** Once the new files are written, convert deletes
+  `normalized*.wav` / `archive*.*` files that the new outputs no longer
+  include, e.g. `archive.mp3` after switching to Opus.
+
+User profiles and the default name are stored in `audio_formats.json` at the
+repo root (`DIARRHIZER_AUDIO_FORMATS_FILE` overrides the path). CLI and GUI share
+this file. Built-in names (`wav`, `flac`, `mp3-q5`, `opus-24k`) are read-only.
+There is no AAC preset because diarization's torchaudio fallback (libsndfile)
+cannot decode M4A on Windows. FLAC is pinned to `-sample_fmt s16`: from a
+float-decoded source (mp3/aac), ffmpeg otherwise writes 24-bit FLAC, which
+ended up larger than the WAV.
 
 ---
 
@@ -335,6 +380,8 @@ python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 
 | `--asr-vad-filter` | string | `"true"` | Enable VAD filtering (true/false) |
 | `--asr-vad-min-silence-ms` | int | `1000` | VAD minimum silence (ms) |
 | `--audio-profile` | choice | `"raw"` | Audio preprocessing |
+| `--audio-format` | string | default profile in `audio_formats.json`, else `"wav"` | Storage format of the job's audio (see [Audio storage formats](#audio-storage-formats)) |
+| `--keep-wav` | string | — (format's own setting) | Keep the working WAV after the job completes (true/false) |
 | `--force-stage` | choice | — | Force recompute specific stage |
 | `--from-stage` | choice | — | Start at this stage, skipping earlier ones entirely (their outputs must already be on disk) |
 | `--to-stage` | choice | — | Stop after this stage, skipping later ones entirely |

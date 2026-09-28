@@ -6,6 +6,7 @@ import logging
 import sys
 from pathlib import Path
 
+from diarrhizer.audio_formats import BUILTIN_FORMATS, store_path
 from diarrhizer.diagnostics.doctor import run_doctor_checks
 from diarrhizer.env_file import load_project_env
 
@@ -221,6 +222,26 @@ def main() -> int:
         choices=["raw", "voice-call", "denoise-light", "split-stereo"],
         help="Audio preprocessing profile (default: raw)"
     )
+    # Not a PipelineConfig literal like the flags above: the default is
+    # whatever profile the user marked as default in audio_formats.json
+    # (resolved in run_pipeline from None), so it is shared with the GUI.
+    run_parser.add_argument(
+        "--audio-format",
+        type=str,
+        default=None,
+        help="How the job keeps its audio on disk: a built-in format "
+             f"({', '.join(BUILTIN_FORMATS)}) or a profile from {store_path().name}. "
+             "Non-wav formats write audio/archive.<ext> next to the working WAV "
+             "(default: the default profile in that file, else wav)"
+    )
+    run_parser.add_argument(
+        "--keep-wav",
+        type=str,
+        default=None,
+        choices=["true", "false", "1", "0", "yes", "no"],
+        help="Keep the working audio/normalized.wav after the job completes, overriding "
+             "the audio format's own setting (ignored for the wav format, which only has that file)"
+    )
 
     args = parser.parse_args()
 
@@ -234,11 +255,11 @@ def main() -> int:
         #   recorded it in meta/run.json); --from-stage/--to-stage select a stage range to run,
         #   skipping stages outside it entirely - e.g. --from-stage export re-exports without
         #   recomputing ASR/diarization.
-        # @inputs: args.input, args.out, args.job_dir, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.from_stage, args.to_stage, args.speakers, args.min_turn_duration, ASR params, audio_profile
+        # @inputs: args.input, args.out, args.job_dir, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.from_stage, args.to_stage, args.speakers, args.min_turn_duration, ASR params, audio_profile, audio_format, keep_wav
         # @outputs: Artifacts in out/ directory
         # @sideEffects: Creates job directory, writes artifacts to disk
         # @errors: Exits with code 1 on failure
-        # @see: PIPELINE:RUNNER, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, STAGE:MERGE, STAGE:EXPORT, CONFIG:PIPELINE
+        # @see: PIPELINE:RUNNER, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, STAGE:MERGE, STAGE:EXPORT, CONFIG:PIPELINE, CONFIG:AUDIO_FORMATS
 
         # Imported lazily (not at module level) so that `doctor` never pulls in
         # torch/whisperx as a side effect - it needs to stay import-safe to diagnose
@@ -323,6 +344,8 @@ def main() -> int:
                 asr_vad_filter=_parse_bool(args.asr_vad_filter),
                 asr_vad_min_silence_ms=args.asr_vad_min_silence_ms,
                 audio_profile=args.audio_profile,
+                audio_format=args.audio_format,
+                keep_wav=None if args.keep_wav is None else _parse_bool(args.keep_wav),
                 min_turn_duration=args.min_turn_duration,
             )
             print(f"\nPipeline completed successfully!")

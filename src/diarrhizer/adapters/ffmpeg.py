@@ -5,7 +5,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Sequence
 
 # Environment variable used to override the FFmpeg executable path.
 # See resolve_ffmpeg_path() for the full resolution order.
@@ -53,18 +53,47 @@ def resolve_ffmpeg_path(explicit: Optional[str | Path] = None) -> Optional[str]:
     return shutil.which("ffmpeg")
 
 
+def list_audio_encoders(ffmpeg_path: str) -> set[str]:
+    """Names of the audio encoders this ffmpeg build ships (`ffmpeg -encoders`).
+
+    Builds differ (e.g. an "essentials" build may lack an encoder a profile
+    asks for), and ffmpeg only reports that once a job actually runs.
+
+    Raises:
+        RuntimeError: If ffmpeg cannot be run.
+    """
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"Could not list ffmpeg encoders: {e}") from e
+    # Lines look like " A....D libmp3lame    libmp3lame MP3 ..."; the capability
+    # flags start with "A" for audio encoders. The legend above the list
+    # (" A..... = Audio") has the same shape, hence the "=" check.
+    encoders = set()
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and len(parts[0]) == 6 and parts[0].startswith("A") and parts[1] != "=":
+            encoders.add(parts[1])
+    return encoders
+
+
 # [SEMANTIC-BEGIN] ADAPTER:FFMPEG
 # @purpose: Wrap FFmpeg calls for audio normalization and format conversion
 # @description: Provides a clean interface to FFmpeg for converting media files to WAV with optional profiles.
 #   Locates the ffmpeg executable via resolve_ffmpeg_path(): explicit ffmpeg_path arg > DIARRHIZER_FFMPEG_PATH
 #   env var > PATH lookup. split-stereo always writes the standard mono downmix to output_path in addition
 #   to the per-channel _left/_right files, so every profile leaves the same primary file behind (see
-#   _convert_split_stereo).
-# @inputs: input_path (str or Path), output_path (str or Path), audio_profile, ffmpeg_path (optional override)
+#   _convert_split_stereo). encode() writes an extra file with caller-supplied encoder args (the archive
+#   copy, see CONFIG:AUDIO_FORMATS), reading the original input and applying the same profile filter
+#   chain (_profile_filter) as the working WAV.
+# @inputs: input_path (str or Path), output_path (str or Path), audio_profile, encoder_args, ffmpeg_path (optional override)
 # @outputs: Path to converted audio file, or [output_path, left_path, right_path] for split-stereo
 # @sideEffects: Executes FFmpeg subprocess, creates output file(s) on disk, reads DIARRHIZER_FFMPEG_PATH env var
-# @errors: RuntimeError if FFmpeg is not found or conversion fails
-# @see: STAGE:CONVERT, DIAGNOSTICS:DOCTOR
+# @errors: RuntimeError if FFmpeg is not found or conversion/encoding fails
+# @see: STAGE:CONVERT, CONFIG:AUDIO_FORMATS, DIAGNOSTICS:DOCTOR
 class FFmpegAdapter:
     """Adapter for FFmpeg audio conversion operations."""
 
@@ -175,20 +204,9 @@ class FFmpegAdapter:
         ]
 
         # Add profile-specific audio filters
-        afilters = []
-        if audio_profile == self.PROFILE_VOICE_CALL:
-            afilters.append("lowpass=7000,highpass=300,equalizer=f=3000:width_type=q:w=1:g=3")
-        elif audio_profile == self.PROFILE_DENOISE_LIGHT:
-            # afftdn's noise_type/nt option is an enum (white/vinyl/shellac/
-            # custom) - "auto" was never a valid value, so this profile
-            # always failed the moment it actually ran (confirmed against
-            # `ffmpeg -h filter=afftdn`). Dropping nt leaves the filter's own
-            # default, "white", which is what a generic light-denoise preset
-            # should use anyway.
-            afilters.append("afftdn=nr=12")
-
-        if afilters:
-            cmd.extend(["-af", ",".join(afilters)])
+        audio_filter = self._profile_filter(audio_profile)
+        if audio_filter:
+            cmd.extend(["-af", audio_filter])
 
         cmd.append(str(output_path))
 
@@ -205,6 +223,74 @@ class FFmpegAdapter:
             raise RuntimeError(
                 f"FFmpeg conversion failed: {e.stderr}"
             ) from e
+
+    def _profile_filter(self, audio_profile: str) -> Optional[str]:
+        """The -af chain an audio profile applies, or None for no filtering.
+
+        Shared by the working WAV and the archive copy (see encode()), so both
+        hold the same processed signal.
+        """
+        if audio_profile == self.PROFILE_VOICE_CALL:
+            return "lowpass=7000,highpass=300,equalizer=f=3000:width_type=q:w=1:g=3"
+        if audio_profile == self.PROFILE_DENOISE_LIGHT:
+            # afftdn's noise_type/nt option is an enum (white/vinyl/shellac/
+            # custom) - "auto" was never a valid value, so this profile
+            # always failed the moment it actually ran (confirmed against
+            # `ffmpeg -h filter=afftdn`). Dropping nt leaves the filter's own
+            # default, "white", which is what a generic light-denoise preset
+            # should use anyway.
+            return "afftdn=nr=12"
+        return None
+
+    def encode(
+        self,
+        input_path: str | Path,
+        output_path: str | Path,
+        encoder_args: Sequence[str],
+        audio_profile: str = PROFILE_RAW,
+        channel: Optional[int] = None,
+    ) -> Path:
+        """Encode input media with caller-chosen output options (the archive copy).
+
+        Reads the original input rather than the working WAV, so an archive can
+        use a higher sample rate or more channels than the 16 kHz mono the
+        pipeline processes, while still getting the same audio_profile filters.
+
+        Args:
+            input_path: Path to input media file
+            output_path: Output file; its extension selects the container
+            encoder_args: Output options, e.g. AudioFormat.encoder_args()
+                (["-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-q:a", "5"])
+            audio_profile: Audio profile whose filter chain to apply
+            channel: Keep only this input channel (0 = left, 1 = right) instead
+                of the profile's filters - used for split-stereo's per-channel extras
+
+        Returns:
+            output_path
+
+        Raises:
+            RuntimeError: If FFmpeg encoding fails
+        """
+        input_path = Path(input_path)
+        output_path = Path(output_path)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input file not found: {input_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        cmd = [self._ffmpeg_path, "-y", "-i", str(input_path)]
+        audio_filter = (
+            f"pan=mono|c0=c{channel}" if channel is not None else self._profile_filter(audio_profile)
+        )
+        if audio_filter:
+            cmd.extend(["-af", audio_filter])
+        cmd.extend(encoder_args)
+        cmd.append(str(output_path))
+
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=3600)
+            return output_path
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"FFmpeg encoding to {output_path.name} failed: {e.stderr}") from e
 
     def _convert_split_stereo(self, input_path: Path, output_path: Path) -> List[Path]:
         """Split stereo audio into separate left/right channel files, and also

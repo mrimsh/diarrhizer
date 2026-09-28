@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from diarrhizer.audio_formats import find_job_audio
+
 # (stage name, artifact path relative to job_dir) - mirrors the layout
 # documented in docs/architecture.md, not the stage classes themselves.
 STAGE_ARTIFACTS = [
@@ -100,6 +102,9 @@ def scan_jobs(out_dir: Path) -> list:
         stage_done = {
             name: (job_dir / rel_path).exists() for name, rel_path in STAGE_ARTIFACTS
         }
+        # An audio format with keep_wav=false drops normalized.wav once the job
+        # completes and keeps audio/archive.<ext> instead - still converted.
+        stage_done["convert"] = find_job_audio(job_dir) is not None
 
         result_path = job_dir / "export" / "result.md"
 
