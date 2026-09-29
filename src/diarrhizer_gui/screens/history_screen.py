@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -23,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from diarrhizer_gui import settings_keys
-from diarrhizer_gui.job_scan import STAGE_ARTIFACTS, JobSummary, scan_jobs
+from diarrhizer_gui.job_scan import STAGE_ARTIFACTS, JobSummary, delete_job, scan_jobs
 
 STAGE_LABELS = [name[0].upper() for name, _ in STAGE_ARTIFACTS]  # C T D M E
 
@@ -54,6 +55,7 @@ class StageDots(QWidget):
 
 class RowActions(QWidget):
     open_result_requested = Signal(Path)
+    delete_requested = Signal(object)
 
     def __init__(self, job: JobSummary) -> None:
         super().__init__()
@@ -71,6 +73,11 @@ class RowActions(QWidget):
             job_dir = job.job_dir
             open_result.clicked.connect(lambda: self.open_result_requested.emit(job_dir))
         layout.addWidget(open_result)
+
+        delete = QPushButton("Удалить")
+        delete.setToolTip("Удалить папку задания вместе со всеми файлами")
+        delete.clicked.connect(lambda: self.delete_requested.emit(job))
+        layout.addWidget(delete)
 
         layout.addStretch(1)
 
@@ -160,4 +167,22 @@ class HistoryScreen(QWidget):
             self._table.setCellWidget(row, 5, StageDots(job.stage_done))
             row_actions = RowActions(job)
             row_actions.open_result_requested.connect(self.view_result_requested)
+            row_actions.delete_requested.connect(self._delete)
             self._table.setCellWidget(row, 6, row_actions)
+
+    def _delete(self, job: JobSummary) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Удалить задание",
+            f"Удалить задание «{job.input_name}» ({job.date_label})?\n\n"
+            f"Папка {job.job_dir} будет удалена безвозвратно.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            delete_job(Path(self._path_field.text()), job.job_dir)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Не удалось удалить", str(exc))
+        self._refresh()

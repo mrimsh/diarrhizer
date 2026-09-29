@@ -7,6 +7,7 @@ and keeps working even on a machine without the ML stack installed.
 """
 
 import json
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -66,6 +67,17 @@ def _read_meta(job_dir: Path) -> dict:
         return json.loads(meta_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def delete_job(out_dir: Path, job_dir: Path) -> None:
+    """Permanently remove a job folder.
+
+    Refuses anything that is not a direct child directory of out_dir, so a
+    stale or tampered row can never delete outside the results root.
+    """
+    if job_dir.parent.resolve() != out_dir.resolve() or not job_dir.is_dir():
+        raise ValueError(f"Not a job folder under {out_dir}: {job_dir}")
+    shutil.rmtree(job_dir)
 
 
 def scan_jobs(out_dir: Path) -> list:
