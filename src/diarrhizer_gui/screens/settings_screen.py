@@ -329,7 +329,13 @@ class SettingsScreen(QWidget):
 
     def _reload_asr_models(self) -> None:
         """Presets + models added on the Models screen. Caller blocks signals."""
-        choices = custom_models.asr_model_choices(self._settings, ASR_MODELS)
+        choices = custom_models.asr_model_choices(
+            self._settings,
+            ASR_MODELS,
+            custom_models.detect_cached_asr_models(
+                model_cache.list_cached_models(), ASR_MODELS
+            ),
+        )
         if [self._model_combo.itemText(i) for i in range(self._model_combo.count())] == choices:
             return
         current = self._model_combo.currentText()

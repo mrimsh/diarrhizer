@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from diarrhizer.export.plain_transcript import format_plain_transcript
 from diarrhizer_gui import settings_keys
 
 
@@ -90,6 +91,11 @@ class ResultScreen(QWidget):
 
         self._open_folder_button = QPushButton("Открыть папку")
         self._open_folder_button.clicked.connect(self._open_folder)
+        self._open_plain_button = QPushButton("Читаемый текст")
+        self._open_plain_button.setToolTip(
+            "Распознанный текст абзацами, без разбивки по спикерам (asr/transcript.txt)"
+        )
+        self._open_plain_button.clicked.connect(self._open_plain_text)
         self._open_md_button = QPushButton("Открыть result.md")
         self._open_md_button.clicked.connect(lambda: self._open_file(self._result_md_path))
         self._open_txt_button = QPushButton("Открыть result.txt")
@@ -101,6 +107,7 @@ class ResultScreen(QWidget):
         header.addWidget(self._title_label)
         header.addStretch(1)
         header.addWidget(self._open_folder_button)
+        header.addWidget(self._open_plain_button)
         header.addWidget(self._open_md_button)
         header.addWidget(self._open_txt_button)
         header.addWidget(self._open_json_button)
@@ -168,6 +175,7 @@ class ResultScreen(QWidget):
         self._result_md_path = job_dir / "export" / "result.md"
         self._result_txt_path = job_dir / "export" / "result.txt"
         self._result_json_path = job_dir / "export" / "result.json"
+        self._open_plain_button.setEnabled((job_dir / "asr" / "transcript.json").exists())
         self._open_md_button.setEnabled(self._result_md_path.exists())
         self._open_txt_button.setEnabled(self._result_txt_path.exists())
         self._open_json_button.setEnabled(self._result_json_path.exists())
@@ -211,6 +219,22 @@ class ResultScreen(QWidget):
     def _open_folder(self) -> None:
         if self._job_dir is not None:
             os.startfile(str(self._job_dir))
+
+    def _open_plain_text(self) -> None:
+        """Open asr/transcript.txt, building it from transcript.json first when
+        the job predates that file (or it was deleted)."""
+        if self._job_dir is None:
+            return
+        txt_path = self._job_dir / "asr" / "transcript.txt"
+        if not txt_path.exists():
+            try:
+                data = json.loads((self._job_dir / "asr" / "transcript.json").read_text(encoding="utf-8"))
+                txt_path.write_text(
+                    format_plain_transcript(data.get("segments", [])), encoding="utf-8"
+                )
+            except (OSError, json.JSONDecodeError):
+                return
+        os.startfile(str(txt_path))
 
     def _open_file(self, path: Optional[Path]) -> None:
         if path is not None and path.exists():

@@ -125,6 +125,7 @@ out/
       archive.<ext>       # non-wav storage formats only: archive copy (+ archive_left/right.<ext>)
     asr/
       transcript.json     # includes ASR config in metadata
+      transcript.txt      # readable paragraphs, no speakers/timestamps (built from the same segments)
     diar/
       diarization.json
     merged/

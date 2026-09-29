@@ -64,6 +64,9 @@ class CachedModelInfo:
     repo_id: str
     size_on_disk: int
     last_used: datetime
+    # A CTranslate2 checkpoint (has model.bin) - the only Whisper format WhisperX
+    # can load; transformers-format repos of the same model cannot be used as ASR.
+    is_ctranslate2: bool = False
 
 
 def list_cached_models(cache_dir: CacheDirArg = None) -> List[CachedModelInfo]:
@@ -89,6 +92,9 @@ def list_cached_models(cache_dir: CacheDirArg = None) -> List[CachedModelInfo]:
                 repo_id=repo.repo_id,
                 size_on_disk=repo.size_on_disk,
                 last_used=datetime.fromtimestamp(repo.last_accessed),
+                is_ctranslate2=any(
+                    f.file_name == "model.bin" for rev in repo.revisions for f in rev.files
+                ),
             )
             for repo in cache_info.repos
             if repo.repo_type == "model"

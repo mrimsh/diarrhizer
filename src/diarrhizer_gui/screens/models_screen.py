@@ -176,21 +176,39 @@ class ModelsScreen(QWidget):
         # Systran repo itself); user-added models are addressed by their repo
         # id, so for those the label and the id passed to warm_up are the same.
         entries = [(alias, repo_id, False) for alias, repo_id in ASR_MODEL_REPOS.items()]
+        # Cached Whisper checkpoints in transformers format: shown so it is clear
+        # why they are not selectable, but WhisperX needs a CTranslate2 model.bin.
+        unusable = {
+            m.repo_id
+            for m in cached
+            if custom_models.is_whisper_repo(m.repo_id) and not m.is_ctranslate2
+        }
+        remembered = custom_models.load_custom_models(self._settings)
         entries += [
-            (repo_id, repo_id, True)
-            for repo_id in custom_models.load_custom_models(self._settings)
-            if repo_id not in ASR_MODEL_REPOS
+            (repo_id, repo_id, True) for repo_id in remembered if repo_id not in ASR_MODEL_REPOS
         ]
+        # Already in the HF cache but never warmed up here: listed too, but not
+        # removable from the list (they would just be detected again) - delete
+        # them from the cache table below instead.
+        entries += [
+            (repo_id, repo_id, False)
+            for repo_id in custom_models.detect_cached_asr_models(cached, ASR_MODEL_REPOS)
+            if repo_id not in remembered
+        ]
+        entries += [(repo_id, repo_id, False) for repo_id in sorted(unusable - set(remembered))]
 
         self._asr_table.setRowCount(0)
         for row, (label, repo_id, removable) in enumerate(entries):
             self._asr_table.insertRow(row)
             self._asr_table.setItem(row, 0, QTableWidgetItem(label))
             info = cached_by_id.get(repo_id)
-            self._asr_table.setItem(row, 1, QTableWidgetItem("В кэше" if info else "Не скачано"))
+            status = "В кэше" if info else "Не скачано"
+            if repo_id in unusable:
+                status = "Не формат CTranslate2 — WhisperX не загрузит"
+            self._asr_table.setItem(row, 1, QTableWidgetItem(status))
             self._asr_table.setItem(row, 2, QTableWidgetItem(format_size(info.size_on_disk) if info else "—"))
             warm_button = QPushButton("Прогреть")
-            warm_button.setEnabled(not self._busy)
+            warm_button.setEnabled(not self._busy and repo_id not in unusable)
             warm_button.clicked.connect(lambda checked=False, m=label: self._warm_asr(m))
             self._asr_table.setCellWidget(row, 3, warm_button)
             if removable:

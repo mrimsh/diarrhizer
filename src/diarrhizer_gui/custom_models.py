@@ -16,7 +16,7 @@ a transformers-format checkpoint with no CTranslate2 model.bin - out of the
 list rather than letting them fail later, at job time.
 """
 
-from typing import List
+from typing import Iterable, List
 
 from PySide6.QtCore import QSettings
 
@@ -55,10 +55,35 @@ def remove_custom_model(settings: QSettings, repo_id: str) -> None:
         _store(settings, remaining)
 
 
-def asr_model_choices(settings: QSettings, presets: List[str]) -> List[str]:
-    """Presets followed by the remembered custom repo ids, without duplicates."""
+def is_whisper_repo(repo_id: str) -> bool:
+    return "whisper" in repo_id.lower()
+
+
+def detect_cached_asr_models(cached: Iterable, presets: Iterable[str] = ()) -> List[str]:
+    """Repo ids in the HF cache that WhisperX can use as an ASR model.
+
+    Catches models downloaded outside the app (or before it remembered custom
+    models): a CTranslate2 checkpoint (model.bin) whose name says whisper.
+    Alignment/diarization repos and transformers-format checkpoints are skipped,
+    as are the Systran repos the `presets` aliases already stand for.
+    """
+    preset_repos = {f"Systran/faster-whisper-{alias}" for alias in presets}
+    return [
+        info.repo_id
+        for info in cached
+        if info.is_ctranslate2
+        and is_whisper_repo(info.repo_id)
+        and info.repo_id not in preset_repos
+    ]
+
+
+def asr_model_choices(
+    settings: QSettings, presets: List[str], extra: Iterable[str] = ()
+) -> List[str]:
+    """Presets, remembered custom repo ids, then `extra` (e.g. detected cache
+    entries), without duplicates."""
     choices = list(presets)
-    for repo_id in load_custom_models(settings):
+    for repo_id in [*load_custom_models(settings), *extra]:
         if repo_id not in choices:
             choices.append(repo_id)
     return choices

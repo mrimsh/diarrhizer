@@ -7,8 +7,9 @@ from typing import TYPE_CHECKING, Optional
 
 from diarrhizer.adapters.whisperx import WhisperXAdapter
 from diarrhizer.audio_formats import find_job_audio
+from diarrhizer.export.plain_transcript import format_plain_transcript
 from diarrhizer.pipeline.cache import config_mismatch, is_stale, prompt_digest
-from diarrhizer.utils import read_json, write_json_atomic
+from diarrhizer.utils import read_json, write_json_atomic, write_text_atomic
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -22,12 +23,12 @@ logger = logging.getLogger(__name__)
 #   Once a keep_wav=false audio format dropped the WAV, decodes the archive copy instead
 #   (find_job_audio); cache staleness stays keyed on the WAV, so dropping it never invalidates the transcript.
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
-# @outputs: artifacts/asr/transcript.json
+# @outputs: artifacts/asr/transcript.json, artifacts/asr/transcript.txt (readable paragraphs, no speakers)
 # @sideEffects: Loads WhisperX model, writes transcript JSON to disk, unloads the
 #   model and clears the CUDA cache when the stage finishes,
 #   logs progress via logging (INFO, extra={"stage": "transcribe"})
 # @errors: RuntimeError, FileNotFoundError
-# @see: ADAPTER:WHISPERX_ASR, STAGE:CONVERT, ARTIFACTS:JOB_AUDIO, PIPELINE:RUNNER
+# @see: ADAPTER:WHISPERX_ASR, EXPORT:PLAIN_TRANSCRIPT, STAGE:CONVERT, ARTIFACTS:JOB_AUDIO, PIPELINE:RUNNER
 class TranscribeStage:
     """Stage for transcribing audio using WhisperX."""
 
@@ -37,6 +38,7 @@ class TranscribeStage:
     # Output paths relative to job directory
     ASR_DIR = "asr"
     TRANSCRIPT_JSON = "asr/transcript.json"
+    TRANSCRIPT_TXT = "asr/transcript.txt"
 
     # Input artifact path (from convert stage)
     INPUT_WAV = "audio/normalized.wav"
@@ -226,6 +228,10 @@ class TranscribeStage:
 
         # Write transcript to JSON
         write_json_atomic(transcript_output, transcript_data)
+        write_text_atomic(
+            job_dir / self.TRANSCRIPT_TXT,
+            format_plain_transcript(transcript_data["segments"]),
+        )
 
         logger.info(f"[{self.NAME}] Completed in {duration:.2f}s", extra={"stage": self.NAME})
         logger.info(

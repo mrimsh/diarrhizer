@@ -98,3 +98,35 @@ def test_asr_model_choices_leaves_presets_untouched(settings):
     custom_models.add_custom_model(settings, "a/one")
     custom_models.asr_model_choices(settings, PRESETS)
     assert PRESETS == ["tiny", "base", "large-v3"]
+
+
+class _Info:
+    def __init__(self, repo_id, is_ctranslate2):
+        self.repo_id = repo_id
+        self.is_ctranslate2 = is_ctranslate2
+
+
+def test_detect_cached_asr_models_keeps_only_ct2_whisper_repos():
+    cached = [
+        _Info("bzikst/faster-whisper-podlodka-turbo", True),
+        _Info("openai/whisper-large-v3", False),  # transformers format
+        _Info("pyannote/segmentation-3.0", False),
+        _Info("jonatasgrosman/wav2vec2-large-xlsr-53-russian", True),  # aligner
+    ]
+    assert custom_models.detect_cached_asr_models(cached) == [
+        "bzikst/faster-whisper-podlodka-turbo"
+    ]
+
+
+def test_detect_cached_asr_models_skips_repos_behind_presets():
+    cached = [_Info("Systran/faster-whisper-small", True), _Info("a/faster-whisper-x", True)]
+    assert custom_models.detect_cached_asr_models(cached, ["small"]) == ["a/faster-whisper-x"]
+
+
+def test_asr_model_choices_appends_extra_without_duplicates(settings):
+    custom_models.add_custom_model(settings, "a/one")
+    assert custom_models.asr_model_choices(settings, PRESETS, ["a/one", "b/two"]) == [
+        *PRESETS,
+        "a/one",
+        "b/two",
+    ]

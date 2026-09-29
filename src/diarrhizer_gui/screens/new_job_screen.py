@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from diarrhizer.audio_formats import AudioFormat, AudioFormatStore, store_path
 from diarrhizer.diagnostics import doctor
+from diarrhizer.diagnostics import models as model_cache
 from diarrhizer_gui import custom_models, settings_keys
 
 MEDIA_FILTER = "Медиафайлы (*.mp3 *.wav *.m4a *.mp4 *.mkv *.webm);;Все файлы (*.*)"
@@ -337,7 +338,13 @@ class NewJobScreen(QWidget):
         screen. Called from showEvent(), so a model warmed up mid-session shows
         up here without restarting the app.
         """
-        choices = custom_models.asr_model_choices(self._settings, ASR_MODELS)
+        choices = custom_models.asr_model_choices(
+            self._settings,
+            ASR_MODELS,
+            custom_models.detect_cached_asr_models(
+                model_cache.list_cached_models(), ASR_MODELS
+            ),
+        )
         if [self._model_combo.itemText(i) for i in range(self._model_combo.count())] == choices:
             return
         # clear() wipes the edit line too, so restore whatever was typed there.
