@@ -6,12 +6,14 @@ This document describes the JSON schema for exported results from the Diarrhizer
 
 ## Overview
 
-The export stage produces three output files:
-- `export/result.md` — Human-readable Markdown transcript (one line per segment)
-- `export/result.txt` — The same transcript without markup or metadata header
-- `export/result.json` — Structured machine-readable JSON
+The export stage produces four output files:
+- `export/result.md` — Human-readable Markdown transcript: a speaking-time summary, then one line per speaker turn
+- `export/result.txt` — The same turns without markup or metadata header
+- `export/result.srt` — Subtitles, one cue per segment (long segments split), `Name: text`
+- `export/result.json` — Structured machine-readable JSON: every segment and word with timings
 
-Both exports contain the same underlying data: merged segments with speaker labels and timestamps.
+All of them are rendered from the same merged segments. `result.json` keeps them as they are;
+`result.md`/`result.txt` join consecutive segments of the same speaker into *turns* (see below).
 
 ---
 
@@ -156,17 +158,46 @@ The Markdown output follows this format:
 **Language:** en
 **Device:** cuda
 
-[00:00:00 → 00:00:05] **Speaker_00:** Hello, how are you today?
+**Speakers:**
 
-[00:00:05 → 00:00:10] **Speaker_01:** I'm doing great, thanks for asking.
+- Speaker_01 — 00:00:42 (61%)
+- Speaker_00 — 00:00:27 (39%)
+
+[00:00:00 → 00:00:09] **Speaker_00:** Hello, how are you today? Did you get my e-mail?
+
+[00:00:09 → 00:00:15] **Speaker_01:** I'm doing great, thanks for asking.
 ```
 
 ### Format Rules
 
 - Timecodes are in `[HH:MM:SS]` format
 - Speaker labels are bolded
-- One line per segment — word-level timings are **not** repeated here; they are
-  available in full (with per-word `speaker_id`) in `result.json`
+- The **Speakers** summary lists each speaker's total speaking time and share, largest first
+- One line per **speaker turn**: consecutive segments whose speakers resolve to the same name are
+  joined. A new turn starts when the speaker changes, after a pause of 3 s or more, or — past
+  ~600 characters — at the next sentence end (so a monologue or a recognition-only job still
+  reads as paragraphs). Mapping two ids to the same name merges their turns
+- Word-level timings are **not** repeated here; they are available in full (with per-word
+  `speaker_id`) in `result.json`
+
+---
+
+## Subtitles (`result.srt`)
+
+```
+1
+00:00:00,000 --> 00:00:04,200
+Ivan: Hello, how are you today?
+
+2
+00:00:04,500 --> 00:00:09,000
+Ivan: Did you get my e-mail?
+```
+
+- One cue per merged segment, prefixed with the speaker's display name
+- A segment longer than 7 s or 84 characters is split into several cues at word boundaries
+  (preferring sentence ends), using the word timings
+- Segments with empty text are skipped
 
 ---
 

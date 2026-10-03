@@ -8,7 +8,7 @@ PARAGRAPH_GAP_SECONDS = 2.0
 # Past this many characters a paragraph is closed at the next sentence end even
 # without a pause, so continuous speech does not become one wall of text.
 PARAGRAPH_SOFT_LIMIT = 600
-_SENTENCE_END = (".", "!", "?", "\u2026")
+SENTENCE_END = (".", "!", "?", "\u2026")
 
 
 # [SEMANTIC-BEGIN] EXPORT:PLAIN_TRANSCRIPT
@@ -39,7 +39,7 @@ def format_plain_transcript(segments: list[dict[str, Any]]) -> str:
         )
         current = paragraphs[-1] if paragraphs else None
         long_enough = current is not None and length >= PARAGRAPH_SOFT_LIMIT
-        at_sentence_end = current is not None and current[-1].endswith(_SENTENCE_END)
+        at_sentence_end = current is not None and current[-1].endswith(SENTENCE_END)
         if current is None or gap >= PARAGRAPH_GAP_SECONDS or (long_enough and at_sentence_end):
             paragraphs.append([text])
             length = len(text)
