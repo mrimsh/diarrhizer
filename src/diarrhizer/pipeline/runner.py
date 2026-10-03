@@ -27,7 +27,12 @@ logger = logging.getLogger(__name__)
 #   is_stale-based caching, not an unconditional recompute. Once a run reaches the last stage, every
 #   stage's optional finalize(job) hook runs (regardless of from_stage - it acts on the job's recorded
 #   state, e.g. convert dropping a working WAV that the audio format says not to keep); a failure
-#   there is logged, not raised, since the job itself already completed.
+#   there is logged, not raised, since the job itself already completed. Inputs are validated before
+#   the job folder is created, and so is every in-range stage's optional preflight(job) hook (a stage
+#   that will have to run but cannot - diarization without an HF token - fails in seconds, not after
+#   the transcription). new_job_dir() picks a not-yet-existing folder for callers that start several
+#   jobs in a row (GUI queue, CLI batch) and pass it as job_dir. The stage names a run was given are
+#   carried as PipelineConfig.stages (convert records them for resuming).
 # @inputs: input_path, config, out_dir, stages, job_dir, force, force_stage, from_stage, to_stage, audio_format
 # @outputs: Artifacts on disk per stage definitions
 # @sideEffects: Creates job directory, writes artifacts to disk, deletes artifacts when force is used,
@@ -101,6 +106,9 @@ class PipelineConfig:
         min_turn_duration: Shortest speaker turn, in seconds, the merge stage
             will split out on its own; shorter word runs between two runs of
             the same other speaker are folded back in as diarization jitter
+        stages: Names of the stages this run was given, in order (set by
+            run_pipeline; recorded in meta/run.json so a job can be resumed
+            with the same stage list, e.g. without diarization)
     """
 
     job_id: str
@@ -126,6 +134,7 @@ class PipelineConfig:
     audio_profile: str = "raw"
     audio_format: AudioFormat = WAV_FORMAT
     min_turn_duration: float = DEFAULT_MIN_TURN_DURATION
+    stages: tuple[str, ...] = ()
 # [SEMANTIC-END] CONFIG:PIPELINE
 
 
@@ -163,6 +172,23 @@ def generate_job_id(input_path: str | Path) -> str:
     # Use timestamp format: YYYYMMDD_HHMMSS
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{filename}_{timestamp}"
+
+
+def new_job_dir(out_dir: str | Path, input_path: str | Path) -> Path:
+    """A job directory under out_dir for input_path that does not exist yet.
+
+    generate_job_id() has one-second resolution, so two files with the same
+    name queued back to back (a batch, or a job that failed instantly) could
+    otherwise land in - and mix artifacts into - the same folder. Callers that
+    start several jobs pass the result to run_pipeline(job_dir=...).
+    """
+    base = Path(out_dir) / generate_job_id(input_path)
+    candidate = base
+    suffix = 2
+    while candidate.exists():
+        candidate = base.with_name(f"{base.name}_{suffix}")
+        suffix += 1
+    return candidate
 
 
 # [SEMANTIC-END] PIPELINE:RUNNER
@@ -294,13 +320,11 @@ def run_pipeline(
 
     # Resolve the job directory: either an existing one to resume (--job-dir)
     # or a fresh one named from the input file + timestamp. Each branch
-    # validates input_path *before* creating anything on disk where possible
-    # (matches the pre-existing "fail fast, touch nothing" behavior); the
-    # --job-dir branch is the one exception, since recovering input_path from
-    # meta/run.json requires the directory to already be readable.
+    # validates input_path *before* creating anything on disk (matches the
+    # pre-existing "fail fast, touch nothing" behavior), so a missing input
+    # never leaves an empty job folder behind in the history.
     if job_dir is not None:
         job_dir = Path(job_dir)
-        job_dir.mkdir(parents=True, exist_ok=True)
 
         # Recover the original input path from a prior run's meta/run.json
         # when resuming without re-passing it explicitly.
@@ -333,7 +357,6 @@ def run_pipeline(
         if not input_path.exists():
             raise FileNotFoundError(f"Input file not found: {input_path}")
         job_dir = out_dir / generate_job_id(input_path)
-        job_dir.mkdir(parents=True, exist_ok=True)
 
     job_id = job_dir.name
 
@@ -362,6 +385,7 @@ def run_pipeline(
         audio_profile=audio_profile,
         audio_format=audio_format,
         min_turn_duration=min_turn_duration,
+        stages=tuple(name for name in stage_names if name),
     )
 
     # Create job context
@@ -370,6 +394,16 @@ def run_pipeline(
         job_dir=job_dir,
         config=config,
     )
+
+    # Pre-flight: a stage that will have to run but cannot (e.g. diarization
+    # without an HF token) fails now, not after an hour of transcription -
+    # and before the job folder is created.
+    for index, stage in enumerate(stages):
+        preflight = getattr(stage, "preflight", None)
+        if preflight is not None and from_index <= index <= to_index:
+            preflight(job)
+
+    job_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"=" * 50)
     logger.info(f"Diarrhizer Pipeline")

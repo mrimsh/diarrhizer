@@ -1,6 +1,7 @@
 """Diarize stage for speaker diarization."""
 
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -21,6 +22,8 @@ logger = logging.getLogger(__name__)
 # @description: Consumes normalized WAV from convert stage and produces speaker segments.
 #   Once a keep_wav=false audio format dropped the WAV, decodes the archive copy instead
 #   (find_job_audio); cache staleness stays keyed on the WAV, so dropping it never invalidates diarization.
+#   preflight() (called by the runner before any stage runs) fails fast when diarization will have to
+#   run - not cached, or forced - and no HF token is set, instead of failing after the transcription.
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/diar/diarization.json
 # @sideEffects: Loads pyannote model, writes diarization JSON to disk, unloads the
@@ -58,6 +61,22 @@ class DiarizeStage:
         self._device = device
         self._min_speakers = min_speakers
         self._max_speakers = max_speakers
+
+    def preflight(self, job: "JobContext") -> None:
+        """Raise before the pipeline starts if diarization will have to run
+        but cannot: the token check otherwise only happens once transcription
+        (often the longest stage) has already finished.
+        """
+        forced = job.config.force or job.config.force_stage == self.NAME
+        if not forced and self.is_cache_valid(job):
+            return
+        if not (os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")):
+            raise RuntimeError(
+                "HuggingFace token is required for diarization, and none is set "
+                "(HF_TOKEN or HUGGINGFACE_HUB_TOKEN; the GUI saves it under Settings). "
+                "Get one at https://huggingface.co/settings/tokens - or run without "
+                "diarization (GUI: \"recognition only\"; CLI: --to-stage transcribe)."
+            )
 
     def configure(self, device: str, min_speakers: int, max_speakers: int) -> None:
         """Configure diarization parameters.

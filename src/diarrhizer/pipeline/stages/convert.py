@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 #   run() reuses the existing WAV (or leaves a dropped one dropped) instead of rewriting it, so its mtime -
 #   and with it transcribe/diarize's cache - survives; a new source file, profile change or force rewrites it.
 #   Stale audio files from an earlier format/profile are deleted only after the new ones were written.
+#   meta/run.json's pipeline_config records the whole job config (ASR params incl. the initial prompt,
+#   min_turn_duration, the stage list), so the GUI can list the job and resume it with the same settings.
 # @inputs: job.input_path, config.audio_profile, config.audio_format
 # @outputs: artifacts/audio/normalized.wav, meta/run.json, optional artifacts/audio/archive.<ext>, and for
 #   split-stereo also artifacts/audio/normalized_left.wav / normalized_right.wav (+ archive_left/right.<ext>)
@@ -180,8 +182,14 @@ class ConvertStage:
                 "asr_compute_type": config.asr_compute_type,
                 "asr_beam_size": config.asr_beam_size,
                 "asr_temperature": config.asr_temperature,
+                "asr_condition_on_previous_text": config.asr_condition_on_previous_text,
+                "asr_initial_prompt": config.asr_initial_prompt,
+                "asr_vad_filter": config.asr_vad_filter,
+                "asr_vad_min_silence_ms": config.asr_vad_min_silence_ms,
+                "min_turn_duration": config.min_turn_duration,
                 "audio_profile": audio_profile,
                 "audio_format": audio_format.name,
+                "stages": list(config.stages),
             },
         }
 

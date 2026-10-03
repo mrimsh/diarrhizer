@@ -85,6 +85,9 @@ def fake_heavy_deps(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "diarrhizer.pipeline.stages.diarize.WhisperXDiarizeAdapter", _FakeWhisperXDiarizeAdapter
     )
+    # The fake adapter stands in for a working diarization setup, token included
+    # (DiarizeStage.preflight checks it before any stage runs).
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
 
 
 @pytest.fixture
