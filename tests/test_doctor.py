@@ -120,3 +120,38 @@ def test_check_audio_formats_reports_a_broken_file(audio_formats_file):
 
     assert not passed
     assert str(audio_formats_file) in message
+
+
+def _fake_checks(*results):
+    return [lambda result=result: result for result in results]
+
+
+def test_optional_check_failure_is_only_a_warning(monkeypatch, capsys):
+    monkeypatch.setattr(
+        doctor,
+        "ALL_CHECKS",
+        _fake_checks(("FFmpeg", True, "ok"), ("torchcodec", False, "Not installed")),
+    )
+    assert doctor.run_doctor_checks() is True
+    out = capsys.readouterr().out
+    assert "[WARN]: torchcodec" in out
+    assert "1 optional warning" in out
+
+
+def test_required_check_failure_fails_the_run(monkeypatch, capsys):
+    monkeypatch.setattr(
+        doctor,
+        "ALL_CHECKS",
+        _fake_checks(("Critical imports", False, "whisperx: boom"), ("torchcodec", True, "")),
+    )
+    assert doctor.run_doctor_checks() is False
+    out = capsys.readouterr().out
+    assert "[FAIL]: Critical imports" in out
+    assert "RECOMMENDED ACTION" in out
+
+
+def test_run_all_checks_returns_every_result_in_order(monkeypatch):
+    monkeypatch.setattr(
+        doctor, "ALL_CHECKS", _fake_checks(("A", True, ""), ("B", False, "x"))
+    )
+    assert doctor.run_all_checks() == [("A", True, ""), ("B", False, "x")]

@@ -9,60 +9,70 @@ from diarrhizer.adapters.ffmpeg import ENV_FFMPEG_PATH, list_audio_encoders, res
 from diarrhizer.audio_formats import AudioFormatStore
 
 
+# Checks whose failure only costs speed, not correctness: reported as WARN
+# and not counted against the result (doctor's exit code, the GUI's badge).
+OPTIONAL_CHECKS = {"torchcodec"}
+
+
+def is_blocking_failure(name: str, passed: bool) -> bool:
+    return not passed and name not in OPTIONAL_CHECKS
+
+
 # [SEMANTIC-BEGIN] DIAGNOSTICS:DOCTOR
 # @purpose: Run environment diagnostics to verify Diarrhizer dependencies
 # @description: Checks for Python version, FFmpeg, audio format profiles (file parses, default profile's
-#   encoder is in this FFmpeg build), torch/torchaudio, CUDA, cuDNN, torchcodec, HF token, and critical ML imports
+#   encoder is in this FFmpeg build), torch/torchaudio, CUDA, cuDNN, torchcodec, HF token, and critical ML imports.
+#   A failed check in OPTIONAL_CHECKS (torchcodec: only a faster decoder) is a warning, not a failure.
+#   run_all_checks() is the shared, print-free list the GUI runs (in a child process).
 # @sideEffects: Reads environment variables and audio_formats.json, runs `ffmpeg -encoders`, imports optional
 #   modules, scans torch/lib for cuDNN DLLs
-# @errors: Prints warnings for missing dependencies; returns False if any check failed
-# @see: CLI:ENTRY, ADAPTER:FFMPEG, CONFIG:ENV, CONFIG:AUDIO_FORMATS
+# @errors: Prints warnings for missing dependencies; returns False if any non-optional check failed
+# @see: CLI:ENTRY, ADAPTER:FFMPEG, CONFIG:ENV, CONFIG:AUDIO_FORMATS, GUI:CHILD_TASKS
+def run_all_checks() -> List[Tuple[str, bool, str]]:
+    """Run every check, in display order, without printing."""
+    return [check() for check in ALL_CHECKS]
+
+
 def run_doctor_checks() -> bool:
     """Run all diagnostic checks and print results.
 
     Returns:
-        True if every check passed.
+        True if every non-optional check passed.
     """
     print("=" * 50)
     print("Diarrhizer Environment Diagnostics")
     print("=" * 50)
-    
-    checks = [
-        check_python_version,
-        check_ffmpeg,
-        check_audio_formats,
-        check_torch,
-        check_cuda,
-        check_cudnn,
-        check_torchcodec,
-        check_critical_imports,
-        check_hf_token,
-    ]
-    
+
     results: List[Tuple[str, bool, str]] = []
-    for check in checks:
+    for check in ALL_CHECKS:
         name, passed, message = check()
         results.append((name, passed, message))
-        status = "[PASS]" if passed else "[FAIL]"
+        if passed:
+            status = "[PASS]"
+        else:
+            status = "[WARN]" if name in OPTIONAL_CHECKS else "[FAIL]"
         print(f"{status}: {name}")
         if message:
             print(f"       {message}")
-    
+
     print("=" * 50)
     passed_count = sum(1 for _, p, _ in results if p)
+    warnings = sum(1 for name, p, _ in results if not p and name in OPTIONAL_CHECKS)
     total_count = len(results)
-    print(f"Results: {passed_count}/{total_count} checks passed")
-    
+    print(
+        f"Results: {passed_count}/{total_count} checks passed"
+        + (f" ({warnings} optional warning{'s' if warnings != 1 else ''})" if warnings else "")
+    )
+
     # Print additional help for failures
-    failed_imports = [name for name, passed, _ in results if not passed and name.startswith("Import:")]
-    if failed_imports:
+    if any(name == "Critical imports" and not passed for name, passed, _ in results):
         print("\n" + "=" * 50)
         print("RECOMMENDED ACTION:")
         print("  Rebuild environment with stable constraints:")
         print("    pip install -c requirements/constraints-stable.txt -r requirements/base.txt")
         print("  Or reinstall PyTorch with a compatible version.")
     print("=" * 50)
-    return passed_count == total_count
+    return not any(is_blocking_failure(name, passed) for name, passed, _ in results)
 
 
 def check_python_version() -> Tuple[str, bool, str]:
@@ -286,6 +296,19 @@ def check_critical_imports() -> Tuple[str, bool, str]:
         return ("Critical imports", False, msg)
     else:
         return ("Critical imports", True, "All critical imports OK")
+
+
+ALL_CHECKS = [
+    check_python_version,
+    check_ffmpeg,
+    check_audio_formats,
+    check_torch,
+    check_cuda,
+    check_cudnn,
+    check_torchcodec,
+    check_critical_imports,
+    check_hf_token,
+]
 
 
 if __name__ == "__main__":
