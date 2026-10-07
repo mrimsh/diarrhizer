@@ -75,9 +75,11 @@ def main() -> int:
     )
     run_parser.add_argument(
         "input",
-        nargs="?",
-        default=None,
-        help="Path to input media file (optional if --job-dir resumes a job that already recorded it)"
+        nargs="*",
+        default=[],
+        help="Media file(s) and/or folder(s) to process; a folder adds the media files directly "
+             "inside it. Several inputs run one after another as separate jobs, and a failed file "
+             "does not stop the rest. Optional if --job-dir resumes a job that already recorded its input"
     )
     run_parser.add_argument(
         "--out",
@@ -249,22 +251,34 @@ def main() -> int:
         return 0 if run_doctor_checks() else 1
     elif args.command == "run":
         # [SEMANTIC-BEGIN] CLI:RUN
-        # @purpose: Run the processing pipeline for a media file
+        # @purpose: Run the processing pipeline for one or several media files
         # @description: Orchestrates FFmpeg conversion, ASR, diarization, and export. --job-dir
         #   resumes an existing job directory (args.input becomes optional if that job already
         #   recorded it in meta/run.json); --from-stage/--to-stage select a stage range to run,
         #   skipping stages outside it entirely - e.g. --from-stage export re-exports without
-        #   recomputing ASR/diarization.
+        #   recomputing ASR/diarization. Several inputs (or a folder, see INPUT:EXPAND_MEDIA) run as a
+        #   batch: one job per file, each in its own new_job_dir(), a failed file is reported and the
+        #   batch moves on, and a summary is printed at the end.
         # @inputs: args.input, args.out, args.job_dir, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.from_stage, args.to_stage, args.speakers, args.min_turn_duration, ASR params, audio_profile, audio_format, keep_wav
         # @outputs: Artifacts in out/ directory
-        # @sideEffects: Creates job directory, writes artifacts to disk
-        # @errors: Exits with code 1 on failure
-        # @see: PIPELINE:RUNNER, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, STAGE:MERGE, STAGE:EXPORT, CONFIG:PIPELINE, CONFIG:AUDIO_FORMATS
+        # @sideEffects: Creates job directories, writes artifacts to disk
+        # @errors: Exits with code 1 on failure (in a batch: if any file failed)
+        # @see: PIPELINE:RUNNER, INPUT:EXPAND_MEDIA, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, STAGE:MERGE, STAGE:EXPORT, CONFIG:PIPELINE, CONFIG:AUDIO_FORMATS
+
+        from diarrhizer.media import expand_media_paths
+
+        inputs = expand_media_paths(args.input)
+        if args.input and not inputs:
+            print(f"Error: No media files found in: {', '.join(args.input)}", file=sys.stderr)
+            return 1
+        if args.job_dir and len(inputs) > 1:
+            print("Error: --job-dir resumes a single job; pass at most one input with it", file=sys.stderr)
+            return 1
 
         # Imported lazily (not at module level) so that `doctor` never pulls in
         # torch/whisperx as a side effect - it needs to stay import-safe to diagnose
         # a broken install.
-        from diarrhizer.pipeline.runner import run_pipeline
+        from diarrhizer.pipeline.runner import new_job_dir, run_pipeline
         from diarrhizer.pipeline.stages.convert import ConvertStage
         from diarrhizer.pipeline.stages.transcribe import TranscribeStage
         from diarrhizer.pipeline.stages.diarize import DiarizeStage
@@ -319,12 +333,12 @@ def main() -> int:
             print(f"[CLI] Loaded initial prompt: {len(initial_prompt)} chars")
         # [SEMANTIC-END] CONFIG:INITIAL_PROMPT
 
-        try:
-            result = run_pipeline(
-                input_path=args.input,
+        def _run(input_path, job_dir) -> dict:
+            return run_pipeline(
+                input_path=input_path,
                 out_dir=args.out,
                 stages=[ConvertStage(), TranscribeStage(), DiarizeStage(), MergeStage(), ExportStage()],
-                job_dir=args.job_dir,
+                job_dir=job_dir,
                 min_speakers=args.min_speakers,
                 max_speakers=args.max_speakers,
                 language=args.lang,
@@ -348,18 +362,43 @@ def main() -> int:
                 keep_wav=None if args.keep_wav is None else _parse_bool(args.keep_wav),
                 min_turn_duration=args.min_turn_duration,
             )
+
+        def _error_text(e: Exception) -> str:
+            # Expected failures carry a readable message already; anything else
+            # (corrupt cached JSON, malformed inputs, ...) gets its type name so
+            # it exits cleanly instead of dumping a raw traceback.
+            if isinstance(e, (FileNotFoundError, RuntimeError, ValueError)):
+                return str(e)
+            return f"{type(e).__name__}: {e}"
+
+        if len(inputs) <= 1:
+            try:
+                result = _run(inputs[0] if inputs else None, args.job_dir)
+            except Exception as e:
+                print(f"Error: {_error_text(e)}", file=sys.stderr)
+                return 1
             print(f"\nPipeline completed successfully!")
             print(f"Job ID: {result['job_id']}")
             print(f"Output: {result['job_dir']}")
             return 0
-        except (FileNotFoundError, RuntimeError, ValueError) as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-        except Exception as e:
-            # Catch-all so unexpected failures (corrupt cached JSON, malformed
-            # inputs, etc.) exit cleanly instead of dumping a raw traceback.
-            print(f"Error: {type(e).__name__}: {e}", file=sys.stderr)
-            return 1
+
+        summary = []
+        for index, input_path in enumerate(inputs, 1):
+            print(f"\n[{index}/{len(inputs)}] {input_path}")
+            try:
+                result = _run(input_path, new_job_dir(args.out, input_path))
+                summary.append((True, input_path, result["job_dir"]))
+            except Exception as e:
+                print(f"Error: {_error_text(e)}", file=sys.stderr)
+                summary.append((False, input_path, _error_text(e)))
+
+        failed = sum(1 for ok, _, _ in summary if not ok)
+        print("\n" + "=" * 50)
+        print(f"Batch finished: {len(summary) - failed} succeeded, {failed} failed")
+        for ok, input_path, detail in summary:
+            print(f"  {'OK  ' if ok else 'FAIL'}  {input_path.name}: {detail}")
+        print("=" * 50)
+        return 1 if failed else 0
         # [SEMANTIC-END] CLI:RUN
     else:
         parser.print_help()
