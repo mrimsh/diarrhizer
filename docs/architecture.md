@@ -1,7 +1,7 @@
 # Architecture
 
 Goal: a simple, extensible architecture for local call recording processing on Windows:  
-**FFmpeg → WhisperX (ASR + alignment) → diarization (pyannote via WhisperX) → merge → export (MD/TXT/JSON).**
+**FFmpeg → WhisperX (ASR + alignment) → diarization (pyannote via WhisperX) → merge → export (MD/TXT/SRT/JSON).**
 
 This document is intentionally concise. It defines the "skeleton" so the project can evolve (caching, new exports, GUI) without rewriting the core.
 
@@ -22,6 +22,7 @@ This document is intentionally concise. It defines the "skeleton" so the project
 | Diarize stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/diarize.py`](src/diarrhizer/pipeline/stages/diarize.py) |
 | Merge stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/merge.py`](src/diarrhizer/pipeline/stages/merge.py) |
 | Export modules | ✅ Implemented | [`src/diarrhizer/export/`](src/diarrhizer/export/) |
+| Desktop GUI | ✅ Implemented | [`src/diarrhizer_gui/`](src/diarrhizer_gui/) — see [GUI](#gui) |
 
 ---
 
@@ -116,7 +117,10 @@ Planned layout:
 out/
   <job_id>/
     meta/                 # metadata (config, versions, timestamps, ASR params)
-      run.json            # written by convert; records the original input_path
+      run.json            # written by convert; records the original input_path and the job's
+                          # full settings (pipeline_config: ASR params incl. the initial prompt,
+                          # speaker range, min_turn_duration, audio profile/format, stage list)
+    speakers.json         # GUI only: speaker names {Speaker_XX: name}
     audio/
       normalized.wav      # always written, regardless of audio_profile; deleted after the job
                           # completes when the storage format has keep_wav=false
@@ -131,9 +135,10 @@ out/
     merged/
       segments.json
     export/
-      result.md
-      result.txt
-      result.json
+      result.md           # speaker turns + speaking-time summary
+      result.txt          # speaker turns, no markup
+      result.srt          # subtitles, "Name: text" per cue
+      result.json         # every segment and word with timings
 ```
 
 `job_id` can be generated as:
@@ -141,7 +146,9 @@ out/
 - filename + timestamp, or
 - hash (input + config) — if reproducibility/deduplication is important.
 
-`meta/run.json`'s recorded `input_path` is also what `run --job-dir <dir>` reads to make the `input` argument optional when resuming a job (see [Section 8](#8-cli-commands)).
+`meta/run.json`'s recorded `input_path` is also what `run --job-dir <dir>` reads to make the `input` argument optional when resuming a job (see [Section 8](#8-cli-commands)). The GUI's "Продолжить" (History) and "Пересчитать спикеров" (Result) rebuild the whole run from `pipeline_config` (`diarrhizer_gui/job_scan.py`, `GUI:JOB_PLANS`).
+
+Job folders are named `<input stem>_<YYYYMMDD_HHMMSS>`; callers that start several jobs in a row (GUI queue, CLI batch) use `runner.new_job_dir()`, which appends `_2`, `_3`, … rather than reuse an existing folder.
 
 ---
 
@@ -315,9 +322,13 @@ The [`doctor`](src/diarrhizer/diagnostics/doctor.py) command performs these chec
 3. **PyTorch/Torchaudio** — verifies installation and reports version and CUDA status
 4. **CUDA** — checks GPU availability via `torch.cuda.is_available()`
 5. **cuDNN** — looks for cuDNN 8 DLLs required by WhisperX/CTranslate2 (skipped on CPU-only)
-6. **torchcodec** — optional fast decoder
+6. **torchcodec** — optional fast decoder; a failure is a `WARN` and does not fail the run (`OPTIONAL_CHECKS`)
 7. **Critical imports** — whisperx / speechbrain / pyannote / transformers
 8. **Hugging Face token** — verifies `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN` (CLI and GUI load a local `.env`)
+
+Besides `doctor`, the pipeline itself checks the token up front: `DiarizeStage.preflight()` runs before
+any stage, so a run that will have to diarize without a token fails in seconds instead of after the
+transcription. Cached diarization (e.g. `--from-stage export`) needs no token.
 
 Run with:
 ```powershell
@@ -363,7 +374,7 @@ python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `input` | positional | — | Path to input media file (required, unless `--job-dir` resumes a job that already recorded it in `meta/run.json`) |
+| `input` | positional, 0..n | — | Media file(s) and/or folder(s) (a folder adds the media files directly inside it). Several inputs run as a batch: one job per file, a failed file does not stop the rest, exit code 1 if any failed. Optional when `--job-dir` resumes a job that already recorded its input (at most one input with `--job-dir`) |
 | `--out` | string | `./out` | Output directory (ignored when `--job-dir` is given) |
 | `--job-dir` | string | — | Resume an existing job directory instead of starting a new one, e.g. `out/meeting_20260101_120000` |
 | `--min-speakers` | int | `1` | Minimum number of speakers |
@@ -420,13 +431,31 @@ The architecture is designed to allow extensions without breaking the core:
 
 ### New export formats
 
-- HTML, DOCX, SRT/VTT
+- HTML, DOCX, VTT (SRT exists - see `ExportStage.EXPORTERS`)
 - integration with note-taking systems
 
 ### GUI
 
 - The GUI layer must call the same `pipeline runner` and operate on the same artifacts.
 - The GUI must not contain processing logic — only UX.
+
+How the GUI runs things (`src/diarrhizer_gui/`):
+
+- **Child processes.** Every pipeline job runs in a spawned child process
+  (`child_process.py` + `child_tasks.py`, wrapped by `pipeline_worker.py`). Progress comes back as
+  the runner's log records over a multiprocessing queue. The GUI process never imports
+  torch/whisperx: "Остановить" kills the job at once (stages write atomically, so finished stages
+  survive and the job can be resumed), a native CUDA/cuDNN crash is reported instead of closing the
+  window, and all memory/VRAM is returned after each job.
+- **Environment probe.** The doctor checks also run in a child process, once at startup
+  (`environment.py`); New Job/Settings/Models read CUDA availability from it, and the Doctor screen
+  and its sidebar badge show the results. The window opens immediately instead of waiting for the
+  ML imports.
+- **Queue.** New Job emits one run per file; History ("Продолжить") and Result ("Пересчитать
+  спикеров") emit runs for existing job folders. `main_window.py` executes them one at a time
+  (`job_queue.py`); the Monitor screen ("Выполнение") is a sidebar item showing the batch.
+- **In-process work** is limited to cheap, pure steps: scanning job folders and re-exporting with
+  new speaker names (`ExportStage` only, milliseconds).
 
 ---
 
@@ -444,7 +473,7 @@ The architecture is designed to allow extensions without breaking the core:
 
 ---
 
-## 11. Project Structure (Planned)
+## 11. Project Structure
 
 ```
 src/diarrhizer/
@@ -458,11 +487,26 @@ src/diarrhizer/
 │       ├── transcribe.py   # WhisperX ASR + alignment
 │       ├── diarize.py      # Speaker diarization (pyannote)
 │       ├── merge.py        # Merge ASR with speaker labels
-│       └── export.py       # Export to MD/JSON
+│       └── export.py       # Export to MD/TXT/SRT/JSON
 ├── adapters/               # External library wrappers
 │   ├── ffmpeg.py
 │   └── whisperx.py
+├── media.py                # Media extensions, folder expansion for batch input
 └── export/                 # Export formatters
+    ├── turns.py            # Speaker turns + speaking time (md/txt/GUI)
     ├── markdown_export.py  # Markdown exporter
-    └── json_export.py     # JSON exporter
+    ├── text_export.py      # Plain-text exporter
+    ├── srt_export.py       # SRT subtitles
+    └── json_export.py      # JSON exporter
+
+src/diarrhizer_gui/
+├── app.py                  # Entry point (python -m diarrhizer_gui.app)
+├── main_window.py          # Navigation + job queue execution
+├── job_queue.py            # Queue bookkeeping (pure Python)
+├── pipeline_worker.py      # One job in a child process -> Qt signals
+├── child_process.py        # Spawned process watched by a QTimer
+├── child_tasks.py          # Child entry points (pipeline, doctor) - Qt-free
+├── environment.py          # Background doctor checks shared by the screens
+├── job_scan.py             # History scan, resume / re-diarize plans
+└── screens/                # New Job, Monitor, History, Result, Models, Doctor, Settings
 ```

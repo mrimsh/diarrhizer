@@ -3,7 +3,10 @@
 By MRIMSH, L. L. MRIMSH and all other LLMs
 
 A local (on-prem) Windows tool for processing call recordings:
-input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker diarization (pyannote via WhisperX) → export (`.md/.txt/.json`).
+input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker diarization (pyannote via WhisperX) → export (`.md/.txt/.srt/.json`).
+
+Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
+and a CLI (`python -m diarrhizer run …`).
 
 ---
 
@@ -16,18 +19,27 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 | Pipeline stages | ✅ Implemented |
 | Adapters (FFmpeg/WhisperX/diarization) | ✅ Implemented |
 | Speaker name mapping | ✅ Implemented |
+| Batch processing (several files / folders) | ✅ Implemented |
+| Desktop GUI (PySide6) | ✅ Implemented |
 
 ---
 
-## MVP Features (Planned)
+## Features
 
-* Supported input formats: `.mp3`, `.wav`, `.m4a`, `.mp4`, `.mkv`, `.webm`, etc.
-* Audio normalization via FFmpeg (typically: WAV mono 16 kHz)
+* Input: anything FFmpeg decodes — `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, `.ogg`/`.oga`/`.opus`
+  (messenger voice notes), `.amr`/`.3gp` (phone call recorders), `.wma`, video (`.mp4`, `.mkv`,
+  `.webm`, `.mov`, `.avi`)
+* One file, several files, or whole folders per run (processed one after another)
+* Audio normalization via FFmpeg (WAV mono 16 kHz) with optional preprocessing profiles
 * WhisperX transcription with word-level timestamps (alignment)
 * Speaker diarization (`Speaker_00`, `Speaker_01`, …) with text-to-speaker assignment
 * Export:
-  * Human-readable `.md/.txt` (segments + timestamps + speaker)
-  * Structured `.json` (for further processing without recomputing ASR/diarization)
+  * Human-readable `.md/.txt`: one line per speaker turn (consecutive phrases of one person are
+    joined), plus a speaking-time summary per speaker in `.md`
+  * `.srt` subtitles (`Name: text` cues, long phrases split at word boundaries)
+  * Structured `.json` (every segment and word with timings, for further processing)
+* Caching and resuming: finished stages are never recomputed; an interrupted job continues from
+  the first missing stage
 
 ### Important About Speakers
 
@@ -47,8 +59,12 @@ You can map diarization IDs to real names using a JSON file:
 ```
 
 Then run with `--speakers <path_to_json>`. The mapping will be applied at export time:
-- `result.md` will show real names instead of Speaker_XX
+- `result.md`/`result.txt`/`result.srt` will show real names instead of Speaker_XX
 - `result.json` will include both `speaker_id` (original) and `speaker_name` (mapped)
+- Mapping two ids to the same name merges them: diarization sometimes splits one person in two
+
+In the GUI you don't need the file: name the speakers on the result screen (with a "▶" button to
+hear each one) and the exports are rewritten immediately.
 
 ---
 
@@ -91,15 +107,17 @@ Using `.venv` is the recommended way to isolate dependencies.
 
 ```powershell
 pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
-pip install -e .
+pip install -e .[gui]
 ```
 
 **CUDA option (NVIDIA GPU, CUDA 12.1 cuDNN 8 — stable supported path):**
 
 ```powershell
 pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
-pip install -e .
+pip install -e .[gui]
 ```
+
+(`[gui]` adds PySide6 for the desktop GUI; plain `pip install -e .` is enough for the CLI.)
 
 This installs `torch==2.3.1+cu121` which bundles cuDNN 8 — compatible with `ctranslate2==4.4.0` (required by WhisperX 3.3.1).
 
@@ -129,6 +147,41 @@ Example `.env`:
 HF_TOKEN=hf_xxx
 ```
 
+In the GUI, paste it under **Настройки → HF-токен** instead (it is written to the same `.env`).
+Without a token you can still use "recognition only" (GUI) / `--to-stage transcribe` (CLI); a run
+that needs diarization and has no token fails within seconds, before transcription starts.
+
+---
+
+## GUI
+
+```powershell
+python -m diarrhizer_gui.app
+```
+
+(or `diarrhizer-gui` after `pip install -e .[gui]`). The interface is in Russian.
+
+* **Новое задание** — add files or whole folders (buttons or drag & drop onto the window), pick the
+  mode and parameters, run. Every file becomes its own job; they run one after another. The
+  parameters of the last run are remembered.
+* **Выполнение** — the running batch: stage progress, live log, queue, **Остановить** (stops at
+  once; finished stages are kept). Reachable from the sidebar at any time; the sidebar, window title
+  and a taskbar flash show progress and completion.
+* **История заданий** — all jobs in the results folder with stage indicators, a filter, and
+  **Продолжить** for unfinished jobs: it resumes from the first missing stage with the job's own
+  settings (e.g. after a stop or a failed diarization, without re-transcribing).
+* **Результат** — the transcript by speaker turns, one colour per speaker; click a timestamp to play
+  the recording from there, **▶** next to a speaker plays a sample of their voice; name speakers
+  and save (exports are rewritten immediately); search (Ctrl+F); copy the whole transcript;
+  **Пересчитать спикеров** re-runs diarization with another speaker count (or adds speakers to a
+  recognition-only job) while keeping the transcript.
+* **Модели**, **Доктор**, **Настройки** — model cache, environment checks (run in the background;
+  the sidebar shows a ⚠ badge if something required is missing), defaults, HF token, FFmpeg path,
+  audio storage profiles.
+
+Processing runs in a separate process: the window stays responsive, a crash inside CUDA/cuDNN
+cannot take the GUI down, and memory (including VRAM) is fully released after every job.
+
 ---
 
 ## Quick Start
@@ -146,7 +199,7 @@ The `doctor` command performs these diagnostic checks:
 3. **PyTorch/Torchaudio** — verifies installation and reports version
 4. **CUDA** — checks GPU availability
 5. **cuDNN** — checks cuDNN 8 DLLs needed by WhisperX/CTranslate2 (skipped on CPU-only)
-6. **torchcodec** — optional fast decoder
+6. **torchcodec** — optional fast decoder (reported as `WARN`, does not fail the run)
 7. **Critical imports** — whisperx / speechbrain / pyannote / transformers
 8. **Hugging Face token** — verifies `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN` is set (including from a local `.env`)
 
@@ -160,6 +213,14 @@ Basic usage:
 python -m diarrhizer run "D:\records\meeting.mp4" --out ".\out" --min-speakers 2 --max-speakers 6 --lang ru --device cuda
 ```
 
+Several files, or every recording in a folder (one job per file, run one after another; a failed
+file is reported and the rest continue, the exit code is 1 if any failed):
+
+```powershell
+python -m diarrhizer run "D:\records\call1.m4a" "D:\records\call2.amr" --lang ru
+python -m diarrhizer run "D:\records\2026-10" --out ".\out" --lang ru
+```
+
 With speaker name mapping:
 
 ```powershell
@@ -170,7 +231,7 @@ All options:
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `input` | Path to input media file | (required, unless `--job-dir` resumes a job that already recorded it) |
+| `input` | Media file(s) and/or folder(s); a folder adds the media files directly inside it | (required, unless `--job-dir` resumes a job that already recorded it; `--job-dir` takes at most one) |
 | `--out` | Output directory | `./out` (ignored when `--job-dir` is given) |
 | `--job-dir` | Resume an existing job directory instead of starting a new job | none |
 | `--min-speakers` | Minimum number of speakers | 1 |
@@ -275,7 +336,7 @@ Stages outside the `--from-stage`/`--to-stage` range are skipped entirely (not e
 
 ---
 
-## Planned Pipeline
+## Pipeline
 
 The processing pipeline consists of 5 stages:
 
@@ -300,20 +361,22 @@ The processing pipeline consists of 5 stages:
       |
       v
 (5) Export  
-    -> artifacts/export/result.md + result.txt + result.json
+    -> artifacts/export/result.md + result.txt + result.srt + result.json
 ```
 
 ---
 
-## Output Structure (Planned Artifacts)
+## Output Structure
 
-Each run will create a job-specific folder inside `--out`, containing artifacts by stage:
+Each run creates a job-specific folder inside `--out`, containing artifacts by stage:
 
 * `audio/` — normalized WAV and/or its archive copy (see [Audio Storage Formats](#audio-storage-formats-disk-space-vs-quality))
 * `asr/` — WhisperX transcript (timestamps/words)
 * `diar/` — diarization result
 * `merged/` — merged segments (text + speaker)
-* `export/` — final `.md`, `.txt`, `.json`
+* `export/` — final `.md`, `.txt`, `.srt`, `.json`
+* `meta/run.json` — the input path and the job's full settings (used to resume it)
+* `speakers.json` — speaker names saved from the GUI
 
 This allows:
 
@@ -340,7 +403,9 @@ See `docs/troubleshooting.md` for detailed diagnostics.
 
 ## Development
 
+* Tests: `python -m pytest tests -q` (GUI tests run offscreen and never touch your saved settings)
 * CLI entry point: [`src/diarrhizer/cli.py`](src/diarrhizer/cli.py)
+* GUI: [`src/diarrhizer_gui/`](src/diarrhizer_gui/) — screens in `screens/`, the job queue and child-process runner in `main_window.py`, `job_queue.py`, `pipeline_worker.py`, `child_process.py`
 * Pipeline runner: [`src/diarrhizer/pipeline/runner.py`](src/diarrhizer/pipeline/runner.py)
 * Pipeline stages: [`src/diarrhizer/pipeline/stages/`](src/diarrhizer/pipeline/stages/)
 * External integrations (adapters): [`src/diarrhizer/adapters/`](src/diarrhizer/adapters/)
@@ -354,7 +419,8 @@ See `docs/troubleshooting.md` for detailed diagnostics.
 2. Implement adapters (FFmpeg, WhisperX, diarization)
 3. Stable CLI + caching + environment diagnostics
 4. UX improvements: speaker name mapping, protocol formatting
-5. GUI + additional features
+5. GUI + additional features (batch queue, resume, playback, speaker naming)
+6. Next ideas: VTT/DOCX export, per-turn text editing in the GUI, summaries
 
 ---
 
