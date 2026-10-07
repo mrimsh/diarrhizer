@@ -13,7 +13,7 @@ import os
 import shlex
 from pathlib import Path
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -64,9 +64,13 @@ def _breakable_paths(text: str) -> str:
 
 
 class SettingsScreen(QWidget):
-    def __init__(self) -> None:
+    # Default output folder/device/model changed - New Job applies them.
+    defaults_changed = Signal()
+
+    def __init__(self, probe=None) -> None:
         super().__init__()
         self._settings = QSettings("Diarrhizer", "DiarrhizerGUI")
+        self._probe = probe
 
         title = QLabel("Настройки")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
@@ -83,12 +87,11 @@ class SettingsScreen(QWidget):
         self._device_combo = QComboBox()
         self._device_combo.addItem("cuda")
         self._device_combo.addItem("cpu")
-        _, cuda_ok, cuda_message = doctor.check_cuda()
-        if not cuda_ok:
-            cuda_item = self._device_combo.model().item(0)
-            cuda_item.setEnabled(False)
-            cuda_item.setToolTip(cuda_message)
         self._device_combo.currentTextChanged.connect(self._save_device)
+        if self._probe is not None:
+            self._probe.finished.connect(self._on_probe_finished)
+            if self._probe.results is not None:
+                self._on_probe_finished(self._probe.results)
 
         self._model_combo = QComboBox()
         self._model_combo.setEditable(True)
@@ -360,17 +363,33 @@ class SettingsScreen(QWidget):
             "уже скачанные в прежнем расположении сами не переносятся."
         )
 
+    def _on_probe_finished(self, _results) -> None:
+        # CUDA availability comes from the background doctor run, so this
+        # screen never imports torch itself.
+        cuda_ok = bool(self._probe.cuda_available)
+        cuda_item = self._device_combo.model().item(0)
+        cuda_item.setEnabled(cuda_ok)
+        cuda_item.setToolTip("" if cuda_ok else self._probe.cuda_message)
+
+    def _rerun_checks(self) -> None:
+        # HF token / FFmpeg / cache dir changed: refresh the Doctor screen and badge.
+        if self._probe is not None:
+            self._probe.run()
+
     def _browse_out(self) -> None:
         chosen = QFileDialog.getExistingDirectory(self, "Папка результатов", self._out_field.text())
         if chosen:
             self._out_field.setText(chosen)
             self._settings.setValue(settings_keys.OUT_DIR, chosen)
+            self.defaults_changed.emit()
 
     def _save_device(self, value: str) -> None:
         self._settings.setValue(settings_keys.DEFAULT_DEVICE, value)
+        self.defaults_changed.emit()
 
     def _save_asr_model(self, value: str) -> None:
         self._settings.setValue(settings_keys.DEFAULT_ASR_MODEL, value)
+        self.defaults_changed.emit()
 
     def _toggle_hf_visibility(self, checked: bool) -> None:
         self._hf_field.setEchoMode(
@@ -383,6 +402,7 @@ class SettingsScreen(QWidget):
         env_file.write_env_file(ENV_PATH, {"HF_TOKEN": token})
         os.environ["HF_TOKEN"] = token
         self._refresh_hf_status()
+        self._rerun_checks()
 
     def _browse_ffmpeg(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -399,12 +419,14 @@ class SettingsScreen(QWidget):
         else:
             os.environ.pop("DIARRHIZER_FFMPEG_PATH", None)
         self._refresh_ffmpeg_status()
+        self._rerun_checks()
 
     def _clear_ffmpeg_path(self) -> None:
         self._ffmpeg_field.setText("")
         env_file.write_env_file(ENV_PATH, {"DIARRHIZER_FFMPEG_PATH": ""})
         os.environ.pop("DIARRHIZER_FFMPEG_PATH", None)
         self._refresh_ffmpeg_status()
+        self._rerun_checks()
 
     def _browse_cache_dir(self) -> None:
         chosen = QFileDialog.getExistingDirectory(

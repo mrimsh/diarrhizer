@@ -1,101 +1,78 @@
-"""Background execution of run_pipeline() plus a logging-to-Qt-signal bridge.
+"""One pipeline job, run in a child process (child_process.py) and reported
+through Qt signals.
 
-Heavy imports (diarrhizer.pipeline.*, diarrhizer.adapters.*) stay inside
-build_stages()/PipelineWorker.run() - never at module level - so importing
-this module (which happens as soon as the GUI wires up New Job/Monitor)
-never pulls in torch/whisperx. Same reason cli.py defers those imports:
-"so that doctor never pulls in torch/whisperx as a side effect".
+Nothing heavy is imported here or in child_tasks.py: the stage modules (and
+with them torch/whisperx) are imported only inside the child.
 """
 
-import logging
+from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
 
+from diarrhizer_gui.child_process import ChildProcess
+from diarrhizer_gui.child_tasks import build_stages, run_pipeline_task  # noqa: F401  (re-exported)
 
-def build_stages(mode: str) -> list:
-    """Build the stage list for a pipeline mode. Imports stage classes lazily."""
-    from diarrhizer.pipeline.stages.convert import ConvertStage
-    from diarrhizer.pipeline.stages.transcribe import TranscribeStage
-
-    from diarrhizer.pipeline.stages.export import ExportStage
-    from diarrhizer.pipeline.stages.merge import MergeStage
-
-    if mode == "asr_only":
-        return [ConvertStage(), TranscribeStage(), MergeStage(), ExportStage()]
-
-    if mode == "full":
-        from diarrhizer.pipeline.stages.diarize import DiarizeStage
-
-        return [
-            ConvertStage(),
-            TranscribeStage(),
-            DiarizeStage(),
-            MergeStage(),
-            ExportStage(),
-        ]
-
-    raise ValueError(f"Unknown pipeline mode: {mode!r}")
+CRASH_HINT = (
+    "Процесс обработки аварийно завершился (код {code}) и не сообщил об ошибке. "
+    "Обычно это сбой нативной библиотеки (CUDA/cuDNN/CTranslate2) или нехватка памяти. "
+    "Проверьте экран «Доктор», попробуйте устройство cpu или модель поменьше. "
+    "Готовые этапы сохранены — задание можно продолжить из истории."
+)
 
 
-class SignalBridge(QObject):
-    """Lives in the main thread. The worker's logging handler emits through
-    this so progress crosses the thread boundary via Qt's normal queued
-    signal delivery, instead of a worker thread touching widgets directly.
-    """
-
-    progress = Signal(str, str)  # stage, message
-
-
-class SignalLogHandler(logging.Handler):
-    """Routes "diarrhizer" logger records to a SignalBridge - same idea as
-    examples/subscribe_to_progress.py's ProgressHandler, but emitting a Qt
-    signal instead of printing.
-    """
-
-    def __init__(self, bridge: SignalBridge) -> None:
-        super().__init__()
-        self._bridge = bridge
-
-    def emit(self, record: logging.LogRecord) -> None:
-        stage = getattr(record, "stage", "-")
-        self._bridge.progress.emit(stage, record.getMessage())
-
-
+# [SEMANTIC-BEGIN] GUI:PIPELINE_WORKER
+# @purpose: Run one run_pipeline() job off the GUI process and report progress/outcome as Qt signals
+# @description: Wraps ChildProcess + run_pipeline_task. Exactly one of finished/failed/cancelled fires per
+#   job. cancel() kills the child at once (mid-stage): every stage writes its outputs atomically, so a killed
+#   job keeps the stages that already finished and can be resumed (GUI:JOB_PLANS). A child that dies without
+#   reporting (native crash) is turned into failed("ProcessCrashed", ...) with a hint, instead of taking the
+#   GUI down with it.
+# @inputs: mode ("full" | "asr_only"), run_pipeline() kwargs (picklable)
+# @outputs: signals progress(stage, message), finished(result dict), failed(type, message), cancelled()
+# @sideEffects: Spawns and may kill a child process that writes the job's artifacts
+# @errors: Reported via failed, never raised
+# @see: GUI:CHILD_PROCESS, GUI:CHILD_TASKS, PIPELINE:RUNNER
 class PipelineWorker(QObject):
-    """Runs run_pipeline() off the UI thread.
-
-    Create in the main thread, move to a QThread, connect
-    thread.started -> worker.run(). Errors are reported via the failed
-    signal rather than parsed from logs: runner.py's own except-block around
-    stage.run() still uses print(), not logger, so the log stream carries no
-    structured error marker - this catches the same exception cli.py does.
-    """
-
+    progress = Signal(str, str)  # stage, message
     finished = Signal(dict)
     failed = Signal(str, str)  # error type name, message
+    cancelled = Signal()
 
-    def __init__(self, mode: str, kwargs: dict, bridge: SignalBridge) -> None:
-        super().__init__()
-        self._mode = mode
-        self._kwargs = kwargs
-        self._bridge = bridge
+    def __init__(self, mode: str, kwargs: dict, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process = ChildProcess(run_pipeline_task, (mode, kwargs), self)
+        self._process.message.connect(self._on_message)
+        self._process.exited.connect(self._on_exited)
+        self._result: Optional[dict] = None
+        self._failure: Optional[tuple] = None
+        self._cancel_requested = False
 
-    def run(self) -> None:
-        from diarrhizer.pipeline.runner import run_pipeline
+    def start(self) -> None:
+        self._process.start()
 
-        logger = logging.getLogger("diarrhizer")
-        handler = SignalLogHandler(self._bridge)
-        previous_level = logger.level
-        logger.setLevel(logging.INFO)
-        logger.addHandler(handler)
-        try:
-            stages = build_stages(self._mode)
-            result = run_pipeline(stages=stages, **self._kwargs)
-            self.finished.emit(result)
-        except (FileNotFoundError, RuntimeError, ValueError) as exc:
-            self.failed.emit(type(exc).__name__, str(exc))
-        except Exception as exc:  # matches cli.py's catch-all for unexpected failures
-            self.failed.emit(type(exc).__name__, f"{type(exc).__name__}: {exc}")
-        finally:
-            logger.removeHandler(handler)
-            logger.setLevel(previous_level)
+    def cancel(self) -> None:
+        self._cancel_requested = True
+        self._process.kill()
+
+    def is_running(self) -> bool:
+        return self._process.is_running()
+
+    def _on_message(self, item) -> None:
+        kind = item[0]
+        if kind == "progress":
+            self.progress.emit(item[1], item[2])
+        elif kind == "finished":
+            self._result = item[1]
+        elif kind == "failed":
+            self._failure = (item[1], item[2])
+
+    def _on_exited(self, code: int) -> None:
+        if self._result is not None:
+            self.finished.emit(self._result)
+        elif self._failure is not None:
+            self.failed.emit(*self._failure)
+        elif self._cancel_requested:
+            self.cancelled.emit()
+        else:
+            self.failed.emit("ProcessCrashed", CRASH_HINT.format(code=code))
+# [SEMANTIC-END] GUI:PIPELINE_WORKER

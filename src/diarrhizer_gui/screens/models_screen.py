@@ -80,8 +80,9 @@ class ModelsScreen(QWidget):
     ASR_COLUMNS = ["Модель", "Статус", "Размер", "", ""]
     CACHE_COLUMNS = ["Repo", "Размер", "Использовано", ""]
 
-    def __init__(self) -> None:
+    def __init__(self, probe=None) -> None:
         super().__init__()
+        self._probe = probe
         self._busy = False
         self._thread: Optional[QThread] = None
         self._worker: Optional[ModelActionWorker] = None
@@ -220,8 +221,7 @@ class ModelsScreen(QWidget):
                 )
                 self._asr_table.setCellWidget(row, 4, forget_button)
 
-        _, cuda_ok, _ = doctor.check_cuda()
-        self._diar_device = "cuda" if cuda_ok else "cpu"
+        self._diar_device = self._device()
 
         _, hf_ok, hf_message = doctor.check_hf_token()
         self._diar_status_label.setText(f"HF-токен: {hf_message}")
@@ -246,8 +246,13 @@ class ModelsScreen(QWidget):
             total_size += info.size_on_disk
         self._cache_size_label.setText(f"({format_size(total_size)})")
 
+    def _device(self) -> str:
+        """cuda once the background doctor run confirmed it, else cpu - read
+        from the shared probe so this screen never imports torch to find out."""
+        return "cuda" if self._probe is not None and self._probe.cuda_available else "cpu"
+
     def _warm_asr(self, model: str) -> None:
-        device = "cuda" if doctor.check_cuda()[1] else "cpu"
+        device = self._device()
         self._run_action(
             f"Прогреваю «{model}»… (без индикатора прогресса — huggingface_hub не отдаёт колбэк, см. docstring warm_up_asr_model)",
             model_cache.warm_up_asr_model,
@@ -259,7 +264,7 @@ class ModelsScreen(QWidget):
         repo_id = self._custom_model_field.text().strip()
         if not repo_id:
             return
-        device = "cuda" if doctor.check_cuda()[1] else "cpu"
+        device = self._device()
         self._run_action(
             f"Прогреваю «{repo_id}»… (без индикатора прогресса)",
             model_cache.warm_up_asr_model,
