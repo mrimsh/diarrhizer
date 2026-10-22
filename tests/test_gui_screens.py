@@ -11,7 +11,7 @@ import pytest
 
 pytest.importorskip("PySide6", reason="GUI extra not installed")
 
-from PySide6.QtWidgets import QMessageBox, QPushButton  # noqa: E402
+from PySide6.QtWidgets import QDialog, QMessageBox, QPushButton  # noqa: E402
 
 from diarrhizer.audio_formats import ENV_AUDIO_FORMATS_FILE  # noqa: E402
 from diarrhizer_gui import settings_keys  # noqa: E402
@@ -217,16 +217,20 @@ def _restart_button(screen) -> QPushButton:
     return next(b for b in actions.findChildren(QPushButton) if b.text() == "Перезапустить этап")
 
 
-def _answer(monkeypatch, answer):
-    """Stand in for the confirmation dialog; the texts it was asked are returned."""
-    asked = []
+def _answer(monkeypatch, answer=QDialog.DialogCode.Accepted, edit=None):
+    """Stand in for the restart dialog's event loop: `edit(dialog)` plays the
+    user changing settings, `answer` is how it is closed. The dialogs it was
+    asked to show are returned."""
+    shown = []
 
-    def question(_parent, _title, text, *_args):
-        asked.append(text)
+    def exec_(dialog):
+        shown.append(dialog)
+        if edit is not None:
+            edit(dialog)
         return answer
 
-    monkeypatch.setattr(QMessageBox, "question", question)
-    return asked
+    monkeypatch.setattr(history_screen.RestartDialog, "exec", exec_)
+    return shown
 
 
 def _warnings(monkeypatch):
@@ -267,7 +271,7 @@ def test_history_restart_emits_a_forced_run_of_the_stage(qapp, isolated, tmp_pat
     out = tmp_path / "out"
     job_dir = _complete_job(out)
     isolated().setValue(settings_keys.OUT_DIR, str(out))
-    asked = _answer(monkeypatch, QMessageBox.StandardButton.Yes)
+    shown_dialogs = _answer(monkeypatch)
 
     screen = history_screen.HistoryScreen()
     received = []
@@ -279,7 +283,83 @@ def test_history_restart_emits_a_forced_run_of_the_stage(qapp, isolated, tmp_pat
     assert (run.kwargs["from_stage"], run.kwargs["force_stage"]) == ("merge", "merge")
     assert run.job_dir == job_dir
     assert "объединение" in run.label
-    assert "объединение, экспорт" in asked[0]
+    assert "объединение, экспорт" in shown_dialogs[0].intro_text
+
+
+def test_history_restart_runs_with_the_settings_changed_in_the_dialog(qapp, isolated, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    _complete_job(out)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+
+    def edit(dialog):
+        dialog.field("asr_model").setCurrentText("tiny")
+        dialog.field("language").setCurrentText("en")
+
+    shown_dialogs = _answer(monkeypatch, edit=edit)
+
+    screen = history_screen.HistoryScreen()
+    received = []
+    screen.runs_requested.connect(received.append)
+    screen._restart(screen._jobs[0], "transcribe")
+
+    (run,) = received[0]
+    assert (run.kwargs["asr_model"], run.kwargs["language"]) == ("tiny", "en")
+    assert run.kwargs["force_stage"] == "transcribe"
+    # What the job was recorded with is the starting point for everything else.
+    assert (run.kwargs["min_speakers"], run.kwargs["max_speakers"]) == (2, 2)
+    # Only the stages being recomputed are offered: no speaker range for transcription.
+    assert shown_dialogs[0].field("min_speakers") is None
+    assert shown_dialogs[0].field("asr_model") is not None
+
+
+def test_history_restart_without_changes_keeps_the_recorded_settings(qapp, isolated, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    _complete_job(out)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    _answer(monkeypatch)
+
+    screen = history_screen.HistoryScreen()
+    received = []
+    screen.runs_requested.connect(received.append)
+    screen._restart(screen._jobs[0], "transcribe")
+
+    (run,) = received[0]
+    assert run.kwargs["language"] == "ru"  # the recorded value, as the job had it
+    assert "asr_model" not in run.kwargs  # not recorded: run_pipeline's own default applies
+
+
+def test_history_restart_of_export_offers_no_settings(qapp, isolated, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    _complete_job(out)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    shown_dialogs = _answer(monkeypatch)
+
+    screen = history_screen.HistoryScreen()
+    screen._restart(screen._jobs[0], "export")
+
+    assert shown_dialogs[0].overrides() == {}
+    assert all(shown_dialogs[0].field(key) is None for key in ("asr_model", "min_turn_duration", "device"))
+
+
+def test_history_restart_of_diarization_offers_the_speaker_range_and_merge_setting(
+    qapp, isolated, tmp_path, monkeypatch
+):
+    out = tmp_path / "out"
+    _complete_job(out)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    shown_dialogs = _answer(monkeypatch, edit=lambda dialog: dialog.field("max_speakers").setValue(4))
+
+    screen = history_screen.HistoryScreen()
+    received = []
+    screen.runs_requested.connect(received.append)
+    screen._restart(screen._jobs[0], "diarize")
+
+    dialog = shown_dialogs[0]
+    assert all(dialog.field(key) is not None for key in ("min_speakers", "device", "min_turn_duration"))
+    assert dialog.field("asr_model") is None
+    (run,) = received[0]
+    assert (run.kwargs["min_speakers"], run.kwargs["max_speakers"]) == (2, 4)
 
 
 def test_history_restart_does_nothing_when_declined(qapp, isolated, tmp_path, monkeypatch):
@@ -288,7 +368,7 @@ def test_history_restart_does_nothing_when_declined(qapp, isolated, tmp_path, mo
     _write(job_dir / "speakers.json", {"Speaker_00": "Иван"})
     isolated().setValue(settings_keys.OUT_DIR, str(out))
     monkeypatch.setenv("HF_TOKEN", "hf_test")
-    _answer(monkeypatch, QMessageBox.StandardButton.No)
+    _answer(monkeypatch, QDialog.DialogCode.Rejected)
 
     screen = history_screen.HistoryScreen()
     received = []
@@ -305,7 +385,7 @@ def test_history_restart_of_diarization_sets_the_old_names_aside(qapp, isolated,
     _write(job_dir / "speakers.json", {"Speaker_00": "Иван"})
     isolated().setValue(settings_keys.OUT_DIR, str(out))
     monkeypatch.setenv("HF_TOKEN", "hf_test")
-    asked = _answer(monkeypatch, QMessageBox.StandardButton.Yes)
+    shown_dialogs = _answer(monkeypatch)
 
     screen = history_screen.HistoryScreen()
     received = []
@@ -316,7 +396,7 @@ def test_history_restart_of_diarization_sets_the_old_names_aside(qapp, isolated,
     assert runs[0].kwargs["speakers"] is None
     assert not (job_dir / "speakers.json").exists()
     assert (job_dir / "speakers.before-rediarize.json").exists()
-    assert "Имена спикеров будут сброшены" in asked[0]
+    assert "Имена спикеров будут сброшены" in shown_dialogs[0].intro_text
 
 
 def test_history_restart_that_redoes_diarization_needs_an_hf_token(qapp, isolated, tmp_path, monkeypatch):
@@ -328,7 +408,7 @@ def test_history_restart_that_redoes_diarization_needs_an_hf_token(qapp, isolate
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HUGGINGFACE_HUB_TOKEN", raising=False)
     shown = _warnings(monkeypatch)
-    _answer(monkeypatch, QMessageBox.StandardButton.Yes)
+    _answer(monkeypatch)
 
     screen = history_screen.HistoryScreen()
     received = []
@@ -352,7 +432,7 @@ def test_history_restart_of_convert_needs_the_source_file(qapp, isolated, tmp_pa
     isolated().setValue(settings_keys.OUT_DIR, str(out))
     monkeypatch.setenv("HF_TOKEN", "hf_test")
     shown = _warnings(monkeypatch)
-    _answer(monkeypatch, QMessageBox.StandardButton.Yes)
+    _answer(monkeypatch)
 
     screen = history_screen.HistoryScreen()
     received = []

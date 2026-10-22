@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 #   and with it transcribe/diarize's cache - survives; a new source file, profile change or force rewrites it.
 #   Stale audio files from an earlier format/profile are deleted only after the new ones were written.
 #   meta/run.json's pipeline_config records the whole job config (ASR params incl. the initial prompt,
-#   min_turn_duration, the stage list), so the GUI can list the job and resume it with the same settings.
+#   min_turn_duration, the stage list), so the GUI can list the job and resume it with the same settings
+#   (the runner refreshes the keys of later stages that ran with other settings - PIPELINE:RUNNER).
 # @inputs: job.input_path, config.audio_profile, config.audio_format
 # @outputs: artifacts/audio/normalized.wav, meta/run.json, optional artifacts/audio/archive.<ext>, and for
 #   split-stereo also artifacts/audio/normalized_left.wav / normalized_right.wav (+ archive_left/right.<ext>)

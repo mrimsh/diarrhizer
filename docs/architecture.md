@@ -119,7 +119,9 @@ out/
     meta/                 # metadata (config, versions, timestamps, ASR params)
       run.json            # written by convert; records the original input_path and the job's
                           # full settings (pipeline_config: ASR params incl. the initial prompt,
-                          # speaker range, min_turn_duration, audio profile/format, stage list)
+                          # speaker range, min_turn_duration, audio profile/format, stage list);
+                          # a later stage that runs with other settings (--from-stage, GUI "restart
+                          # stage") updates its own keys (runner.STAGE_SETTINGS) after it ran
     speakers.json         # GUI only: speaker names {Speaker_XX: name}
     audio/
       normalized.wav      # always written, regardless of audio_profile; deleted after the job
@@ -146,7 +148,7 @@ out/
 - filename + timestamp, or
 - hash (input + config) — if reproducibility/deduplication is important.
 
-`meta/run.json`'s recorded `input_path` is also what `run --job-dir <dir>` reads to make the `input` argument optional when resuming a job (see [Section 8](#8-cli-commands)). The GUI's "Продолжить" and "Перезапустить этап" (History) and "Пересчитать спикеров" (Result) rebuild the whole run from `pipeline_config` (`diarrhizer_gui/job_scan.py`, `GUI:JOB_PLANS`). Restarting a stage is `--job-dir` + `--from-stage X` + `--force-stage X`: the stage's own outputs are dropped, and the stages that consumed them (convert → transcribe, diarize; transcribe, diarize → merge; merge → export) recompute through the mtime-based cache.
+`meta/run.json`'s recorded `input_path` is also what `run --job-dir <dir>` reads to make the `input` argument optional when resuming a job (see [Section 8](#8-cli-commands)). The GUI's "Продолжить" and "Перезапустить этап" (History) and "Пересчитать спикеров" (Result) rebuild the whole run from `pipeline_config` (`diarrhizer_gui/job_scan.py`, `GUI:JOB_PLANS`). Restarting a stage is `--job-dir` + `--from-stage X` + `--force-stage X`: the stage's own outputs are dropped, and the stages that consumed them (convert → transcribe, diarize; transcribe, diarize → merge; merge → export) recompute through the mtime-based cache. The History dialog (`GUI:RESTART_DIALOG`) may change the settings of exactly those recomputed stages (`runner.STAGE_SETTINGS`, filtered by `job_scan.restart_settings`); `restart_plan(..., overrides)` rejects any other setting.
 
 Job folders are named `<input stem>_<YYYYMMDD_HHMMSS>`; callers that start several jobs in a row (GUI queue, CLI batch) use `runner.new_job_dir()`, which appends `_2`, `_3`, … rather than reuse an existing folder.
 
@@ -508,5 +510,5 @@ src/diarrhizer_gui/
 ├── child_tasks.py          # Child entry points (pipeline, doctor) - Qt-free
 ├── environment.py          # Background doctor checks shared by the screens
 ├── job_scan.py             # History scan, resume / restart-stage / re-diarize plans
-└── screens/                # New Job, Monitor, History, Result, Models, Doctor, Settings
+└── screens/                # New Job, Monitor, History (+ restart_dialog), Result, Models, Doctor, Settings
 ```

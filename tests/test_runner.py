@@ -418,3 +418,84 @@ def test_force_stage_outside_range_has_no_effect(fixed_job):
 
     assert _statuses(result2) == {"merge": "skipped", "export": "cached"}
     assert segments_path.stat().st_mtime == mtime_before
+
+
+# --- recording the settings a stage ran with -----------------------------------------
+
+
+def _write_meta(job_dir: Path, pipeline_config: dict | None = None) -> Path:
+    meta = {"input_path": "x.wav"}
+    if pipeline_config is not None:
+        meta["pipeline_config"] = pipeline_config
+    meta_path = job_dir / "meta" / "run.json"
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    return meta_path
+
+
+def _recorded_meta(job_dir: Path) -> dict:
+    return json.loads((job_dir / "meta" / "run.json").read_text(encoding="utf-8"))
+
+
+def test_a_stage_that_ran_with_other_settings_updates_the_record(fixed_job):
+    input_file, out_dir, job_dir = fixed_job
+    _write_meta(job_dir, {"min_turn_duration": 0.4, "asr_model": "small"})
+
+    _run(input_file, out_dir, min_turn_duration=0.9)
+
+    meta = _recorded_meta(job_dir)
+    assert meta["pipeline_config"] == {"min_turn_duration": 0.9, "asr_model": "small"}
+    assert meta["input_path"] == "x.wav"
+
+
+def test_skipped_and_cached_stages_leave_the_record_alone(fixed_job):
+    input_file, out_dir, job_dir = fixed_job
+    _run(input_file, out_dir)  # merge and export exist now
+    meta_path = _write_meta(job_dir, {"min_turn_duration": 0.4})
+    written = meta_path.stat().st_mtime_ns
+
+    # Merge is outside the range: it did not run, so what it ran with is not news.
+    _run(input_file, out_dir, min_turn_duration=0.9, from_stage="export")
+    assert _recorded_meta(job_dir)["pipeline_config"]["min_turn_duration"] == 0.4
+
+    # Everything cached: nothing ran, nothing is rewritten.
+    result = _run(input_file, out_dir)
+    assert _statuses(result) == {"merge": "cached", "export": "cached"}
+    assert meta_path.stat().st_mtime_ns == written
+
+
+def test_jobs_without_a_recorded_config_are_not_given_one(fixed_job):
+    input_file, out_dir, job_dir = fixed_job
+    _run(input_file, out_dir)
+    assert not (job_dir / "meta" / "run.json").exists()
+
+    _write_meta(job_dir)  # run.json from before pipeline_config existed
+    _run(input_file, out_dir, min_turn_duration=0.9)
+    assert "pipeline_config" not in _recorded_meta(job_dir)
+
+
+def test_each_stage_records_only_its_own_settings(tmp_path):
+    from diarrhizer.pipeline.runner import PipelineConfig, _record_stage_settings
+
+    job_dir = tmp_path / "job"
+    original = {"asr_model": "small", "device": "cuda", "min_speakers": 1, "max_speakers": 4, "language": "ru"}
+    _write_meta(job_dir, dict(original))
+    config = PipelineConfig(
+        job_id="job", input_file="x.wav", asr_model="tiny", device="cpu", min_speakers=2, max_speakers=2,
+        language="en",
+    )
+
+    _record_stage_settings(job_dir, "diarize", config)
+    assert _recorded_meta(job_dir)["pipeline_config"] == {
+        **original, "device": "cpu", "min_speakers": 2, "max_speakers": 2,
+    }
+
+    _record_stage_settings(job_dir, "transcribe", config)
+    recorded = _recorded_meta(job_dir)["pipeline_config"]
+    assert (recorded["asr_model"], recorded["language"]) == ("tiny", "en")
+
+    # Convert writes its whole record itself; export and unknown stages own no settings.
+    before = _recorded_meta(job_dir)
+    for stage in ("convert", "export", "something-else"):
+        _record_stage_settings(job_dir, stage, PipelineConfig(job_id="job", input_file="x.wav", asr_model="base"))
+    assert _recorded_meta(job_dir) == before

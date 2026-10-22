@@ -21,6 +21,7 @@ from typing import Optional
 
 from diarrhizer.audio_formats import AudioFormat, find_job_audio
 from diarrhizer.export.speakers import normalize_speaker_id
+from diarrhizer.pipeline.runner import STAGE_SETTINGS
 
 # (stage name, artifact path relative to job_dir) - mirrors the layout
 # documented in docs/architecture.md, not the stage classes themselves.
@@ -161,6 +162,18 @@ def restart_stages(mode: str, stage: str) -> list:
         if name in rebuilt:
             rebuilt.update(STAGE_DEPENDENTS[name])
     return [name for name in order if name in rebuilt]
+
+
+def restart_settings(mode: str, stage: str) -> list:
+    """run_pipeline() settings a restart of `stage` may change: those of every
+    stage it recomputes (STAGE_SETTINGS), so a new ASR model can be chosen
+    when restarting conversion but not when restarting export."""
+    names = []
+    for name in restart_stages(mode, stage):
+        for key in STAGE_SETTINGS[name]:
+            if key not in names:
+                names.append(key)
+    return names
 
 
 def restart_drops_speaker_names(mode: str, stage: str) -> bool:
@@ -321,16 +334,18 @@ def _recorded_run_kwargs(job_dir: Path, meta: dict) -> dict:
 #   transcript; it also adds speakers to a "recognition only" job. restart_plan() recomputes one chosen
 #   stage (from_stage + force_stage, so its old output is dropped) and, through the mtime cache, every
 #   stage built on it (STAGE_DEPENDENTS; restart_stages() lists them for the confirmation text). It is
-#   offered only while every earlier stage has its output (restartable_stages). Saved speaker names
+#   offered only while every earlier stage has its output (restartable_stages). Its `overrides` change
+#   the recorded settings for that run (restart_settings: the settings of the stages being recomputed;
+#   anything else raises ValueError); the runner then records them in meta/run.json. Saved speaker names
 #   follow the speaker ids: they are passed on to the export when diarization is not redone, and
 #   dropped (speakers=None; the caller moves speakers.json aside with set_aside_speaker_names) when
 #   it is. All plans reuse the recorded settings (RECORDED_RUN_KEYS, the full audio format) so the job
 #   behaves like the original run.
-# @inputs: job_dir (meta/run.json, artifacts present on disk, speakers.json), stage for restart_plan
+# @inputs: job_dir (meta/run.json, artifacts present on disk, speakers.json), stage and overrides for restart_plan
 # @outputs: (mode, kwargs) for PipelineWorker, or None when there is nothing to do
 # @sideEffects: Reads job files only (set_aside_speaker_names is the one separate writer)
-# @errors: None (unreadable files count as missing)
-# @see: PIPELINE:RUNNER, STAGE:CONVERT, GUI:PIPELINE_WORKER
+# @errors: ValueError for restart overrides outside the restarted stages' settings (unreadable files count as missing)
+# @see: PIPELINE:RUNNER, CONFIG:PIPELINE, STAGE:CONVERT, GUI:PIPELINE_WORKER, GUI:RESTART_DIALOG
 def resume_plan(job_dir: Path) -> Optional[tuple]:
     """(mode, kwargs) that finish an interrupted job, or None if it is
     complete or never got past convert (nothing recorded to resume from)."""
@@ -365,17 +380,27 @@ def rediarize_plan(job_dir: Path, min_speakers: int, max_speakers: int) -> Optio
     return "full", kwargs
 
 
-def restart_plan(job_dir: Path, stage: str) -> Optional[tuple]:
+def restart_plan(job_dir: Path, stage: str, overrides: Optional[dict] = None) -> Optional[tuple]:
     """(mode, kwargs) that recompute `stage` and the stages built on it, or
     None if the job cannot do that: no recorded source, a stage its mode does
-    not have, or an earlier stage whose output is missing."""
+    not have, or an earlier stage whose output is missing.
+
+    `overrides` replace recorded settings for this run; only settings of the
+    recomputed stages (restart_settings) are accepted - anything else would
+    quietly not apply, or leave the stages that are kept inconsistent with it.
+    """
     meta = _read_meta(job_dir)
     if not meta.get("input_path"):
         return None
     mode = job_mode(meta)
     if stage not in _restartable(mode, stage_done(job_dir)):
         return None
+    overrides = overrides or {}
+    not_allowed = sorted(set(overrides) - set(restart_settings(mode, stage)))
+    if not_allowed:
+        raise ValueError(f"Restarting {stage!r} cannot change: {', '.join(not_allowed)}")
     kwargs = _recorded_run_kwargs(job_dir, meta)
+    kwargs.update(overrides)
     kwargs.update(from_stage=stage, force_stage=stage)
     if restart_drops_speaker_names(mode, stage):
         kwargs["speakers"] = None

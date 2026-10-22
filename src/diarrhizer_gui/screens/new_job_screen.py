@@ -124,6 +124,16 @@ def load_audio_format_store() -> tuple[AudioFormatStore, str]:
         return AudioFormatStore(path=store_path()), f"Профили аудио не загружены: {e}"
 
 
+def available_asr_models(settings: QSettings) -> list:
+    """Presets, models added on the Models screen and ones found in the HF
+    cache - what every model dropdown offers."""
+    return custom_models.asr_model_choices(
+        settings,
+        ASR_MODELS,
+        custom_models.detect_cached_asr_models(model_cache.list_cached_models(), ASR_MODELS),
+    )
+
+
 def plural(count: int, one: str, few: str, many: str) -> str:
     """Russian plural form: 1 файл, 2 файла, 5 файлов."""
     if count % 10 == 1 and count % 100 != 11:
@@ -543,13 +553,7 @@ class NewJobScreen(QWidget):
         """Rebuild the model dropdown from presets + models added on the Models
         screen, so a model warmed up mid-session shows up without a restart.
         """
-        choices = custom_models.asr_model_choices(
-            self._settings,
-            ASR_MODELS,
-            custom_models.detect_cached_asr_models(
-                model_cache.list_cached_models(), ASR_MODELS
-            ),
-        )
+        choices = available_asr_models(self._settings)
         if [self._model_combo.itemText(i) for i in range(self._model_combo.count())] == choices:
             return
         # clear() wipes the edit line too, so restore whatever was typed there.

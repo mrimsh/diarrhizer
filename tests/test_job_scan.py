@@ -10,15 +10,19 @@ import time
 from pathlib import Path
 
 from diarrhizer.audio_formats import AudioFormat
-from diarrhizer.pipeline.runner import run_pipeline
+import pytest
+
+from diarrhizer.pipeline.runner import STAGE_SETTINGS, run_pipeline
 from diarrhizer.pipeline.stages.export import ExportStage
 from diarrhizer.pipeline.stages.merge import MergeStage
 from diarrhizer_gui.job_scan import (
+    RECORDED_RUN_KEYS,
     SPEAKERS_SET_ASIDE,
     _parse_job_date,
     read_speaker_names,
     rediarize_plan,
     restart_plan,
+    restart_settings,
     restart_stages,
     restartable_stages,
     resume_plan,
@@ -240,9 +244,9 @@ def test_speaker_names_are_read_and_set_aside(tmp_path):
     assert read_speaker_names(tmp_path) == {}
 
 
-def test_restarted_merge_rebuilds_the_export_and_keeps_the_names(tmp_path):
-    """The plan fed to the real runner: merge is forced, export follows from the
-    newer segments.json, and the saved name still reaches result.md."""
+def _finished_merge_job(tmp_path: Path) -> tuple:
+    """A job whose merge and export really ran (the two pure-Python stages), with
+    a saved speaker name, and whose files are all clearly older than "now"."""
     job_dir = _job(tmp_path, stages_done=ALL_STAGES)
     _write(job_dir / "asr" / "transcript.json", {"segments": [{"start": 0, "end": 1, "text": "Привет"}], "words": []})
     _write(job_dir / "diar" / "diarization.json", {"segments": [{"start": 0, "end": 1, "speaker": "Speaker_00"}]})
@@ -254,12 +258,89 @@ def test_restarted_merge_rebuilds_the_export_and_keeps_the_names(tmp_path):
     for path in job_dir.rglob("*.*"):
         if path.is_file() and path.parent.name != "meta":
             os.utime(path, (long_ago, long_ago))
+    return job_dir, stages
+
+
+def test_restarted_merge_rebuilds_the_export_and_keeps_the_names(tmp_path):
+    """The plan fed to the real runner: merge is forced, export follows from the
+    newer segments.json, and the saved name still reaches result.md."""
+    job_dir, stages = _finished_merge_job(tmp_path)
 
     _, kwargs = restart_plan(job_dir, "merge")
     result = run_pipeline(stages=stages, **kwargs)
 
     assert {s["stage"]: s["status"] for s in result["stages"]} == {"merge": "completed", "export": "completed"}
     assert "Иван" in (job_dir / "export" / "result.md").read_text(encoding="utf-8")
+
+
+def test_restart_settings_are_those_of_the_recomputed_stages():
+    assert restart_settings("full", "export") == []
+    assert restart_settings("full", "merge") == ["min_turn_duration"]
+    assert restart_settings("full", "diarize") == ["device", "min_speakers", "max_speakers", "min_turn_duration"]
+    transcribe = restart_settings("full", "transcribe")
+    assert "asr_model" in transcribe and "min_turn_duration" in transcribe
+    assert "min_speakers" not in transcribe and "audio_profile" not in transcribe
+    assert transcribe.count("device") == 1
+    assert "asr_model" in restart_settings("asr_only", "convert")
+    assert "min_speakers" not in restart_settings("asr_only", "convert")
+    convert = restart_settings("full", "convert")
+    assert {"audio_profile", "audio_format", "language", "min_speakers", "min_turn_duration"} <= set(convert)
+
+
+def test_every_recorded_setting_belongs_to_a_stage():
+    # Plans read the audio format back from the full format convert records, not from
+    # RECORDED_RUN_KEYS; every other recorded key must be some stage's setting (and vice versa).
+    offered = {key for keys in STAGE_SETTINGS.values() for key in keys}
+    assert set(RECORDED_RUN_KEYS) | {"audio_format"} == offered
+
+
+def test_restart_overrides_replace_the_recorded_settings(tmp_path):
+    job_dir = _job(tmp_path, stages_done=ALL_STAGES)
+
+    _, kwargs = restart_plan(job_dir, "transcribe", {"asr_model": "tiny", "asr_initial_prompt": None})
+
+    assert kwargs["asr_model"] == "tiny"
+    assert kwargs["asr_initial_prompt"] is None  # cleared, not "keep the recorded prompt"
+    assert kwargs["language"] == "ru"  # the rest stays as recorded
+    assert kwargs["force_stage"] == "transcribe"
+
+
+@pytest.mark.parametrize(
+    "stage, setting",
+    [
+        ("transcribe", "min_speakers"),  # diarization is not recomputed: the change would not apply
+        ("export", "language"),
+        ("merge", "asr_model"),
+        ("diarize", "asr_model"),
+        ("convert", "force_stage"),  # not a setting at all
+    ],
+)
+def test_restart_refuses_settings_of_stages_it_does_not_recompute(tmp_path, stage, setting):
+    job_dir = _job(tmp_path, stages_done=ALL_STAGES)
+    with pytest.raises(ValueError, match=setting):
+        restart_plan(job_dir, stage, {setting: 1})
+
+
+def test_restart_with_changed_settings_is_recorded_in_the_job(tmp_path):
+    """The run itself updates meta/run.json, so History and the next restart see
+    the settings the merge was really made with."""
+    job_dir, stages = _finished_merge_job(tmp_path)
+    assert json.loads((job_dir / "meta" / "run.json").read_text(encoding="utf-8"))["pipeline_config"][
+        "asr_model"
+    ] == "small"
+
+    _, kwargs = restart_plan(job_dir, "merge", {"min_turn_duration": 0.9})
+    run_pipeline(stages=stages, **kwargs)
+
+    recorded = json.loads((job_dir / "meta" / "run.json").read_text(encoding="utf-8"))["pipeline_config"]
+    assert recorded["min_turn_duration"] == 0.9
+    assert recorded["asr_model"] == "small"  # not a merge setting: untouched
+    assert json.loads((job_dir / "merged" / "segments.json").read_text(encoding="utf-8"))["metadata"][
+        "min_turn_duration"
+    ] == 0.9
+    # ... and the next plan starts from it.
+    _, again = restart_plan(job_dir, "export")
+    assert again["min_turn_duration"] == 0.9
 
 
 def test_job_date_parses_with_a_clash_suffix(tmp_path):

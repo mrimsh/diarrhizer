@@ -126,7 +126,7 @@ class MainWindow(QMainWindow):
         self._monitor.view_result_requested.connect(self._show_result)
         self._monitor.cancel_requested.connect(self._on_cancel_requested)
 
-        self._history = HistoryScreen(is_busy=self._is_job_busy)
+        self._history = HistoryScreen(is_busy=self._is_job_busy, probe=self._probe)
         self._history.view_result_requested.connect(self._show_result)
         self._history.runs_requested.connect(self.enqueue)
 

@@ -4,8 +4,9 @@ Pure filesystem read via job_scan.py. An unfinished job (e.g. stopped by the
 user, or failed at diarization for want of an HF token) gets a "Продолжить"
 button that resumes it from the first missing stage with its recorded
 settings (GUI:JOB_PLANS) - the work already done is not repeated. Any job gets
-a "Перезапустить этап" menu: the chosen stage is recomputed from scratch with
-the recorded settings, and so are the stages built on it.
+a "Перезапустить этап" menu: the chosen stage is recomputed from scratch, and
+so are the stages built on it, with the recorded settings - which a dialog
+(GUI:RESTART_DIALOG) lets the user change first.
 """
 
 import os
@@ -15,6 +16,7 @@ from typing import Callable, Optional
 from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -39,6 +41,7 @@ from diarrhizer_gui.job_scan import (
     read_speaker_names,
     restart_drops_speaker_names,
     restart_plan,
+    restart_settings,
     restart_stages,
     restartable_stages,
     resume_plan,
@@ -47,6 +50,7 @@ from diarrhizer_gui.job_scan import (
     stages_for_mode,
 )
 from diarrhizer_gui.screens.new_job_screen import hf_token_present
+from diarrhizer_gui.screens.restart_dialog import RestartDialog
 
 STAGE_LABELS = [name[0].upper() for name, _ in STAGE_ARTIFACTS]  # C T D M E
 STAGE_TITLES = {
@@ -169,10 +173,11 @@ class HistoryScreen(QWidget):
     view_result_requested = Signal(Path)
     runs_requested = Signal(list)  # [QueuedRun]
 
-    def __init__(self, is_busy: Optional[Callable[[Path], bool]] = None) -> None:
+    def __init__(self, is_busy: Optional[Callable[[Path], bool]] = None, probe=None) -> None:
         super().__init__()
         self._settings = QSettings("Diarrhizer", "DiarrhizerGUI")
         self._is_busy = is_busy or (lambda job_dir: False)
+        self._probe = probe  # EnvironmentProbe: restart settings disable cuda when it is unavailable
         self._jobs: list = []
 
         title = QLabel("История заданий")
@@ -346,25 +351,28 @@ class HistoryScreen(QWidget):
             return
 
         drops_names = restart_drops_speaker_names(mode, stage)
-        text = (
+        intro = (
             f"Перезапустить этап «{STAGE_TITLES[stage]}» задания «{job.input_name}» ({job.date_label})?\n\n"
             f"Заново выполнятся: {', '.join(STAGE_TITLES[name] for name in rebuilt)}. "
-            "Прежние результаты этих этапов будут удалены, настройки возьмутся из задания."
+            "Прежние результаты этих этапов будут удалены."
         )
         if drops_names and read_speaker_names(job.job_dir):
-            text += (
+            intro += (
                 "\n\nИмена спикеров будут сброшены: новая диаризация нумерует спикеров заново "
                 f"(прежние имена сохранятся в {SPEAKERS_SET_ASIDE})."
             )
-        answer = QMessageBox.question(
-            self,
-            title,
-            text,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+        dialog = RestartDialog(
+            self, intro, restart_settings(mode, stage), kwargs, self._settings, self._probe
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        # Planned again with the user's changes (restart_plan checks them against the stage).
+        plan = restart_plan(job.job_dir, stage, dialog.overrides())
+        if plan is None:
+            QMessageBox.information(self, title, "Задание изменилось: этот этап больше нельзя перезапустить.")
+            self.refresh()
+            return
+        mode, kwargs = plan
         if drops_names:
             set_aside_speaker_names(job.job_dir)
         label = f"{job.input_name} (перезапуск этапа «{STAGE_TITLES[stage]}»)"

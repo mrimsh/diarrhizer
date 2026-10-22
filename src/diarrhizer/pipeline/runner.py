@@ -12,6 +12,7 @@ from typing import Protocol, Sequence
 # without dragging torch/whisperx into every runner import.
 from diarrhizer.pipeline.stages.merge import DEFAULT_MIN_TURN_DURATION
 from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat, resolve_audio_format
+from diarrhizer.utils import read_json, write_json_atomic
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -32,11 +33,15 @@ logger = logging.getLogger(__name__)
 #   that will have to run but cannot - diarization without an HF token - fails in seconds, not after
 #   the transcription). new_job_dir() picks a not-yet-existing folder for callers that start several
 #   jobs in a row (GUI queue, CLI batch) and pass it as job_dir. The stage names a run was given are
-#   carried as PipelineConfig.stages (convert records them for resuming).
+#   carried as PipelineConfig.stages (convert records them for resuming). Convert records the whole job
+#   config in meta/run.json; every later stage that actually ran (not cached, not skipped) then
+#   updates its own STAGE_SETTINGS keys there, so a stage re-run with other settings (GUI "restart
+#   stage", CLI --job-dir --from-stage) leaves the record true to what produced the artifacts.
 # @inputs: input_path, config, out_dir, stages, job_dir, force, force_stage, from_stage, to_stage, audio_format
 # @outputs: Artifacts on disk per stage definitions
 # @sideEffects: Creates job directory, writes artifacts to disk, deletes artifacts when force is used,
 #   finalize hooks may delete intermediate artifacts, reads audio_formats.json for non-built-in format names,
+#   rewrites pipeline_config in meta/run.json after a non-convert stage ran with other settings,
 #   logs pipeline/stage progress via logging (INFO; per-stage lines carry extra={"stage": <name>})
 # @errors: RuntimeError, FileNotFoundError, ValueError
 # @see: STAGE:CONVERT, STAGE:TRANSCRIBE, ARTIFACTS:LAYOUT, PIPELINE:CACHE, CONFIG:PIPELINE
@@ -68,6 +73,7 @@ class StageProtocol(Protocol):
 #   Field defaults here are canonical; run_pipeline()'s own parameter defaults reference
 #   these fields directly (same module, so they can never drift). cli.py's argparse
 #   defaults are a separate, intentionally-synced literal set - see the comment there.
+#   STAGE_SETTINGS next to it names, per stage, the settings that stage's output depends on.
 # @inputs: (none - constructed by run_pipeline from its own parameters)
 # @outputs: PipelineConfig instance, carried as JobContext.config
 # @sideEffects: None (plain dataclass)
@@ -135,6 +141,32 @@ class PipelineConfig:
     audio_format: AudioFormat = WAV_FORMAT
     min_turn_duration: float = DEFAULT_MIN_TURN_DURATION
     stages: tuple[str, ...] = ()
+
+
+# run_pipeline() settings each stage's output depends on, by stage name: what a
+# stage re-run with other settings may change (the GUI offers exactly these
+# when restarting a stage), and what the runner records in meta/run.json after
+# the stage ran. Names are run_pipeline() parameters and, except audio_format
+# (PipelineConfig holds the resolved AudioFormat, run.json records its name),
+# PipelineConfig fields. device is shared by the two GPU stages.
+STAGE_SETTINGS: dict[str, tuple[str, ...]] = {
+    "convert": ("audio_profile", "audio_format"),
+    "transcribe": (
+        "language",
+        "device",
+        "asr_model",
+        "asr_compute_type",
+        "asr_beam_size",
+        "asr_temperature",
+        "asr_condition_on_previous_text",
+        "asr_initial_prompt",
+        "asr_vad_filter",
+        "asr_vad_min_silence_ms",
+    ),
+    "diarize": ("device", "min_speakers", "max_speakers"),
+    "merge": ("min_turn_duration",),
+    "export": (),
+}
 # [SEMANTIC-END] CONFIG:PIPELINE
 
 
@@ -208,6 +240,34 @@ def _read_recorded_input_path(job_dir: Path) -> Path | None:
         return None
     recorded = data.get("input_path")
     return Path(recorded) if recorded else None
+
+
+def _record_stage_settings(job_dir: Path, stage_name: str, config: PipelineConfig) -> None:
+    """Bring pipeline_config in meta/run.json in line with a stage that just ran.
+
+    Convert writes the whole record itself. Any later stage that ran with
+    other settings than the record holds (re-run via --from-stage, or the
+    GUI's "restart stage") updates its own STAGE_SETTINGS keys, or History,
+    resuming and the exports' headers would keep describing the old run. A
+    job without a pipeline_config (from before it was recorded) is left alone.
+    """
+    keys = () if stage_name == "convert" else STAGE_SETTINGS.get(stage_name, ())
+    if not keys:
+        return
+    meta_path = job_dir / "meta" / "run.json"
+    data = read_json(meta_path)
+    recorded = data.get("pipeline_config") if isinstance(data, dict) else None
+    if not isinstance(recorded, dict):
+        return
+    current = {key: getattr(config, key) for key in keys}
+    if all(key in recorded and recorded[key] == value for key, value in current.items()):
+        return
+    recorded.update(current)
+    try:
+        write_json_atomic(meta_path, data)
+    except OSError as e:
+        # The stage's artifacts are already written; a stale record is not worth failing the job.
+        logger.warning(f"Could not update settings in {meta_path}: {e}")
 
 
 def run_pipeline(
@@ -507,6 +567,7 @@ def run_pipeline(
         except Exception as e:
             print(f"[{stage_name}] Error: {e}")
             raise
+        _record_stage_settings(job_dir, stage_name, config)
 
     # The job is complete only once the last stage ran (or was cached) - a
     # --to-stage run that stops early leaves intermediate files for later stages.
