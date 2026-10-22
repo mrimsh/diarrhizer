@@ -74,7 +74,7 @@ hear each one) and the exports are rewritten immediately.
 ## Requirements
 
 * Windows 10/11
-* Python 3.11+ (recommended for stable Torch stack on Windows)
+* Python **3.11 or 3.12** (3.12 recommended). **Not 3.13+**: the pinned WhisperX 3.3.1 declares `Requires-Python <3.13` and torch 2.3.1 has no wheels for newer Pythons, so `pip` fails with `No matching distribution found for whisperx==3.3.1`. Check `python --version` — a fresh Windows install often has 3.13 as the default
 * FFmpeg available in `PATH` (also important for decoding via torchcodec/pyannote on Windows)
 * `setuptools<81` — WhisperX 3.3.1 depends on `pkg_resources` at runtime; setuptools 81+ removed it. This is pinned automatically via `constraints-stable.txt`.
 * For diarization: Hugging Face token + acceptance of gated model terms
@@ -93,12 +93,17 @@ hear each one) and the exports are rewritten immediately.
 PowerShell:
 
 ```powershell
+py -0p                      # lists installed Pythons - you need a 3.12 (or 3.11) entry
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python --version            # must say 3.12.x (or 3.11.x), not 3.13
 python -m pip install -U pip
 ```
 
-Using `.venv` is the recommended way to isolate dependencies.
+Using `.venv` is the recommended way to isolate dependencies. If `py -0p` has no 3.12, install it first
+(`winget install Python.Python.3.12`), or let [uv](https://docs.astral.sh/uv/) fetch it:
+`uv venv --python 3.12 --seed .venv`. An old `.venv` created with another Python (or whose Python was
+uninstalled) must be deleted and recreated - a venv cannot be switched to another Python version.
 
 ---
 
@@ -209,7 +214,7 @@ python -m diarrhizer doctor
 
 The `doctor` command performs these diagnostic checks:
 
-1. **Python version** — verifies Python 3.11+
+1. **Python version** — verifies Python 3.11 or 3.12 (3.13+ cannot install the pinned WhisperX/torch)
 2. **FFmpeg** — checks availability in PATH (or `DIARRHIZER_FFMPEG_PATH`)
 3. **PyTorch/Torchaudio** — verifies installation and reports version
 4. **CUDA** — checks GPU availability

@@ -81,19 +81,26 @@ def run_doctor_checks() -> bool:
 
 
 def check_python_version() -> Tuple[str, bool, str]:
-    """Check Python version is 3.11+."""
+    """Check Python is 3.11 or 3.12.
+
+    3.13+ is rejected on purpose: whisperx 3.3.1 declares Requires-Python <3.13
+    and torch 2.3.1 has no wheels past 3.12, so the pinned stack cannot even be
+    installed there (pip fails with "No matching distribution found").
+    """
     version = sys.version_info
-    required_major = 3
-    required_minor = 11
-    
-    passed = version.major >= required_major and version.minor >= required_minor
     version_str = f"{version.major}.{version.minor}.{version.micro}"
-    
+    passed = (3, 11) <= (version.major, version.minor) < (3, 13)
+
     if passed:
         message = f"Python {version_str} (OK)"
+    elif (version.major, version.minor) < (3, 11):
+        message = f"Python {version_str} (need 3.11 or 3.12)"
     else:
-        message = f"Python {version_str} (need 3.11+)"
-    
+        message = (
+            f"Python {version_str} is too new: whisperx 3.3.1 and torch 2.3.1 support 3.11 and 3.12 only. "
+            "Recreate the virtual environment with Python 3.12 (see README, Installation)."
+        )
+
     return ("Python version", passed, message)
 
 

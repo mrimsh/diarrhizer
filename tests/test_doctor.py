@@ -79,6 +79,52 @@ def test_check_ffmpeg_reports_clear_error_for_invalid_env_var(tmp_path, monkeypa
     assert str(missing) in message
 
 
+# --- check_python_version -----------------------------------------------------
+
+
+def _python(monkeypatch, major, minor, micro=0):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(doctor.sys, "version_info", SimpleNamespace(major=major, minor=minor, micro=micro))
+
+
+@pytest.mark.parametrize("minor", [11, 12])
+def test_check_python_version_accepts_the_supported_pythons(monkeypatch, minor):
+    _python(monkeypatch, 3, minor, 4)
+    name, passed, message = doctor.check_python_version()
+    assert passed and f"3.{minor}.4" in message
+
+
+def test_check_python_version_rejects_one_that_is_too_old(monkeypatch):
+    _python(monkeypatch, 3, 10, 9)
+    name, passed, message = doctor.check_python_version()
+    assert not passed and "need 3.11 or 3.12" in message
+
+
+@pytest.mark.parametrize("minor", [13, 14])
+def test_check_python_version_rejects_one_too_new_for_the_pinned_stack(monkeypatch, minor):
+    """whisperx 3.3.1 has Requires-Python <3.13 and torch 2.3.1 no wheels past 3.12: pip cannot install
+    the stack there and only says "No matching distribution found" - doctor has to name the real cause.
+    """
+    _python(monkeypatch, 3, minor, 1)
+    name, passed, message = doctor.check_python_version()
+    assert not passed
+    assert "too new" in message and "Python 3.12" in message
+
+
+def test_a_wrong_python_is_a_blocking_failure():
+    assert doctor.is_blocking_failure("Python version", False)
+
+
+def test_pyproject_excludes_the_pythons_the_stack_cannot_install_on():
+    import re
+
+    from diarrhizer.env_file import REPO_ROOT
+
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert re.search(r'requires-python\s*=\s*">=3\.11,<3\.13"', text)
+
+
 # --- check_audio_formats ------------------------------------------------------
 
 

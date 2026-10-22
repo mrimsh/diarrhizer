@@ -324,7 +324,7 @@ Therefore, a `doctor` command is provided to verify these conditions before runn
 
 The [`doctor`](src/diarrhizer/diagnostics/doctor.py) command performs these checks:
 
-1. **Python version** — verifies Python 3.11+
+1. **Python version** — verifies Python 3.11 or 3.12 (whisperx 3.3.1 declares `Requires-Python <3.13`, torch 2.3.1 has no wheels past 3.12)
 2. **FFmpeg** — checks availability via `DIARRHIZER_FFMPEG_PATH` or PATH
 3. **PyTorch/Torchaudio** — verifies installation and reports version and CUDA status
 4. **CUDA** — checks GPU availability via `torch.cuda.is_available()`

@@ -16,6 +16,41 @@ This will verify Python version, FFmpeg, torch/torchaudio, CUDA, torchcodec, cri
 
 ---
 
+## `pip install` fails: `No matching distribution found for whisperx==3.3.1`
+
+**Symptom:**
+```
+ERROR: Cannot install whisperx==3.3.1 because these package versions have conflicting dependencies.
+Additionally, some packages in these conflicts have no matching distributions available for your environment:
+    whisperx
+ERROR: ResolutionImpossible
+```
+Running `pip install whisperx==3.3.1` on its own says more: `Ignored the following versions that require a
+different python version: 3.3.1 Requires-Python >=3.9,<3.13`.
+
+**Root Cause:** the virtual environment (or the global Python) is **Python 3.13 or newer**. WhisperX 3.3.1
+declares `Requires-Python <3.13`, and the pinned `torch==2.3.1` has no wheels past Python 3.12, so pip
+treats every pinned version as unavailable. Pip's message does not mention the Python version.
+`python -m diarrhizer doctor` reports it as well ("Python … is too new").
+
+**Fix:** use Python 3.12 (3.11 also works). A venv cannot be switched to another Python - recreate it:
+
+```powershell
+py -0p                                  # is there a 3.12 entry?
+deactivate                              # if a venv is active
+Remove-Item -Recurse -Force .venv
+py -3.12 -m venv .venv                  # or: uv venv --python 3.12 --seed .venv
+.\.venv\Scripts\Activate.ps1
+python --version                        # 3.12.x
+pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
+```
+
+No 3.12 installed: `winget install Python.Python.3.12`, then reopen the terminal. A `.venv` that fails
+with "No Python at '...\Python312\python.exe'" was made by a Python that has since been uninstalled -
+the same recreate step applies.
+
+---
+
 ## `pkg_resources` Missing (setuptools Compatibility)
 
 **Symptom:**

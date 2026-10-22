@@ -7,7 +7,8 @@ name = "diarrhizer"
 version = "0.1.0"
 description = "Local Windows tool for processing call recordings"
 readme = "README.md"
-requires-python = ">=3.11"
+# <3.13: whisperx 3.3.1 declares Requires-Python <3.13 and torch 2.3.1 has no wheels for newer Pythons.
+requires-python = ">=3.11,<3.13"
 license = {text = "MIT"}
 authors = [
     {name = "Diarrhizer Team"}
