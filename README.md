@@ -105,6 +105,12 @@ Using `.venv` is the recommended way to isolate dependencies. If `py -0p` has no
 `uv venv --python 3.12 --seed .venv`. An old `.venv` created with another Python (or whose Python was
 uninstalled) must be deleted and recreated - a venv cannot be switched to another Python version.
 
+> **Always call pip as `python -m pip`.** A bare `pip` is whichever `pip.exe` comes first on `PATH`;
+> a venv made without pip (e.g. `uv venv` without `--seed`) silently falls through to the global
+> Python's pip - which may be 3.13 and then fails with `No matching distribution found for
+> whisperx==3.3.1` although `python --version` in the venv says 3.12. `python -m pip --version`
+> must print a path inside your venv.
+
 ---
 
 ### 2) Install dependencies
@@ -114,15 +120,15 @@ uninstalled) must be deleted and recreated - a venv cannot be switched to anothe
 **CPU option (simpler, recommended first):**
 
 ```powershell
-pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
-pip install -e .[gui]
+python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
+python -m pip install -e .[gui]
 ```
 
 **CUDA option (NVIDIA GPU, CUDA 12.1 cuDNN 8 — stable supported path):**
 
 ```powershell
-pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
-pip install -e .[gui]
+python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
+python -m pip install -e .[gui]
 ```
 
 (`[gui]` adds PySide6 for the desktop GUI; plain `pip install -e .` is enough for the CLI.)
@@ -135,7 +141,7 @@ This installs `torch==2.3.1+cu121` which bundles cuDNN 8 — compatible with `ct
 
 ```powershell
 python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())"
-pip show whisperx faster-whisper ctranslate2 pyannote.audio torch torchaudio
+python -m pip show whisperx faster-whisper ctranslate2 pyannote.audio torch torchaudio
 dir .venv\Lib\site-packages\torch\lib\cudnn*.dll
 ```
 
@@ -473,9 +479,9 @@ This allows:
 ## Troubleshooting (Essentials)
 
 * `python -m diarrhizer doctor` — run full environment diagnostics
-* `pip check` — check for dependency conflicts
+* `python -m pip check` — check for dependency conflicts
 * `python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())"` — verify torch/CUDA
-* `pip show whisperx faster-whisper ctranslate2 pyannote.audio torch torchaudio` — check installed versions
+* `python -m pip show whisperx faster-whisper ctranslate2 pyannote.audio torch torchaudio` — check installed versions
 * `dir .venv\Lib\site-packages\torch\lib\cudnn*.dll` — verify cuDNN 8 DLLs present (GPU setups)
 * `where ffmpeg` and `ffmpeg -version`
 * `Could not locate cudnn_ops_infer64_8.dll` — cuDNN mismatch, see [troubleshooting](docs/troubleshooting.md)

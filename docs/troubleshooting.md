@@ -33,7 +33,29 @@ declares `Requires-Python <3.13`, and the pinned `torch==2.3.1` has no wheels pa
 treats every pinned version as unavailable. Pip's message does not mention the Python version.
 `python -m diarrhizer doctor` reports it as well ("Python … is too new").
 
-**Fix:** use Python 3.12 (3.11 also works). A venv cannot be switched to another Python - recreate it:
+**Second cause - the right Python, the wrong `pip`.** The same error appears when the venv *is* 3.12
+(`python --version` says so) but `pip` is not the venv's: a venv created without pip (for example
+`uv venv` without `--seed`) has no `Scripts\pip.exe`, so `pip` resolves to the next one on `PATH` -
+typically the global Python 3.13. Check which one runs:
+
+```powershell
+pip --version               # path must be inside your venv; 'python 3.13' means the wrong pip
+python -m pip --version     # 'No module named pip' = the venv has no pip
+```
+
+Fix: give the venv a pip and always call it as `python -m pip`:
+
+```powershell
+uv pip install --python .venv\Scripts\python.exe pip      # or recreate with: uv venv --python 3.12 --seed .venv
+python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
+```
+
+Or skip pip: `uv pip install --python .venv\Scripts\python.exe --index-strategy unsafe-best-match -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt`
+(`unsafe-best-match` lets uv pick the `+cu121` torch build from the PyTorch index, as pip does).
+And if the venv already has everything, `uv pip install --dry-run ...` says `Would make no changes` -
+then there is nothing to install: run `python -m diarrhizer doctor`.
+
+**Fix for the first cause:** use Python 3.12 (3.11 also works). A venv cannot be switched to another Python - recreate it:
 
 ```powershell
 py -0p                                  # is there a 3.12 entry?
@@ -42,7 +64,7 @@ Remove-Item -Recurse -Force .venv
 py -3.12 -m venv .venv                  # or: uv venv --python 3.12 --seed .venv
 .\.venv\Scripts\Activate.ps1
 python --version                        # 3.12.x
-pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
+python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
 ```
 
 No 3.12 installed: `winget install Python.Python.3.12`, then reopen the terminal. A `.venv` that fails
@@ -65,7 +87,7 @@ or WhisperX fails at startup with a `ModuleNotFoundError` pointing to `pkg_resou
 
 1. **Reinstall using the constraints file** (recommended — the pin is already included):
    ```powershell
-   pip install -c requirements/constraints-stable.txt -r requirements/base.txt
+   python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt
    ```
 
 2. **Or install setuptools directly:**
@@ -99,7 +121,7 @@ Model was trained with pyannote.audio 0.0.1, yours is 3.4.0. Bad things might ha
 
 1. **Use the stable constraints file:**
    ```cmd
-   pip install -c requirements/constraints-stable.txt -r requirements/base.txt
+   python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt
    ```
 
 2. **If issues persist, recreate your environment:**
@@ -112,7 +134,7 @@ Model was trained with pyannote.audio 0.0.1, yours is 3.4.0. Bad things might ha
    python -m venv .venv
    .\.venv\Scripts\Activate.ps1
    pip install -U pip
-   pip install -c requirements/constraints-stable.txt -r requirements/base.txt
+   python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt
    pip install -e .
    ```
 
@@ -169,12 +191,12 @@ Reinstall torch with the correct CUDA version. The stable supported path uses CU
 
 ```powershell
 pip uninstall torch torchaudio
-pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
+python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
 ```
 
 For CPU-only (no GPU):
 ```powershell
-pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
+python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
 ```
 
 **Verify:** Run `python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())"`
@@ -256,11 +278,11 @@ python -m venv .venv
 python -m pip install -U pip
 
 # For GPU (CUDA 12.1, cuDNN 8):
-pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
+python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
 pip install -e .
 
 # Or for CPU:
-pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
+python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
 pip install -e .
 ```
 
