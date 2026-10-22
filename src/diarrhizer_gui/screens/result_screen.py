@@ -52,7 +52,7 @@ from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.export.turns import format_timestamp, format_turn_line, group_turns, speaking_time
 from diarrhizer.utils import write_json_atomic
 from diarrhizer_gui.job_queue import QueuedRun
-from diarrhizer_gui.job_scan import rediarize_plan
+from diarrhizer_gui.job_scan import read_speaker_names, rediarize_plan, set_aside_speaker_names
 from diarrhizer_gui.screens.new_job_screen import hf_token_present
 
 SPEAKER_COLORS = [
@@ -397,13 +397,7 @@ class ResultScreen(QWidget):
             self._segments = []
             read_error = str(exc)
 
-        stored = _read_json(job_dir / "speakers.json")
-        # Older versions saved every id, named or not ("Speaker_00": "Speaker_00").
-        self._names = {
-            normalize_speaker_id(str(k)): v.strip()
-            for k, v in stored.items()
-            if isinstance(v, str) and v.strip() and v.strip() != normalize_speaker_id(str(k))
-        }
+        self._names = read_speaker_names(job_dir)
 
         self._meta = _read_json(job_dir / "meta" / "run.json")
         self._has_diarization = (job_dir / "diar" / "diarization.json").exists()
@@ -593,15 +587,9 @@ class ResultScreen(QWidget):
             QMessageBox.warning(self, dialog.windowTitle(), "У задания нет распознанного текста.")
             return
         mode, kwargs = plan
-        # The old names belong to the old speaker ids: set them aside (not
-        # deleted - the re-run may fail, or the user may want them back).
-        speakers_path = self._job_dir / "speakers.json"
-        if speakers_path.exists():
-            try:
-                speakers_path.replace(self._job_dir / "speakers.before-rediarize.json")
-            except OSError:
-                pass
-        label = f"{self._title_label.text()} (спикеры {kwargs['min_speakers']}–{kwargs['max_speakers']})"
+        # The old names belong to the old speaker ids.
+        set_aside_speaker_names(self._job_dir)
+        label =f"{self._title_label.text()} (спикеры {kwargs['min_speakers']}–{kwargs['max_speakers']})"
         self.runs_requested.emit([QueuedRun(mode=mode, kwargs=kwargs, label=label)])
 
     # --- search -----------------------------------------------------------------

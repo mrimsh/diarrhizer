@@ -11,7 +11,7 @@ import pytest
 
 pytest.importorskip("PySide6", reason="GUI extra not installed")
 
-from PySide6.QtWidgets import QPushButton  # noqa: E402
+from PySide6.QtWidgets import QMessageBox, QPushButton  # noqa: E402
 
 from diarrhizer.audio_formats import ENV_AUDIO_FORMATS_FILE  # noqa: E402
 from diarrhizer_gui import settings_keys  # noqa: E402
@@ -195,6 +195,174 @@ def test_history_disables_delete_and_resume_for_a_running_job(qapp, isolated, tm
     buttons = {b.text(): b for b in actions.findChildren(QPushButton)}
     assert not buttons["Удалить"].isEnabled()
     assert not buttons["Продолжить"].isEnabled()
+
+
+def _complete_job(out: Path) -> Path:
+    job_dir = _unfinished_job(out)
+    _touch(job_dir / "diar" / "diarization.json")
+    _touch(job_dir / "merged" / "segments.json")
+    _touch(job_dir / "export" / "result.md")
+    return job_dir
+
+
+def _record_source(job_dir: Path, source: Path) -> None:
+    """Make the job's recorded source file `source` (the helpers above name a path that does not exist)."""
+    meta = json.loads((job_dir / "meta" / "run.json").read_text(encoding="utf-8"))
+    meta["input_path"] = str(source)
+    _write(job_dir / "meta" / "run.json", meta)
+
+
+def _restart_button(screen) -> QPushButton:
+    actions = screen._table.cellWidget(0, 6)
+    return next(b for b in actions.findChildren(QPushButton) if b.text() == "Перезапустить этап")
+
+
+def _answer(monkeypatch, answer):
+    """Stand in for the confirmation dialog; the texts it was asked are returned."""
+    asked = []
+
+    def question(_parent, _title, text, *_args):
+        asked.append(text)
+        return answer
+
+    monkeypatch.setattr(QMessageBox, "question", question)
+    return asked
+
+
+def _warnings(monkeypatch):
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda _parent, _title, text, *_args: shown.append(text))
+    return shown
+
+
+def test_history_restart_menu_greys_out_stages_without_inputs(qapp, isolated, tmp_path):
+    out = tmp_path / "out"
+    _unfinished_job(out)  # converted and transcribed, nothing after that
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+
+    screen = history_screen.HistoryScreen()
+    button = _restart_button(screen)
+
+    enabled = {action.text(): action.isEnabled() for action in button.menu().actions()}
+    assert enabled == {
+        "Конвертация": True,
+        "Распознавание": True,
+        "Диаризация": True,
+        "Объединение": False,
+        "Экспорт": False,
+    }
+    assert button.isEnabled()
+
+
+def test_history_disables_restart_for_a_running_job(qapp, isolated, tmp_path):
+    out = tmp_path / "out"
+    job_dir = _complete_job(out)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+
+    assert not _restart_button(history_screen.HistoryScreen(is_busy=lambda d: d == job_dir)).isEnabled()
+    assert _restart_button(history_screen.HistoryScreen()).isEnabled()
+
+
+def test_history_restart_emits_a_forced_run_of_the_stage(qapp, isolated, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    job_dir = _complete_job(out)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    asked = _answer(monkeypatch, QMessageBox.StandardButton.Yes)
+
+    screen = history_screen.HistoryScreen()
+    received = []
+    screen.runs_requested.connect(received.append)
+    screen._restart(screen._jobs[0], "merge")
+
+    (runs,) = received
+    (run,) = runs
+    assert (run.kwargs["from_stage"], run.kwargs["force_stage"]) == ("merge", "merge")
+    assert run.job_dir == job_dir
+    assert "объединение" in run.label
+    assert "объединение, экспорт" in asked[0]
+
+
+def test_history_restart_does_nothing_when_declined(qapp, isolated, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    job_dir = _complete_job(out)
+    _write(job_dir / "speakers.json", {"Speaker_00": "Иван"})
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    _answer(monkeypatch, QMessageBox.StandardButton.No)
+
+    screen = history_screen.HistoryScreen()
+    received = []
+    screen.runs_requested.connect(received.append)
+    screen._restart(screen._jobs[0], "diarize")
+
+    assert received == []
+    assert (job_dir / "speakers.json").exists()
+
+
+def test_history_restart_of_diarization_sets_the_old_names_aside(qapp, isolated, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    job_dir = _complete_job(out)
+    _write(job_dir / "speakers.json", {"Speaker_00": "Иван"})
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    asked = _answer(monkeypatch, QMessageBox.StandardButton.Yes)
+
+    screen = history_screen.HistoryScreen()
+    received = []
+    screen.runs_requested.connect(received.append)
+    screen._restart(screen._jobs[0], "diarize")
+
+    (runs,) = received
+    assert runs[0].kwargs["speakers"] is None
+    assert not (job_dir / "speakers.json").exists()
+    assert (job_dir / "speakers.before-rediarize.json").exists()
+    assert "Имена спикеров будут сброшены" in asked[0]
+
+
+def test_history_restart_that_redoes_diarization_needs_an_hf_token(qapp, isolated, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    job_dir = _complete_job(out)
+    _record_source(job_dir, _touch(tmp_path / "call.m4a"))
+    _write(job_dir / "speakers.json", {"Speaker_00": "Иван"})
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_HUB_TOKEN", raising=False)
+    shown = _warnings(monkeypatch)
+    _answer(monkeypatch, QMessageBox.StandardButton.Yes)
+
+    screen = history_screen.HistoryScreen()
+    received = []
+    screen.runs_requested.connect(received.append)
+    screen._restart(screen._jobs[0], "diarize")
+    screen._restart(screen._jobs[0], "convert")  # new audio makes diarization stale too
+
+    assert received == []
+    assert len(shown) == 2 and all("HF-токен" in text for text in shown)
+    assert (job_dir / "speakers.json").exists()
+
+    screen._restart(screen._jobs[0], "transcribe")  # diarization stays cached: no token needed
+    assert len(received) == 1
+
+
+def test_history_restart_of_convert_needs_the_source_file(qapp, isolated, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    job_dir = _complete_job(out)
+    source = tmp_path / "gone.m4a"
+    _record_source(job_dir, source)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    shown = _warnings(monkeypatch)
+    _answer(monkeypatch, QMessageBox.StandardButton.Yes)
+
+    screen = history_screen.HistoryScreen()
+    received = []
+    screen.runs_requested.connect(received.append)
+    screen._restart(screen._jobs[0], "convert")
+    assert received == [] and str(source) in shown[0]
+
+    source.write_bytes(b"x")
+    screen._restart(screen._jobs[0], "convert")
+    assert len(received) == 1
 
 
 def test_history_filter_hides_other_files(qapp, isolated, tmp_path):

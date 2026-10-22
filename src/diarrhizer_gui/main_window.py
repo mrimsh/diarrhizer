@@ -1,6 +1,6 @@
 """Main application window: sidebar navigation + stacked screens, and the
-job queue every screen hands its runs to (New Job, History's "continue",
-Result's "re-run diarization")."""
+job queue every screen hands its runs to (New Job, History's "continue" and
+"restart stage", Result's "re-run diarization")."""
 
 import time
 from pathlib import Path

@@ -5,9 +5,10 @@ Reads only the documented on-disk artifact contract (docs/architecture.md,
 (those pull in torch/whisperx at import time), so this stays cheap to import
 and keeps working even on a machine without the ML stack installed.
 
-Also builds the run_pipeline() arguments to resume an interrupted job or to
-re-run diarization on a finished one, from what the job recorded in
-meta/run.json - so neither needs the user to re-enter the job's settings.
+Also builds the run_pipeline() arguments to resume an interrupted job, to
+re-run diarization on a finished one or to restart any single stage, from what
+the job recorded in meta/run.json - so none of them needs the user to re-enter
+the job's settings.
 """
 
 import json
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from diarrhizer.audio_formats import AudioFormat, find_job_audio
+from diarrhizer.export.speakers import normalize_speaker_id
 
 # (stage name, artifact path relative to job_dir) - mirrors the layout
 # documented in docs/architecture.md, not the stage classes themselves.
@@ -32,6 +34,20 @@ STAGE_ARTIFACTS = [
 
 FULL_STAGES = [name for name, _ in STAGE_ARTIFACTS]
 ASR_ONLY_STAGES = [name for name in FULL_STAGES if name != "diarize"]
+
+# stage -> stages that read its output (the data flow in docs/architecture.md).
+# Restarting a stage rebuilds all of these too, or the job would keep results
+# computed from the output that was just thrown away.
+STAGE_DEPENDENTS = {
+    "convert": ("transcribe", "diarize"),
+    "transcribe": ("merge",),
+    "diarize": ("merge",),
+    "merge": ("export",),
+    "export": (),
+}
+
+# Where set_aside_speaker_names() moves speakers.json to.
+SPEAKERS_SET_ASIDE = "speakers.before-rediarize.json"
 
 # meta/run.json pipeline_config keys that are run_pipeline() parameters of the
 # same name - what a resumed job must reuse to behave like the original run.
@@ -70,6 +86,7 @@ class JobSummary:
     result_path: Optional[Path]
     mode: str = "full"
     resumable: bool = False
+    input_path: Optional[str] = None
 
     @property
     def complete(self) -> bool:
@@ -126,6 +143,76 @@ def job_mode(meta: dict) -> str:
     if isinstance(stages, list) and stages and "diarize" not in stages:
         return "asr_only"
     return "full"
+
+
+def stages_for_mode(mode: str) -> list:
+    """The stage names a job of this mode ("full" or "asr_only") runs, in order."""
+    return FULL_STAGES if mode == "full" else ASR_ONLY_STAGES
+
+
+def restart_stages(mode: str, stage: str) -> list:
+    """Stages a restart of `stage` recomputes, in pipeline order: the stage
+    itself and every stage built (directly or not) on its output. Restarting
+    transcription rebuilds merge and export but not diarization, which only
+    reads the audio. Empty if the job's mode has no such stage."""
+    order = stages_for_mode(mode)
+    rebuilt = {stage}
+    for name in order:  # pipeline order is also dependency order
+        if name in rebuilt:
+            rebuilt.update(STAGE_DEPENDENTS[name])
+    return [name for name in order if name in rebuilt]
+
+
+def restart_drops_speaker_names(mode: str, stage: str) -> bool:
+    """Whether restarting `stage` redoes diarization, which numbers the
+    speakers afresh - the saved names would then point at the wrong people."""
+    return "diarize" in restart_stages(mode, stage)
+
+
+def _restartable(mode: str, done: dict) -> list:
+    """Stages whose inputs are all on disk: up to and including the first
+    stage that has no output yet (restarting that one is what "continue" does)."""
+    ready = []
+    for name in stages_for_mode(mode):
+        ready.append(name)
+        if not done.get(name):
+            break
+    return ready
+
+
+def restartable_stages(job: "JobSummary") -> list:
+    """Stages of a scanned job that restart_plan() accepts. Empty for a job
+    that never recorded its source file (convert did not finish)."""
+    return _restartable(job.mode, job.stage_done) if job.input_path else []
+
+
+def read_speaker_names(job_dir: Path) -> dict:
+    """{Speaker_XX: name} the GUI saved in speakers.json.
+
+    Blank names, and names equal to the id (older versions saved every id,
+    named or not), are left out.
+    """
+    stored = _read_json(job_dir / "speakers.json")
+    return {
+        normalize_speaker_id(str(k)): v.strip()
+        for k, v in stored.items()
+        if isinstance(v, str) and v.strip() and v.strip() != normalize_speaker_id(str(k))
+    }
+
+
+def set_aside_speaker_names(job_dir: Path) -> None:
+    """Move speakers.json to SPEAKERS_SET_ASIDE.
+
+    For when diarization is about to be redone: it numbers the speakers
+    afresh, so the old names would point at the wrong people. Moved rather
+    than deleted - the re-run may fail, or the user may want them back.
+    """
+    speakers_path = job_dir / "speakers.json"
+    if speakers_path.exists():
+        try:
+            speakers_path.replace(job_dir / SPEAKERS_SET_ASIDE)
+        except OSError:
+            pass
 
 
 def delete_job(out_dir: Path, job_dir: Path) -> None:
@@ -189,6 +276,7 @@ def scan_jobs(out_dir: Path) -> list:
                 # Without a recorded input the convert stage never finished -
                 # there is nothing to resume from; start a new job instead.
                 resumable=not complete and bool(input_path),
+                input_path=input_path or None,
             )
         )
 
@@ -230,11 +318,17 @@ def _recorded_run_kwargs(job_dir: Path, meta: dict) -> dict:
 #   recorded stage list - with or without diarize) whose artifact is missing, so finished stages are
 #   skipped outright, not even cache-checked (a crash during diarization never re-runs ASR).
 #   rediarize_plan() re-runs diarize -> merge -> export with a new speaker range, keeping the
-#   transcript; it also adds speakers to a "recognition only" job. Both reuse the recorded
-#   settings (RECORDED_RUN_KEYS, the full audio format) so the job behaves like the original run.
-# @inputs: job_dir (meta/run.json, artifacts present on disk)
+#   transcript; it also adds speakers to a "recognition only" job. restart_plan() recomputes one chosen
+#   stage (from_stage + force_stage, so its old output is dropped) and, through the mtime cache, every
+#   stage built on it (STAGE_DEPENDENTS; restart_stages() lists them for the confirmation text). It is
+#   offered only while every earlier stage has its output (restartable_stages). Saved speaker names
+#   follow the speaker ids: they are passed on to the export when diarization is not redone, and
+#   dropped (speakers=None; the caller moves speakers.json aside with set_aside_speaker_names) when
+#   it is. All plans reuse the recorded settings (RECORDED_RUN_KEYS, the full audio format) so the job
+#   behaves like the original run.
+# @inputs: job_dir (meta/run.json, artifacts present on disk, speakers.json), stage for restart_plan
 # @outputs: (mode, kwargs) for PipelineWorker, or None when there is nothing to do
-# @sideEffects: Reads job files only
+# @sideEffects: Reads job files only (set_aside_speaker_names is the one separate writer)
 # @errors: None (unreadable files count as missing)
 # @see: PIPELINE:RUNNER, STAGE:CONVERT, GUI:PIPELINE_WORKER
 def resume_plan(job_dir: Path) -> Optional[tuple]:
@@ -269,4 +363,24 @@ def rediarize_plan(job_dir: Path, min_speakers: int, max_speakers: int) -> Optio
         speakers=None,
     )
     return "full", kwargs
+
+
+def restart_plan(job_dir: Path, stage: str) -> Optional[tuple]:
+    """(mode, kwargs) that recompute `stage` and the stages built on it, or
+    None if the job cannot do that: no recorded source, a stage its mode does
+    not have, or an earlier stage whose output is missing."""
+    meta = _read_meta(job_dir)
+    if not meta.get("input_path"):
+        return None
+    mode = job_mode(meta)
+    if stage not in _restartable(mode, stage_done(job_dir)):
+        return None
+    kwargs = _recorded_run_kwargs(job_dir, meta)
+    kwargs.update(from_stage=stage, force_stage=stage)
+    if restart_drops_speaker_names(mode, stage):
+        kwargs["speakers"] = None
+    else:
+        # The export would otherwise be rendered with the plain ids.
+        kwargs["speakers"] = read_speaker_names(job_dir) or None
+    return mode, kwargs
 # [SEMANTIC-END] GUI:JOB_PLANS

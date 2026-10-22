@@ -170,6 +170,11 @@ python -m diarrhizer_gui.app
 * **История заданий** — all jobs in the results folder with stage indicators, a filter, and
   **Продолжить** for unfinished jobs: it resumes from the first missing stage with the job's own
   settings (e.g. after a stop or a failed diarization, without re-transcribing).
+  **Перезапустить этап** (any job) recomputes the chosen stage from scratch with the job's own
+  settings, plus the stages built on its output (restarting transcription also redoes merge and
+  export; restarting diarization or conversion resets the saved speaker names, which are kept in
+  `speakers.before-rediarize.json`). A stage is available once every earlier stage has its output;
+  a confirmation lists what will be redone, and the old results of those stages are deleted.
 * **Результат** — the transcript by speaker turns, one colour per speaker; click a timestamp to play
   the recording from there, **▶** next to a speaker plays a sample of their voice; name speakers
   and save (exports are rewritten immediately); search (Ctrl+F); copy the whole transcript;

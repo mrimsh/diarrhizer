@@ -5,15 +5,28 @@ without a display.
 """
 
 import json
+import os
+import time
 from pathlib import Path
 
 from diarrhizer.audio_formats import AudioFormat
+from diarrhizer.pipeline.runner import run_pipeline
+from diarrhizer.pipeline.stages.export import ExportStage
+from diarrhizer.pipeline.stages.merge import MergeStage
 from diarrhizer_gui.job_scan import (
+    SPEAKERS_SET_ASIDE,
     _parse_job_date,
+    read_speaker_names,
     rediarize_plan,
+    restart_plan,
+    restart_stages,
+    restartable_stages,
     resume_plan,
     scan_jobs,
+    set_aside_speaker_names,
 )
+
+ALL_STAGES = ["convert", "transcribe", "diarize", "merge", "export"]
 
 
 def _write(path: Path, data) -> None:
@@ -143,6 +156,110 @@ def test_scan_marks_resumable_and_complete_jobs(tmp_path):
     assert jobs.complete is False
     assert jobs.stage_done["transcribe"] is True
     assert jobs.stage_done["diarize"] is False
+
+
+def test_restart_rebuilds_the_stage_and_what_is_built_on_it():
+    assert restart_stages("full", "convert") == ALL_STAGES
+    # Diarization only reads the audio: a new transcript does not touch it.
+    assert restart_stages("full", "transcribe") == ["transcribe", "merge", "export"]
+    assert restart_stages("full", "diarize") == ["diarize", "merge", "export"]
+    assert restart_stages("full", "merge") == ["merge", "export"]
+    assert restart_stages("full", "export") == ["export"]
+    assert restart_stages("asr_only", "convert") == ["convert", "transcribe", "merge", "export"]
+    assert restart_stages("asr_only", "diarize") == []
+
+
+def test_restart_plan_forces_the_stage_with_the_recorded_settings(tmp_path):
+    job_dir = _job(tmp_path, stages_done=ALL_STAGES)
+
+    mode, kwargs = restart_plan(job_dir, "transcribe")
+
+    assert mode == "full"
+    assert (kwargs["from_stage"], kwargs["force_stage"]) == ("transcribe", "transcribe")
+    assert kwargs["job_dir"] == job_dir
+    assert kwargs["input_path"] == "D:/calls/call.m4a"
+    assert kwargs["language"] == "ru"
+    assert (kwargs["min_speakers"], kwargs["max_speakers"]) == (2, 3)
+    assert kwargs["asr_initial_prompt"] == "Диаррайзер, ООО Ромашка"
+
+
+def test_restart_keeps_saved_names_unless_diarization_is_redone(tmp_path):
+    job_dir = _job(tmp_path, stages_done=ALL_STAGES)
+    _write(job_dir / "speakers.json", {"SPEAKER_00": "Иван", "Speaker_01": "Speaker_01", "Speaker_02": " "})
+
+    for stage in ("transcribe", "merge", "export"):
+        _, kwargs = restart_plan(job_dir, stage)
+        assert kwargs["speakers"] == {"Speaker_00": "Иван"}, stage
+    for stage in ("convert", "diarize"):
+        _, kwargs = restart_plan(job_dir, stage)
+        assert kwargs["speakers"] is None, stage
+
+
+def test_restart_needs_every_earlier_stage_to_have_its_output(tmp_path):
+    job_dir = _job(tmp_path, stages_done=["convert", "transcribe"])
+
+    assert restart_plan(job_dir, "transcribe") is not None
+    assert restart_plan(job_dir, "diarize") is not None  # the stage "continue" would start with
+    assert restart_plan(job_dir, "merge") is None
+    assert restart_plan(job_dir, "export") is None
+
+
+def test_restart_of_a_recognition_only_job_has_no_diarize_stage(tmp_path):
+    job_dir = _job(
+        tmp_path,
+        stages_done=["convert", "transcribe", "merge", "export"],
+        stages=["convert", "transcribe", "merge", "export"],
+    )
+    assert restart_plan(job_dir, "diarize") is None
+    mode, kwargs = restart_plan(job_dir, "merge")
+    assert (mode, kwargs["force_stage"]) == ("asr_only", "merge")
+
+
+def test_restart_needs_a_recorded_source_file(tmp_path):
+    job_dir = tmp_path / "out" / "half_20260101_000000"
+    (job_dir / "audio").mkdir(parents=True)
+    (job_dir / "audio" / "normalized.wav").write_bytes(b"x")
+    assert restart_plan(job_dir, "convert") is None
+
+
+def test_scan_lists_the_restartable_stages(tmp_path):
+    _job(tmp_path, stages_done=["convert", "transcribe"])
+    (job,) = scan_jobs(tmp_path / "out")
+    assert job.input_path == "D:/calls/call.m4a"
+    assert restartable_stages(job) == ["convert", "transcribe", "diarize"]
+
+
+def test_speaker_names_are_read_and_set_aside(tmp_path):
+    _write(tmp_path / "speakers.json", {"SPEAKER_01": " Мария ", "Speaker_02": "Speaker_02", "Speaker_03": ""})
+    assert read_speaker_names(tmp_path) == {"Speaker_01": "Мария"}
+
+    set_aside_speaker_names(tmp_path)
+    assert not (tmp_path / "speakers.json").exists()
+    assert (tmp_path / SPEAKERS_SET_ASIDE).exists()
+    set_aside_speaker_names(tmp_path)  # nothing left to move: no error
+    assert read_speaker_names(tmp_path) == {}
+
+
+def test_restarted_merge_rebuilds_the_export_and_keeps_the_names(tmp_path):
+    """The plan fed to the real runner: merge is forced, export follows from the
+    newer segments.json, and the saved name still reaches result.md."""
+    job_dir = _job(tmp_path, stages_done=ALL_STAGES)
+    _write(job_dir / "asr" / "transcript.json", {"segments": [{"start": 0, "end": 1, "text": "Привет"}], "words": []})
+    _write(job_dir / "diar" / "diarization.json", {"segments": [{"start": 0, "end": 1, "speaker": "Speaker_00"}]})
+    _write(job_dir / "speakers.json", {"Speaker_00": "Иван"})
+    stages = [MergeStage(), ExportStage()]
+    run_pipeline(out_dir=job_dir.parent, job_dir=job_dir, stages=stages, speakers={"Speaker_00": "Иван"})
+    # Back-to-back writes can share a file-time tick; make the earlier run clearly older.
+    long_ago = time.time() - 60
+    for path in job_dir.rglob("*.*"):
+        if path.is_file() and path.parent.name != "meta":
+            os.utime(path, (long_ago, long_ago))
+
+    _, kwargs = restart_plan(job_dir, "merge")
+    result = run_pipeline(stages=stages, **kwargs)
+
+    assert {s["stage"]: s["status"] for s in result["stages"]} == {"merge": "completed", "export": "completed"}
+    assert "Иван" in (job_dir / "export" / "result.md").read_text(encoding="utf-8")
 
 
 def test_job_date_parses_with_a_clash_suffix(tmp_path):

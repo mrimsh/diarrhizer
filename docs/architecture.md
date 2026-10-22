@@ -146,7 +146,7 @@ out/
 - filename + timestamp, or
 - hash (input + config) — if reproducibility/deduplication is important.
 
-`meta/run.json`'s recorded `input_path` is also what `run --job-dir <dir>` reads to make the `input` argument optional when resuming a job (see [Section 8](#8-cli-commands)). The GUI's "Продолжить" (History) and "Пересчитать спикеров" (Result) rebuild the whole run from `pipeline_config` (`diarrhizer_gui/job_scan.py`, `GUI:JOB_PLANS`).
+`meta/run.json`'s recorded `input_path` is also what `run --job-dir <dir>` reads to make the `input` argument optional when resuming a job (see [Section 8](#8-cli-commands)). The GUI's "Продолжить" and "Перезапустить этап" (History) and "Пересчитать спикеров" (Result) rebuild the whole run from `pipeline_config` (`diarrhizer_gui/job_scan.py`, `GUI:JOB_PLANS`). Restarting a stage is `--job-dir` + `--from-stage X` + `--force-stage X`: the stage's own outputs are dropped, and the stages that consumed them (convert → transcribe, diarize; transcribe, diarize → merge; merge → export) recompute through the mtime-based cache.
 
 Job folders are named `<input stem>_<YYYYMMDD_HHMMSS>`; callers that start several jobs in a row (GUI queue, CLI batch) use `runner.new_job_dir()`, which appends `_2`, `_3`, … rather than reuse an existing folder.
 
@@ -451,8 +451,8 @@ How the GUI runs things (`src/diarrhizer_gui/`):
   (`environment.py`); New Job/Settings/Models read CUDA availability from it, and the Doctor screen
   and its sidebar badge show the results. The window opens immediately instead of waiting for the
   ML imports.
-- **Queue.** New Job emits one run per file; History ("Продолжить") and Result ("Пересчитать
-  спикеров") emit runs for existing job folders. `main_window.py` executes them one at a time
+- **Queue.** New Job emits one run per file; History ("Продолжить", "Перезапустить этап") and Result
+  ("Пересчитать спикеров") emit runs for existing job folders. `main_window.py` executes them one at a time
   (`job_queue.py`); the Monitor screen ("Выполнение") is a sidebar item showing the batch.
 - **In-process work** is limited to cheap, pure steps: scanning job folders and re-exporting with
   new speaker names (`ExportStage` only, milliseconds).
@@ -507,6 +507,6 @@ src/diarrhizer_gui/
 ├── child_process.py        # Spawned process watched by a QTimer
 ├── child_tasks.py          # Child entry points (pipeline, doctor) - Qt-free
 ├── environment.py          # Background doctor checks shared by the screens
-├── job_scan.py             # History scan, resume / re-diarize plans
+├── job_scan.py             # History scan, resume / restart-stage / re-diarize plans
 └── screens/                # New Job, Monitor, History, Result, Models, Doctor, Settings
 ```

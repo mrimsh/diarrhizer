@@ -3,7 +3,9 @@
 Pure filesystem read via job_scan.py. An unfinished job (e.g. stopped by the
 user, or failed at diarization for want of an HF token) gets a "Продолжить"
 button that resumes it from the first missing stage with its recorded
-settings (GUI:JOB_PLANS) - the work already done is not repeated.
+settings (GUI:JOB_PLANS) - the work already done is not repeated. Any job gets
+a "Перезапустить этап" menu: the chosen stage is recomputed from scratch with
+the recorded settings, and so are the stages built on it.
 """
 
 import os
@@ -18,6 +20,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -28,7 +31,22 @@ from PySide6.QtWidgets import (
 
 from diarrhizer_gui import settings_keys
 from diarrhizer_gui.job_queue import QueuedRun
-from diarrhizer_gui.job_scan import STAGE_ARTIFACTS, JobSummary, delete_job, resume_plan, scan_jobs
+from diarrhizer_gui.job_scan import (
+    SPEAKERS_SET_ASIDE,
+    STAGE_ARTIFACTS,
+    JobSummary,
+    delete_job,
+    read_speaker_names,
+    restart_drops_speaker_names,
+    restart_plan,
+    restart_stages,
+    restartable_stages,
+    resume_plan,
+    scan_jobs,
+    set_aside_speaker_names,
+    stages_for_mode,
+)
+from diarrhizer_gui.screens.new_job_screen import hf_token_present
 
 STAGE_LABELS = [name[0].upper() for name, _ in STAGE_ARTIFACTS]  # C T D M E
 STAGE_TITLES = {
@@ -76,6 +94,7 @@ class StageDots(QWidget):
 class RowActions(QWidget):
     open_result_requested = Signal(Path)
     resume_requested = Signal(object)
+    restart_requested = Signal(object, str)  # job, stage name
     delete_requested = Signal(object)
 
     def __init__(self, job: JobSummary, busy: bool) -> None:
@@ -105,6 +124,8 @@ class RowActions(QWidget):
             resume.clicked.connect(lambda: self.resume_requested.emit(job))
             layout.addWidget(resume)
 
+        layout.addWidget(self._restart_button(job, busy))
+
         delete = QPushButton("Удалить")
         delete.setEnabled(not busy)
         delete.setToolTip(
@@ -114,6 +135,33 @@ class RowActions(QWidget):
         layout.addWidget(delete)
 
         layout.addStretch(1)
+
+    def _restart_button(self, job: JobSummary, busy: bool) -> QPushButton:
+        """"Перезапустить этап ▾": one menu entry per stage the job runs; a stage
+        whose inputs are missing (an earlier stage has no output) is greyed out."""
+        available = restartable_stages(job)
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        for name in stages_for_mode(job.mode):
+            action = menu.addAction(STAGE_TITLES[name].capitalize())
+            action.setEnabled(name in available)
+            action.setToolTip(
+                "Заново выполнятся: " + ", ".join(STAGE_TITLES[s] for s in restart_stages(job.mode, name))
+                if name in available
+                else "Нет результатов предыдущих этапов"
+            )
+            action.triggered.connect(lambda checked=False, stage=name: self.restart_requested.emit(job, stage))
+
+        button = QPushButton("Перезапустить этап")
+        button.setMenu(menu)
+        button.setEnabled(bool(available) and not busy)
+        button.setToolTip(
+            "Выполняется сейчас" if busy
+            else "Заново выполнить выбранный этап и зависящие от него, с настройками задания"
+            if available
+            else "Задание не дошло до конца конвертации — запустите его заново"
+        )
+        return button
 
 
 class HistoryScreen(QWidget):
@@ -228,6 +276,7 @@ class HistoryScreen(QWidget):
             row_actions = RowActions(job, busy)
             row_actions.open_result_requested.connect(self.view_result_requested)
             row_actions.resume_requested.connect(self._resume)
+            row_actions.restart_requested.connect(self._restart)
             row_actions.delete_requested.connect(self._delete)
             self._table.setCellWidget(row, 6, row_actions)
 
@@ -268,6 +317,57 @@ class HistoryScreen(QWidget):
             )
             return
         label = f"{job.input_name} (продолжение с этапа «{STAGE_TITLES[kwargs['from_stage']]}»)"
+        self.runs_requested.emit([QueuedRun(mode=mode, kwargs=kwargs, label=label)])
+
+    def _restart(self, job: JobSummary, stage: str) -> None:
+        title = "Перезапустить этап"
+        plan = restart_plan(job.job_dir, stage)
+        if plan is None:
+            QMessageBox.information(
+                self, title, "Этот этап сейчас нельзя перезапустить: нет результатов предыдущих этапов."
+            )
+            self.refresh()
+            return
+        mode, kwargs = plan
+        rebuilt = restart_stages(mode, stage)
+        if "convert" in rebuilt and not Path(kwargs["input_path"]).exists():
+            QMessageBox.warning(
+                self,
+                title,
+                f"Нужно заново сконвертировать исходный файл, но его нет на месте:\n{kwargs['input_path']}",
+            )
+            return
+        # Diarization is part of the restart (or of what it invalidates): same
+        # check the Result screen makes before "Пересчитать спикеров".
+        if "diarize" in rebuilt and not hf_token_present():
+            QMessageBox.warning(
+                self, title, "Для диаризации нужен HF-токен — задайте его на экране «Настройки»."
+            )
+            return
+
+        drops_names = restart_drops_speaker_names(mode, stage)
+        text = (
+            f"Перезапустить этап «{STAGE_TITLES[stage]}» задания «{job.input_name}» ({job.date_label})?\n\n"
+            f"Заново выполнятся: {', '.join(STAGE_TITLES[name] for name in rebuilt)}. "
+            "Прежние результаты этих этапов будут удалены, настройки возьмутся из задания."
+        )
+        if drops_names and read_speaker_names(job.job_dir):
+            text += (
+                "\n\nИмена спикеров будут сброшены: новая диаризация нумерует спикеров заново "
+                f"(прежние имена сохранятся в {SPEAKERS_SET_ASIDE})."
+            )
+        answer = QMessageBox.question(
+            self,
+            title,
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if drops_names:
+            set_aside_speaker_names(job.job_dir)
+        label = f"{job.input_name} (перезапуск этапа «{STAGE_TITLES[stage]}»)"
         self.runs_requested.emit([QueuedRun(mode=mode, kwargs=kwargs, label=label)])
 
     def _delete(self, job: JobSummary) -> None:
