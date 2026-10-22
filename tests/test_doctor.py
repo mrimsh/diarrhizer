@@ -122,6 +122,63 @@ def test_check_audio_formats_reports_a_broken_file(audio_formats_file):
     assert str(audio_formats_file) in message
 
 
+# --- check_summarization ------------------------------------------------------
+
+
+def _save_providers(*providers):
+    from diarrhizer.summary.providers import ProviderStore
+
+    store = ProviderStore.load()
+    for provider in providers:
+        store.put(provider)
+    store.save()
+
+
+def test_check_summarization_passes_with_no_providers_configured():
+    name, passed, message = doctor.check_summarization()
+
+    assert passed
+    assert "no providers configured" in message
+
+
+def test_check_summarization_wants_cli_commands_on_path_and_api_keys_set(monkeypatch):
+    from diarrhizer.summary.providers import KIND_CODEX_CLI, KIND_OPENAI_API, Provider
+
+    _save_providers(
+        Provider(name="ChatGPT", kind=KIND_CODEX_CLI),
+        Provider(name="gw", kind=KIND_OPENAI_API, endpoint="https://x/v1", model="m", api_key_env="GW_KEY"),
+    )
+    monkeypatch.delenv("GW_KEY", raising=False)
+    monkeypatch.setattr(doctor.shutil, "which", lambda command: None)
+
+    name, passed, message = doctor.check_summarization()
+
+    assert not passed
+    assert "'ChatGPT': command codex not found" in message
+    assert "'gw': GW_KEY is not set" in message
+
+    monkeypatch.setenv("GW_KEY", "sk-x")
+    monkeypatch.setattr(doctor.shutil, "which", lambda command: f"C:/bin/{command}.exe")
+    name, passed, message = doctor.check_summarization()
+    assert passed
+    assert "ChatGPT, gw" in message
+    assert "sk-x" not in message
+
+
+def test_check_summarization_reports_a_broken_file(summary_stores):
+    summary_stores[1].write_text("{broken", encoding="utf-8")
+
+    name, passed, message = doctor.check_summarization()
+
+    assert not passed
+    assert str(summary_stores[1]) in message
+
+
+def test_a_summarization_problem_is_only_a_warning():
+    assert not doctor.is_blocking_failure("Summarization", False)
+    assert doctor.is_blocking_failure("FFmpeg", False)
+
+
 def _fake_checks(*results):
     return [lambda result=result: result for result in results]
 

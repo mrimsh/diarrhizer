@@ -1,17 +1,21 @@
 """Environment diagnostics module for Diarrhizer."""
 
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import List, Tuple
 
 from diarrhizer.adapters.ffmpeg import ENV_FFMPEG_PATH, list_audio_encoders, resolve_ffmpeg_path
 from diarrhizer.audio_formats import AudioFormatStore
+from diarrhizer.summary.providers import ProviderStore
+from diarrhizer.summary.templates import TemplateStore
 
 
-# Checks whose failure only costs speed, not correctness: reported as WARN
-# and not counted against the result (doctor's exit code, the GUI's badge).
-OPTIONAL_CHECKS = {"torchcodec"}
+# Checks whose failure only costs speed or an optional add-on (summaries), not
+# correctness: reported as WARN and not counted against the result (doctor's
+# exit code, the GUI's badge).
+OPTIONAL_CHECKS = {"torchcodec", "Summarization"}
 
 
 def is_blocking_failure(name: str, passed: bool) -> bool:
@@ -21,13 +25,14 @@ def is_blocking_failure(name: str, passed: bool) -> bool:
 # [SEMANTIC-BEGIN] DIAGNOSTICS:DOCTOR
 # @purpose: Run environment diagnostics to verify Diarrhizer dependencies
 # @description: Checks for Python version, FFmpeg, audio format profiles (file parses, default profile's
-#   encoder is in this FFmpeg build), torch/torchaudio, CUDA, cuDNN, torchcodec, HF token, and critical ML imports.
-#   A failed check in OPTIONAL_CHECKS (torchcodec: only a faster decoder) is a warning, not a failure.
-#   run_all_checks() is the shared, print-free list the GUI runs (in a child process).
-# @sideEffects: Reads environment variables and audio_formats.json, runs `ffmpeg -encoders`, imports optional
-#   modules, scans torch/lib for cuDNN DLLs
+#   encoder is in this FFmpeg build), summarization setup (templates/providers files parse, every provider's
+#   CLI is on PATH / API key is set), torch/torchaudio, CUDA, cuDNN, torchcodec, HF token, and critical ML imports.
+#   A failed check in OPTIONAL_CHECKS (torchcodec: only a faster decoder; Summarization: an add-on) is a
+#   warning, not a failure. run_all_checks() is the shared, print-free list the GUI runs (in a child process).
+# @sideEffects: Reads environment variables, audio_formats.json and the summary_*.json files, runs
+#   `ffmpeg -encoders`, imports optional modules, scans torch/lib for cuDNN DLLs
 # @errors: Prints warnings for missing dependencies; returns False if any non-optional check failed
-# @see: CLI:ENTRY, ADAPTER:FFMPEG, CONFIG:ENV, CONFIG:AUDIO_FORMATS, GUI:CHILD_TASKS
+# @see: CLI:ENTRY, ADAPTER:FFMPEG, CONFIG:ENV, CONFIG:AUDIO_FORMATS, CONFIG:SUMMARY_PROVIDERS, GUI:CHILD_TASKS
 def run_all_checks() -> List[Tuple[str, bool, str]]:
     """Run every check, in display order, without printing."""
     return [check() for check in ALL_CHECKS]
@@ -147,6 +152,34 @@ def check_audio_formats() -> Tuple[str, bool, str]:
             f"Default '{default.name}' needs encoder {default.codec}, missing from {ffmpeg_path}{note}",
         )
     return (name, True, f"Default '{default.name}' ({default.codec}), {len(store.formats())} profiles{note}")
+
+
+def check_summarization() -> Tuple[str, bool, str]:
+    """Check summary_templates.json / summary_providers.json parse and every provider is usable.
+
+    A CLI provider needs its command on PATH, an API provider needs its key in
+    the environment. Optional: summaries are an add-on, so a miss is a warning.
+    Whether a CLI is signed in is not checked - that would cost a model request.
+    """
+    name = "Summarization"
+    try:
+        templates = TemplateStore.load()
+        providers = ProviderStore.load()
+    except ValueError as e:
+        return (name, False, str(e))
+
+    problems = []
+    for provider in providers.providers.values():
+        if provider.is_cli:
+            if not shutil.which(provider.executable):
+                problems.append(f"'{provider.name}': command {provider.executable} not found")
+        elif provider.api_key_env and not provider.api_key():
+            problems.append(f"'{provider.name}': {provider.api_key_env} is not set")
+    if problems:
+        return (name, False, "; ".join(problems))
+    if not providers.providers:
+        return (name, True, f"{len(templates.templates())} templates, no providers configured (optional)")
+    return (name, True, f"{len(templates.templates())} templates, providers: {', '.join(providers.names())}")
 
 
 def check_torch() -> Tuple[str, bool, str]:
@@ -302,6 +335,7 @@ ALL_CHECKS = [
     check_python_version,
     check_ffmpeg,
     check_audio_formats,
+    check_summarization,
     check_torch,
     check_cuda,
     check_cudnn,

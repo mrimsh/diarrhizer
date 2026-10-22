@@ -31,12 +31,14 @@ from diarrhizer_gui.screens.monitor_screen import STAGE_TITLES, MonitorScreen, f
 from diarrhizer_gui.screens.new_job_screen import NewJobScreen
 from diarrhizer_gui.screens.result_screen import ResultScreen
 from diarrhizer_gui.screens.settings_screen import SettingsScreen
+from diarrhizer_gui.screens.summary_settings_screen import SummarySettingsScreen
 
 NAV_ITEMS = [
     ("Новое задание", "new_job"),
     ("Выполнение", "monitor"),
     ("История заданий", "history"),
     ("Модели", "models"),
+    ("Саммаризация", "summary"),
     ("Доктор", "doctor"),
     ("Настройки", "settings"),
 ]
@@ -143,6 +145,7 @@ class MainWindow(QMainWindow):
             "monitor": self._monitor,
             "history": self._history,
             "models": ModelsScreen(self._probe),
+            "summary": SummarySettingsScreen(),
             "doctor": self._doctor,
             "settings": self._settings_screen,
         }

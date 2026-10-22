@@ -54,6 +54,7 @@ from diarrhizer.utils import write_json_atomic
 from diarrhizer_gui.job_queue import QueuedRun
 from diarrhizer_gui.job_scan import read_speaker_names, rediarize_plan, set_aside_speaker_names
 from diarrhizer_gui.screens.new_job_screen import hf_token_present
+from diarrhizer_gui.screens.summary_dialog import SummaryDialog
 
 SPEAKER_COLORS = [
     "#a85520", "#2c6fbb", "#2f7d52", "#8e44ad", "#c0392b", "#16808a", "#7a6a1f", "#d35400",
@@ -261,12 +262,20 @@ class ResultScreen(QWidget):
         folder_button = QPushButton("Папка задания")
         folder_button.clicked.connect(self._open_folder)
 
+        self._summary_button = QPushButton("Саммаризация…")
+        self._summary_button.setToolTip(
+            "Краткое изложение разговора языковой моделью по протоколу (export/result.md): "
+            "выбор шаблона промпта и провайдера"
+        )
+        self._summary_button.clicked.connect(self._open_summary)
+
         header = QHBoxLayout()
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
         title_box.addWidget(self._title_label)
         title_box.addWidget(self._subtitle_label)
         header.addLayout(title_box, stretch=1)
+        header.addWidget(self._summary_button)
         header.addWidget(open_button)
         header.addWidget(folder_button)
 
@@ -413,6 +422,7 @@ class ResultScreen(QWidget):
             else "Добавить разделение по спикерам к заданию «Только распознавание»"
         )
         self._rediarize_button.setEnabled((job_dir / "asr" / "transcript.json").exists())
+        self._summary_button.setEnabled((job_dir / "export" / "result.md").exists())
 
         self._rebuild_speaker_panel()
         self._render_transcript()
@@ -568,6 +578,30 @@ class ResultScreen(QWidget):
         self._names = names
         self._update_save_state()
         self._set_status("Имена сохранены, файлы result.md/.txt/.srt/.json обновлены.", "#2f7d52")
+
+    def _open_summary(self) -> None:
+        if self._job_dir is None:
+            return
+        # The summary is made from the saved result.md: names typed but not saved would be missing from it.
+        if self._save_button.isEnabled():
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle("Саммаризация")
+            box.setText(
+                "Имена спикеров изменены, но не сохранены, а саммари строится по сохранённому протоколу.\n\n"
+                "Сохранить имена перед саммаризацией?"
+            )
+            save = box.addButton("Сохранить", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("Продолжить без сохранения", QMessageBox.ButtonRole.DestructiveRole)
+            cancel = box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is cancel:
+                return
+            if box.clickedButton() is save:
+                self._save_names()
+                if self._save_button.isEnabled():  # saving failed - the warning was shown
+                    return
+        SummaryDialog(self, self._job_dir, self._title_label.text()).exec()
 
     def _rediarize(self) -> None:
         if self._job_dir is None:

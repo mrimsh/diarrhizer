@@ -23,6 +23,7 @@ This document is intentionally concise. It defines the "skeleton" so the project
 | Merge stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/merge.py`](src/diarrhizer/pipeline/stages/merge.py) |
 | Export modules | ✅ Implemented | [`src/diarrhizer/export/`](src/diarrhizer/export/) |
 | Desktop GUI | ✅ Implemented | [`src/diarrhizer_gui/`](src/diarrhizer_gui/) — see [GUI](#gui) |
+| Summaries (templates, providers, `summarize` command) | ✅ Implemented | [`src/diarrhizer/summary/`](src/diarrhizer/summary/), [`src/diarrhizer/adapters/llm.py`](src/diarrhizer/adapters/llm.py) — see [Summaries](#summaries) |
 
 ---
 
@@ -141,6 +142,10 @@ out/
       result.txt          # speaker turns, no markup
       result.srt          # subtitles, "Name: text" per cue
       result.json         # every segment and word with timings
+    summary/              # on-demand, not a pipeline stage (see Summaries); never cached or invalidated
+      <YYYYmmdd_HHMMSS>_<template>.md    # the model's reply, verbatim
+      <YYYYmmdd_HHMMSS>_<template>.json  # template + prompt, provider (name/kind/model), duration,
+                                         # transcript size, whether the reply was cut off
 ```
 
 `job_id` can be generated as:
@@ -327,6 +332,7 @@ The [`doctor`](src/diarrhizer/diagnostics/doctor.py) command performs these chec
 6. **torchcodec** — optional fast decoder; a failure is a `WARN` and does not fail the run (`OPTIONAL_CHECKS`)
 7. **Critical imports** — whisperx / speechbrain / pyannote / transformers
 8. **Hugging Face token** — verifies `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN` (CLI and GUI load a local `.env`)
+9. **Summarization** — in `OPTIONAL_CHECKS` (an add-on: a problem is a `WARN`): `summary_templates.json` / `summary_providers.json` parse, every CLI provider's command is on `PATH`, every API provider's key variable is set. Whether a CLI is signed in is not checked - that would cost a model request (the GUI's "Проверить" does it on demand).
 
 Besides `doctor`, the pipeline itself checks the token up front: `DiarizeStage.preflight()` runs before
 any stage, so a run that will have to diarize without a token fails in seconds instead of after the
@@ -419,6 +425,65 @@ python -m diarrhizer run "meeting.mp4" `
   --audio-profile voice-call
 ```
 
+### `summarize`
+
+```powershell
+python -m diarrhizer summarize "<job folder or its export/result.md>" --template "Протокол встречи" --provider ChatGPT --print
+python -m diarrhizer summarize --list
+```
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `job` | positional, optional | — | Job folder, or its `export/result.md`. Required unless `--list` |
+| `--template` | string | the default template | Template name (`--list` shows them) |
+| `--provider` | string | the default provider | Provider name from `summary_providers.json`; with none configured the error says where to add one |
+| `--print` | flag | off | Also print the summary (it is always stored under the job's `summary/`) |
+| `--list` | flag | off | List templates and providers and exit |
+
+Exit code 1 for a missing job/result, an unknown template or provider, or a provider failure.
+See [Summaries](#summaries) below.
+
+---
+
+## Summaries
+
+A summary of a finished job's transcript, written by a language model. It is an **on-demand add-on, not a
+pipeline stage**: it costs money or subscription quota, may run several times per job with different
+templates, and has no cache to invalidate — so it lives beside the stages (`summary/` in the job folder),
+not in them.
+
+```
+export/result.md ──► SUMMARY:JOB ──► ADAPTER:LLM ──► provider (CLI or HTTPS API)
+(read as it is,      build_prompt:                       │
+ names included)     template.prompt + <transcript>…      ▼
+                                         summary/<stamp>_<template>.md + .json
+```
+
+- **Templates** (`summary/templates.py`, `CONFIG:SUMMARY_TEMPLATES`): a named prompt. Built-ins are read-only;
+  user templates and the default name are stored in `summary_templates.json` (same shape of store as
+  `audio_formats.json`: missing file = empty, malformed = `ValueError` naming the file).
+- **Providers** (`summary/providers.py`, `CONFIG:SUMMARY_PROVIDERS`): `codex-cli` and `claude-cli` (the vendors'
+  CLIs, i.e. the user's ChatGPT / Claude subscription), `openai-api` (any OpenAI-compatible
+  chat/completions endpoint) and `anthropic-api`. Stored in `summary_providers.json`, which never contains a
+  secret: an API provider names an environment variable (`api_key_env`); the GUI keeps the key in the
+  repo-root `.env`, like the HF token.
+- **Adapter** (`adapters/llm.py`, `ADAPTER:LLM`): the only place that talks to a model. CLIs get the prompt on
+  stdin (no argv length or quoting limits) and run in an empty temporary folder, with the API-key variables
+  that would switch the billing removed and with flags that skip the user's own tool setup (retried without
+  them if the installed version rejects a flag); a timeout kills the whole process tree. APIs are one
+  non-streaming `urllib` POST; the key is read at call time and never put into an error message. No SDK
+  dependency.
+- **Service** (`summary/service.py`, `SUMMARY:JOB`): reads `export/result.md`, builds the prompt, asks the
+  provider, and stores the reply atomically only after it arrived (a failed or cancelled request leaves
+  nothing behind). Earlier summaries are never overwritten.
+- **Not done on purpose:** splitting a transcript that exceeds a model's context window (the provider's
+  error is passed on as is), streaming, and chat-style follow-ups.
+
+GUI: the **Саммаризация** screen (`screens/summary_settings_screen.py`, `GUI:SUMMARY_SETTINGS`) edits both
+stores; the Result screen's **Саммаризация…** opens `screens/summary_dialog.py` (`GUI:SUMMARY_DIALOG`). The
+model call runs in a child process (`llm_worker.py` + `child_tasks.run_summary_task`), so it can be
+cancelled together with whatever the CLI started.
+
 ---
 
 ## 9. Extensibility (Future Growth)
@@ -429,7 +494,7 @@ The architecture is designed to allow extensions without breaking the core:
 
 - volume normalization, noise reduction
 - text post-processing (punctuation/formatting)
-- summaries / action items (optional)
+- action items extraction as a stage (summaries exist, but as an on-demand add-on — see [Summaries](#summaries))
 
 ### New export formats
 
@@ -458,6 +523,8 @@ How the GUI runs things (`src/diarrhizer_gui/`):
   (`job_queue.py`); the Monitor screen ("Выполнение") is a sidebar item showing the batch.
 - **In-process work** is limited to cheap, pure steps: scanning job folders and re-exporting with
   new speaker names (`ExportStage` only, milliseconds).
+- **Model calls** (a summary, a provider check) also run in a child process (`llm_worker.py`): a request
+  takes seconds to minutes, and cancelling it must kill the subscription CLI's own processes too.
 
 ---
 
@@ -479,9 +546,14 @@ How the GUI runs things (`src/diarrhizer_gui/`):
 
 ```
 src/diarrhizer/
-├── cli.py                  # CLI entry point (doctor, run)
+├── cli.py                  # CLI entry point (doctor, run, summarize)
 ├── diagnostics/
 │   └── doctor.py           # Environment diagnostics
+├── summary/                # Summaries of a finished job (stdlib only)
+│   ├── templates.py        # Prompt templates + their JSON store
+│   ├── providers.py        # Model providers + their JSON store
+│   ├── store_file.py       # Reading the two JSON stores
+│   └── service.py          # result.md + template + provider -> summary/ files
 ├── pipeline/
 │   ├── runner.py           # Pipeline orchestration
 │   └── stages/             # Individual processing stages
@@ -492,6 +564,7 @@ src/diarrhizer/
 │       └── export.py       # Export to MD/TXT/SRT/JSON
 ├── adapters/               # External library wrappers
 │   ├── ffmpeg.py
+│   ├── llm.py              # Summary providers: codex/claude CLIs, OpenAI/Anthropic HTTP APIs
 │   └── whisperx.py
 ├── media.py                # Media extensions, folder expansion for batch input
 └── export/                 # Export formatters
@@ -507,7 +580,8 @@ src/diarrhizer_gui/
 ├── job_queue.py            # Queue bookkeeping (pure Python)
 ├── pipeline_worker.py      # One job in a child process -> Qt signals
 ├── child_process.py        # Spawned process watched by a QTimer
-├── child_tasks.py          # Child entry points (pipeline, doctor) - Qt-free
+├── llm_worker.py           # One model call (summary / provider check) in a child process -> Qt signals
+├── child_tasks.py          # Child entry points (pipeline, doctor, summary, provider check) - Qt-free
 ├── environment.py          # Background doctor checks shared by the screens
 ├── job_scan.py             # History scan, resume / restart-stage / re-diarize plans
 └── screens/                # New Job, Monitor, History (+ restart_dialog), Result, Models, Doctor, Settings

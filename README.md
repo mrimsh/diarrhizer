@@ -21,6 +21,7 @@ and a CLI (`python -m diarrhizer run …`).
 | Speaker name mapping | ✅ Implemented |
 | Batch processing (several files / folders) | ✅ Implemented |
 | Desktop GUI (PySide6) | ✅ Implemented |
+| Summaries (prompt templates + model providers) | ✅ Implemented |
 
 ---
 
@@ -40,6 +41,8 @@ and a CLI (`python -m diarrhizer run …`).
   * Structured `.json` (every segment and word with timings, for further processing)
 * Caching and resuming: finished stages are never recomputed; an interrupted job continues from
   the first missing stage
+* Summaries of a finished job by a language model, from your own prompt templates, through a
+  ChatGPT or Claude subscription or any API with a key (see [Summaries](#summaries))
 
 ### Important About Speakers
 
@@ -183,7 +186,10 @@ python -m diarrhizer_gui.app
   the recording from there, **▶** next to a speaker plays a sample of their voice; name speakers
   and save (exports are rewritten immediately); search (Ctrl+F); copy the whole transcript;
   **Пересчитать спикеров** re-runs diarization with another speaker count (or adds speakers to a
-  recognition-only job) while keeping the transcript.
+  recognition-only job) while keeping the transcript; **Саммаризация…** makes a summary of the
+  transcript (see below).
+* **Саммаризация** — prompt templates and model providers for summaries (see
+  [Summaries](#summaries)).
 * **Модели**, **Доктор**, **Настройки** — model cache, environment checks (run in the background;
   the sidebar shows a ⚠ badge if something required is missing), defaults, HF token, FFmpeg path,
   audio storage profiles.
@@ -211,6 +217,8 @@ The `doctor` command performs these diagnostic checks:
 6. **torchcodec** — optional fast decoder (reported as `WARN`, does not fail the run)
 7. **Critical imports** — whisperx / speechbrain / pyannote / transformers
 8. **Hugging Face token** — verifies `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN` is set (including from a local `.env`)
+9. **Summarization** — optional (a problem is a `WARN`): the template/provider files parse, every
+   configured CLI provider is on `PATH`, every API provider's key is set
 
 ---
 
@@ -345,6 +353,68 @@ Stages outside the `--from-stage`/`--to-stage` range are skipped entirely (not e
 
 ---
 
+### Summaries
+
+A finished job's transcript (`export/result.md`, with the speaker names as saved) can be summarized by
+a language model. A summary is an on-demand add-on, not a pipeline stage: you ask for it, as often as
+you like and with different templates, and it never touches the job's cached stages. Each one is stored
+in the job folder as `summary/<timestamp>_<template>.md` (the model's reply, verbatim) plus a `.json`
+next to it with what produced it (template, prompt, provider, model, duration).
+
+**Templates.** A template is a named prompt; the transcript is attached to it automatically (inside
+`<transcript>` tags) when the request is sent, so the prompt only says what to do. Three built-in
+templates (short summary, meeting minutes, call review) are read-only; yours live in
+`summary_templates.json`.
+
+**Providers.** Where the request goes. Add as many as you like and mark one as the default:
+
+| Kind | How it works | You need |
+|------|--------------|----------|
+| ChatGPT subscription | runs the official Codex CLI (`codex exec`) | `codex login` once, in a terminal |
+| Claude subscription | runs Claude Code (`claude -p`, tools off) | `claude auth login` once, in a terminal |
+| OpenAI-compatible API | `POST <endpoint>/chat/completions` — OpenAI, OpenRouter, DeepSeek, Groq, and local Ollama, LM Studio, vLLM | endpoint, model, API key (not needed for a local server) |
+| Anthropic API | `POST <endpoint>/v1/messages` | model, API key |
+
+* Subscription providers use the sign-in you already made in those tools: Diarrhizer never sees or stores
+  the account password or token. The tool is started in an empty temporary folder, without your personal
+  tool setup (hooks, plugins, MCP servers; for Codex also its `config.toml`, whose model or reasoning
+  effort may not suit `exec`) and without `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `CODEX_API_KEY` in its
+  environment, so a key kept for an API provider cannot silently switch the billing from the subscription.
+  A model and extra command-line arguments (e.g. `-c model_reasoning_effort="low"` for Codex) can be set
+  per provider.
+* An API key never goes into `summary_providers.json`: the provider names an environment variable
+  (`api_key_env`) and the key lives in `.env` (git-ignored) — the GUI writes it there for you, like the
+  Hugging Face token.
+* Providers are stored in `summary_providers.json` — see `summary_providers.example.json`.
+  `DIARRHIZER_SUMMARY_PROVIDERS_FILE` / `DIARRHIZER_SUMMARY_TEMPLATES_FILE` move the two files.
+
+**GUI.** The **Саммаризация** screen has two tabs, "Шаблоны промптов" and "Провайдеры" (**Проверить**
+sends a one-word test request with the form's current values). On a job's **Результат** screen,
+**Саммаризация…** opens a dialog: pick a template and a provider, **Создать саммари**; the dialog says
+exactly where the text will be sent, shows the summary as Markdown, keeps the job's earlier summaries and
+can copy or open them. The request runs in a separate process and can be cancelled.
+
+**CLI.**
+
+```powershell
+python -m diarrhizer summarize --list
+python -m diarrhizer summarize ".\out\meeting_20260101_120000" --template "Протокол встречи" --provider ChatGPT --print
+```
+
+`--template` / `--provider` default to the ones marked as default; the argument may also be the job's
+`export/result.md`.
+
+Things to know:
+
+* The transcript text leaves your machine (to OpenAI, Anthropic or the endpoint you configured) — the
+  tool is otherwise fully local. A local OpenAI-compatible server (Ollama, LM Studio) keeps it on-prem.
+* The whole transcript goes in one request. A very long recording needs a model with a large enough
+  context window; when it is too small, the provider's own error is shown. A reply cut off at the
+  provider's length limit is flagged (raise `max_tokens` for API providers).
+* A subscription request counts against that subscription's usage limits.
+
+---
+
 ## Pipeline
 
 The processing pipeline consists of 5 stages:
@@ -386,6 +456,7 @@ Each run creates a job-specific folder inside `--out`, containing artifacts by s
 * `export/` — final `.md`, `.txt`, `.srt`, `.json`
 * `meta/run.json` — the input path and the job's full settings (used to resume it)
 * `speakers.json` — speaker names saved from the GUI
+* `summary/` — summaries made on request (see [Summaries](#summaries)): `<timestamp>_<template>.md` + `.json`
 
 This allows:
 
@@ -417,7 +488,8 @@ See `docs/troubleshooting.md` for detailed diagnostics.
 * GUI: [`src/diarrhizer_gui/`](src/diarrhizer_gui/) — screens in `screens/`, the job queue and child-process runner in `main_window.py`, `job_queue.py`, `pipeline_worker.py`, `child_process.py`
 * Pipeline runner: [`src/diarrhizer/pipeline/runner.py`](src/diarrhizer/pipeline/runner.py)
 * Pipeline stages: [`src/diarrhizer/pipeline/stages/`](src/diarrhizer/pipeline/stages/)
-* External integrations (adapters): [`src/diarrhizer/adapters/`](src/diarrhizer/adapters/)
+* External integrations (adapters): [`src/diarrhizer/adapters/`](src/diarrhizer/adapters/) — including `llm.py`, the summary providers
+* Summaries: [`src/diarrhizer/summary/`](src/diarrhizer/summary/) — templates, providers, and the service that ties a job to them
 * Diagnostics: [`src/diarrhizer/diagnostics/doctor.py`](src/diarrhizer/diagnostics/doctor.py)
 
 ---
@@ -429,7 +501,8 @@ See `docs/troubleshooting.md` for detailed diagnostics.
 3. Stable CLI + caching + environment diagnostics
 4. UX improvements: speaker name mapping, protocol formatting
 5. GUI + additional features (batch queue, resume, playback, speaker naming)
-6. Next ideas: VTT/DOCX export, per-turn text editing in the GUI, summaries
+6. Summaries from prompt templates (subscription CLIs and API providers)
+7. Next ideas: VTT/DOCX export, per-turn text editing in the GUI, splitting very long transcripts for small-context models
 
 ---
 

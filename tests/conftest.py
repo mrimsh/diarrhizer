@@ -22,6 +22,20 @@ def qapp():
     kill_all()
 
 
+@pytest.fixture(autouse=True)
+def summary_stores(tmp_path, monkeypatch):
+    """Never read or write the developer's real <repo>/summary_templates.json
+    and summary_providers.json. Returns (templates path, providers path)."""
+    from diarrhizer.summary.providers import ENV_PROVIDERS_FILE
+    from diarrhizer.summary.templates import ENV_TEMPLATES_FILE
+
+    templates = tmp_path / "summary_templates.json"
+    providers = tmp_path / "summary_providers.json"
+    monkeypatch.setenv(ENV_TEMPLATES_FILE, str(templates))
+    monkeypatch.setenv(ENV_PROVIDERS_FILE, str(providers))
+    return templates, providers
+
+
 @pytest.fixture
 def ini_settings(tmp_path, monkeypatch):
     """Point every screen's QSettings("Diarrhizer", "DiarrhizerGUI") at a

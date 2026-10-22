@@ -34,9 +34,70 @@ def _configure_logging() -> None:
     package_logger.propagate = False
 
 
+# [SEMANTIC-BEGIN] CLI:SUMMARIZE
+# @purpose: Summarize a finished job's transcript with a prompt template and a model provider
+# @description: Takes the job folder (or its export/result.md), attaches export/result.md to the chosen
+#   template's prompt and asks the chosen provider; both default to the ones marked as default in
+#   summary_templates.json / summary_providers.json (shared with the GUI). The reply is stored in the job's
+#   summary/ folder; --print also writes it to stdout, --list shows the available templates and providers.
+# @inputs: args.job, args.template, args.provider, args.print, args.list
+# @outputs: summary/<timestamp>_<template>.md (+ .json) in the job folder; its path on stdout
+# @sideEffects: Sends the transcript to the provider (subscription CLI or HTTPS API); writes files
+# @errors: Exits with code 1 on a missing job/result, unknown template or provider, or a provider failure
+# @see: SUMMARY:JOB, CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS, ADAPTER:LLM
+def _run_summarize(args: argparse.Namespace) -> int:
+    # Imported here so `doctor` and `run` never load the summary modules.
+    from diarrhizer.adapters.llm import LLMError
+    from diarrhizer.summary import service
+    from diarrhizer.summary.providers import ProviderStore
+    from diarrhizer.summary.templates import TemplateStore
+
+    try:
+        templates = TemplateStore.load()
+        providers = ProviderStore.load()
+        if args.list:
+            print("Templates ('*' = default):")
+            for name, template in templates.templates().items():
+                kind = "built-in" if templates.is_builtin(name) else "yours"
+                mark = "*" if template.name == templates.default().name else " "
+                print(f" {mark} {name} ({kind}){': ' + template.description if template.description else ''}")
+            print(f"\nProviders ('*' = default), from {providers.path}:")
+            default = providers.default()
+            for name, provider in providers.providers.items():
+                mark = "*" if default is not None and name == default.name else " "
+                model = f", model {provider.model}" if provider.model else ""
+                print(f" {mark} {name} ({provider.kind}{model})")
+            if not providers.providers:
+                print("   none - add one in the GUI (Саммаризация → Провайдеры) or edit that file")
+            return 0
+
+        if not args.job:
+            print("Error: pass the job folder (or its export/result.md) to summarize", file=sys.stderr)
+            return 1
+        job_dir = service.resolve_job_dir(args.job)
+        template = templates.resolve(args.template)
+        provider = providers.resolve(args.provider)
+        print(f"Summarizing {job_dir.name} with template '{template.name}' via '{provider.name}'...")
+        result = service.summarize_job(job_dir, template, provider)
+    except (FileNotFoundError, ValueError, LLMError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Summary saved: {result['path']}")
+    if result["truncated"]:
+        print("Warning: the provider cut the reply off at its length limit", file=sys.stderr)
+    if args.print:
+        try:
+            print("\n" + result["text"])
+        except UnicodeEncodeError:  # a legacy console code page cannot show the text
+            sys.stdout.buffer.write(("\n" + result["text"] + "\n").encode("utf-8"))
+    return 0
+# [SEMANTIC-END] CLI:SUMMARIZE
+
+
 # [SEMANTIC-BEGIN] CLI:ENTRY
 # @purpose: CLI entry point for Diarrhizer commands
-# @description: Provides doctor and run commands for diagnostics and processing
+# @description: Provides doctor, run and summarize commands for diagnostics, processing and summaries
 # @sideEffects: Loads project .env, parses args, runs diagnostics or pipeline, configures a StreamHandler
 #   (stdout, "%(message)s") on the "diarrhizer" package logger so stage/pipeline
 #   progress logged via logging (see PIPELINE:RUNNER) prints like the old print()s did
@@ -245,10 +306,46 @@ def main() -> int:
              "the audio format's own setting (ignored for the wav format, which only has that file)"
     )
 
+    # Summarize command
+    summarize_parser = subparsers.add_parser(
+        "summarize",
+        help="Summarize a finished job's transcript (export/result.md) with a language model"
+    )
+    summarize_parser.add_argument(
+        "job",
+        nargs="?",
+        default=None,
+        help="Job folder (e.g. out/meeting_20260101_120000) or its export/result.md"
+    )
+    summarize_parser.add_argument(
+        "--template",
+        default=None,
+        help="Prompt template name (default: the default template in summary_templates.json, "
+             "else the first built-in one); --list shows the names"
+    )
+    summarize_parser.add_argument(
+        "--provider",
+        default=None,
+        help="Provider name from summary_providers.json (default: its default provider); "
+             "providers are added in the GUI (Саммаризация → Провайдеры)"
+    )
+    summarize_parser.add_argument(
+        "--print",
+        action="store_true",
+        help="Also print the summary to stdout (it is always saved in the job's summary/ folder)"
+    )
+    summarize_parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List the available templates and providers and exit"
+    )
+
     args = parser.parse_args()
 
     if args.command == "doctor":
         return 0 if run_doctor_checks() else 1
+    elif args.command == "summarize":
+        return _run_summarize(args)
     elif args.command == "run":
         # [SEMANTIC-BEGIN] CLI:RUN
         # @purpose: Run the processing pipeline for one or several media files

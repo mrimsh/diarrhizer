@@ -23,6 +23,8 @@ The goal is a clean, extensible core (CLI now, GUI later) without unnecessary co
   - `python -m diarrhizer doctor`
 - Process a file:
   - `python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 6 --lang ru --device cuda`
+- Summarize a finished job (templates + providers are shared with the GUI):
+  - `python -m diarrhizer summarize "<job folder>" --template "<name>" --provider "<name>" --print`
 
 ---
 
@@ -31,7 +33,8 @@ The goal is a clean, extensible core (CLI now, GUI later) without unnecessary co
 - `src/diarrhizer/cli.py` — CLI entry points (public API surface)
 - `src/diarrhizer/pipeline/runner.py` — pipeline orchestration (stage runner)
 - `src/diarrhizer/pipeline/stages/*` — individual stages (convert/transcribe/diarize/merge/export)
-- `src/diarrhizer/adapters/*` — wrappers around FFmpeg / WhisperX / diarization
+- `src/diarrhizer/adapters/*` — wrappers around FFmpeg / WhisperX / diarization / language models (`llm.py`)
+- `src/diarrhizer/summary/*` — summaries of a finished job: prompt templates, providers, the service (an on-demand add-on, not a pipeline stage)
 - `src/diarrhizer/diagnostics/doctor.py` — environment checks (Windows is sensitive)
 - `docs/architecture.md` — pipeline and artifacts overview
 
