@@ -18,7 +18,8 @@ from vendor_stub import make_vendor
 pytest.importorskip("PySide6", reason="GUI extra not installed")
 
 from PySide6.QtCore import QEventLoop, QObject, Qt, QTimer, Signal  # noqa: E402
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtGui import QTextCursor  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox  # noqa: E402
 
 from diarrhizer.adapters import llm  # noqa: E402
 from diarrhizer.adapters.llm import LLMError, LLMReply  # noqa: E402
@@ -33,10 +34,12 @@ from diarrhizer.summary.providers import (  # noqa: E402
     ProviderStore,
 )
 from diarrhizer.summary.templates import BUILTIN_TEMPLATES, PromptTemplate, TemplateStore  # noqa: E402
-from diarrhizer_gui import child_tasks  # noqa: E402
+from diarrhizer.summary.wildcards import WILDCARDS, Wildcard  # noqa: E402
+from diarrhizer_gui import child_tasks, settings_keys, wildcard_text  # noqa: E402
 from diarrhizer_gui.llm_worker import LlmWorker  # noqa: E402
 from diarrhizer_gui.screens import (  # noqa: E402
     account_panel,
+    prompt_preview_dialog,
     result_screen,
     summary_dialog,
     summary_settings_screen,
@@ -143,11 +146,14 @@ def model(monkeypatch):
     class Model:
         reply: object = LLMReply("## Итоги\n- начали встречу")
         providers: list = []
+        prompts: list = []
 
     Model.providers = []
+    Model.prompts = []
 
     def fake_complete(provider, prompt):
         Model.providers.append(provider)
+        Model.prompts.append(prompt)
         if isinstance(Model.reply, Exception):
             raise Model.reply
         return Model.reply
@@ -592,9 +598,10 @@ def test_creating_a_summary_runs_the_task_and_shows_the_stored_result(qapp, tmp_
     dialog._create_button.click()
     (worker,) = fake_worker.instances
     assert worker.started and worker.target is child_tasks.run_summary_task
-    job_arg, template_dict, provider_dict = worker.args
+    job_arg, template_dict, provider_dict, note = worker.args
     assert job_arg == str(job)
     assert template_dict["name"] == "Мой шаблон" and provider_dict["name"] == "ChatGPT"
+    assert note == ""  # nothing typed in the note field
     assert dialog._create_button.text() == "Отменить"
     assert not dialog._template_combo.isEnabled() and not dialog._provider_combo.isEnabled()
 
@@ -1411,3 +1418,349 @@ def test_a_command_pasted_with_quotes_is_saved_without_them(qapp, summary_stores
 
     assert ProviderStore.load().get("ChatGPT").command == "C:\\Program Files\\OpenAI\\codex.exe"
     assert tab._command_field.text() == "C:\\Program Files\\OpenAI\\codex.exe"  # and the form shows it clean
+
+
+# --- the note and the wildcards in the summary dialog --------------------------------------------------------
+
+
+def _add_template(name: str, prompt: str) -> None:
+    store = TemplateStore.load()
+    store.put(PromptTemplate(name=name, prompt=prompt))
+    store.save()
+
+
+def _pick(combo, data) -> None:
+    combo.setCurrentIndex(combo.findData(data))
+
+
+def test_the_note_field_is_empty_each_time_the_dialog_opens(qapp, tmp_path, configured):
+    job = _job_with_protocol(tmp_path)
+    first = summary_dialog.SummaryDialog(None, job, "meeting.mp4")
+    assert first._note_edit.toPlainText() == ""
+    first._note_edit.setPlainText("в этот раз — про сроки")
+    first.reject()
+
+    second = summary_dialog.SummaryDialog(None, job, "meeting.mp4")
+
+    assert second._note_edit.toPlainText() == ""  # a note belongs to one run: it is not remembered
+    assert second._note_warning.isHidden()
+
+
+def test_the_note_reaches_the_service_and_is_stored_with_the_summary(qapp, tmp_path, configured, fake_worker, model):
+    _add_template("С заметкой", "Заметка: {{note}}\n{{transcript}}")
+    job = _job_with_protocol(tmp_path)
+    dialog = summary_dialog.SummaryDialog(None, job, "meeting.mp4")
+    _pick(dialog._template_combo, "С заметкой")
+    dialog._note_edit.setPlainText("Только сроки\nи люди")
+
+    dialog._create_button.click()
+    (worker,) = fake_worker.instances
+    assert worker.args[3] == "Только сроки\nи люди"
+    assert not dialog._note_edit.isEnabled()  # it cannot change under a running request
+    worker.run_like_the_child()
+
+    assert dialog._note_edit.isEnabled()
+    assert model.prompts == [f"Заметка: Только сроки\nи люди\n<transcript>\n{TRANSCRIPT.strip()}\n</transcript>\n"]
+    (stored,) = service.list_summaries(job)
+    assert stored["user_fields"] == {"note": "Только сроки\nи люди"} and stored["wildcards_used"] == ["note", "transcript"]
+    assert dialog._note_warning.isHidden()
+
+
+def test_a_note_without_a_place_in_the_template_is_flagged_next_to_the_field(qapp, tmp_path, configured):
+    _add_template("С заметкой", "Заметка: {{note}}\n{{transcript}}")
+    _add_template("Расшифровка внутри", "{{transcript}}\nСделай итоги.")
+    dialog = summary_dialog.SummaryDialog(None, _job_with_protocol(tmp_path), "meeting.mp4")
+    assert dialog._note_warning.isHidden()  # nothing typed, nothing to warn about
+
+    dialog._note_edit.setPlainText("Только сроки")  # the default template, "Мой шаблон", has no {{note}}
+    assert not dialog._note_warning.isHidden()
+    assert "нет {{note}}" in dialog._note_warning.text()
+    assert "в конец запроса, перед расшифровкой" in dialog._note_warning.text()
+
+    _pick(dialog._template_combo, "С заметкой")
+    assert dialog._note_warning.isHidden()
+
+    _pick(dialog._template_combo, "Расшифровка внутри")  # it places the transcript itself: the note comes last
+    assert not dialog._note_warning.isHidden() and "в самый конец запроса" in dialog._note_warning.text()
+
+    dialog._note_edit.setPlainText("  \n")  # a blank note is no note
+    assert dialog._note_warning.isHidden()
+
+
+def test_the_dialog_shows_the_request_it_would_send_without_sending_it(qapp, tmp_path, configured, monkeypatch, model):
+    opened = []
+    monkeypatch.setattr(prompt_preview_dialog.PromptPreviewDialog, "exec", lambda self: opened.append(self) or 0)
+    dialog = summary_dialog.SummaryDialog(None, _job_with_protocol(tmp_path), "meeting.mp4")
+    dialog._note_edit.setPlainText("сроки")
+
+    dialog._preview_button.click()
+
+    (preview,) = opened
+    assert preview._view.toPlainText() == f"Сделай мой разбор.\n\nсроки\n\n<transcript>\n{TRANSCRIPT.strip()}\n</transcript>\n"
+    assert model.prompts == []
+
+
+def test_summaries_show_their_note_in_the_list_and_the_viewer_and_older_ones_just_open(
+    qapp, tmp_path, configured, model
+):
+    job = _job_with_protocol(tmp_path)
+    folder = job / "summary"
+    folder.mkdir()
+    old = {"created_at": "2026-01-01T10:00:00", "template": "Старый", "provider": {"name": "gw", "kind": "openai-api"},
+           "prompt": "p", "source": "export/result.md", "transcript_chars": 5, "truncated": False}
+    (folder / "20260101_100000_Старый.json").write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+    (folder / "20260101_100000_Старый.md").write_text("Старое саммари\n", encoding="utf-8")
+    service.summarize_job(
+        job, TemplateStore.load().get("Мой шаблон"), ProviderStore.load().get("gw"), note="Про <b>сроки</b>\nи людей"
+    )
+
+    dialog = summary_dialog.SummaryDialog(None, job, "meeting.mp4")
+
+    combo = dialog._summary_combo
+    titles = [combo.itemText(i) for i in range(combo.count())]
+    new_row = next(i for i, title in enumerate(titles) if "Мой шаблон" in title)
+    old_row = next(i for i, title in enumerate(titles) if "Старый" in title)
+    assert "«Про <b>сроки</b> и людей»" in titles[new_row]  # one line in the list
+    assert "«" not in titles[old_row]
+    combo.setCurrentIndex(new_row)
+    assert "Заметка: Про <b>сроки</b>\nи людей" in dialog._meta_label.text()  # the whole note, as text, not as markup
+    assert combo.itemData(new_row, Qt.ItemDataRole.ToolTipRole) == "Про <b>сроки</b>\nи людей"
+    combo.setCurrentIndex(old_row)
+    assert "Заметка" not in dialog._meta_label.text() and "Старый" in dialog._meta_label.text()
+    assert dialog._view.toPlainText().startswith("Старое саммари")
+
+
+def test_summary_task_passes_the_note_on(tmp_path, model):
+    job = _job_with_protocol(tmp_path)
+    queue = _Queue()
+
+    child_tasks.run_summary_task(
+        queue, str(job), PromptTemplate(name="Итоги", prompt="Подведи итоги.").to_dict(),
+        Provider(name="ChatGPT", kind=KIND_CODEX_CLI).to_dict(), "Только решения",
+    )
+
+    ((kind, result),) = queue.items
+    assert kind == "finished" and result["user_fields"] == {"note": "Только решения"}
+    assert "Только решения" in model.prompts[0]
+
+
+# --- the template editor: the wildcards, the check, the preview ------------------------------------------
+
+
+def _new_template(tab, name: str = "Новый", prompt: str = "") -> None:
+    tab._new_button.click()
+    tab._name_field.setText(name)
+    tab._prompt_edit.setPlainText(prompt)
+
+
+def _put_cursor(tab, position: int, anchor: int | None = None) -> None:
+    cursor = tab._prompt_edit.textCursor()
+    cursor.setPosition(position if anchor is None else anchor)
+    if anchor is not None:
+        cursor.setPosition(position, QTextCursor.MoveMode.KeepAnchor)
+    tab._prompt_edit.setTextCursor(cursor)
+
+
+def test_the_editor_always_lists_the_registrys_wildcards_with_their_descriptions(qapp, monkeypatch):
+    monkeypatch.setitem(WILDCARDS, "mood", Wildcard("mood", "How the call felt.", lambda ctx: "x", "настроение звонка"))
+    tab = summary_settings_screen.TemplatesTab()
+    tab.show()
+
+    # Built from the registry: its names in its order - the one added above too, nothing is listed by hand.
+    assert list(tab._wildcard_buttons) == list(WILDCARDS) and "mood" in tab._wildcard_buttons
+    assert [button.text() for button in tab._wildcard_buttons.values()] == ["{{" + name + "}}" for name in WILDCARDS]
+    assert all(button.isVisible() for button in tab._wildcard_buttons.values())
+    shown = {label.text() for label in tab.findChildren(QLabel)}
+    for wildcard in WILDCARDS.values():
+        assert wildcard_text.short_description(wildcard) in shown
+    assert "настроение звонка" in shown and "язык записи" in shown
+
+
+def test_clicking_a_wildcard_inserts_it_where_the_cursor_is(qapp, summary_stores):
+    tab = summary_settings_screen.TemplatesTab()
+    _new_template(tab, prompt="Итоги: .")
+    _put_cursor(tab, 7)
+
+    tab._wildcard_buttons["note"].click()
+    assert tab._prompt_edit.toPlainText() == "Итоги: {{note}}."
+
+    tab._wildcard_buttons["date"].click()  # the cursor moved on, behind the first insertion
+    assert tab._prompt_edit.toPlainText() == "Итоги: {{note}}{{date}}."
+
+    tab._prompt_edit.setPlainText("Для X!")
+    _put_cursor(tab, 5, anchor=4)  # "X" is selected: it is replaced
+    tab._wildcard_buttons["speakers"].click()
+    assert tab._prompt_edit.toPlainText() == "Для {{speakers}}!"
+
+
+def test_a_builtin_template_takes_no_insertions(qapp, summary_stores):
+    tab = summary_settings_screen.TemplatesTab()
+    before = tab._prompt_edit.toPlainText()
+    assert tab._prompt_edit.isReadOnly()
+    tab._status.clear()  # the form already says it is read-only when it is shown; the click must say it again
+
+    tab._wildcard_buttons["note"].click()
+
+    assert tab._prompt_edit.toPlainText() == before
+    assert "нельзя изменить" in tab._status.text()
+
+
+def test_unknown_wildcards_are_marked_and_the_template_is_not_saved(qapp, summary_stores):
+    tab = summary_settings_screen.TemplatesTab()
+    _new_template(tab, "С ошибкой", "😀 Для {{client}}: {{transcript}}")
+
+    marked = tab._prompt_edit.extraSelections()
+    assert [selection.cursor.selectedText() for selection in marked] == ["{{client}}", "{{transcript}}"]  # past the emoji
+    assert [selection.format.background().color().name() for selection in marked] == [
+        summary_settings_screen.UNKNOWN_WILDCARD_BACKGROUND, summary_settings_screen.KNOWN_WILDCARD_BACKGROUND,
+    ]
+    assert "Неизвестный wildcard: {{client}} (строка 1)" in tab._prompt_check.text()
+    assert all("{{" + name + "}}" in tab._prompt_check.text() for name in WILDCARDS)  # the valid ones are listed
+
+    tab._save_button.click()
+
+    assert "С ошибкой" not in TemplateStore.load().templates()
+    assert "не сохранён" in tab._status.text() and "{{client}}" in tab._status.text()
+    assert summary_settings_screen.ERROR_COLOR in tab._status.styleSheet()
+    assert tab._prompt_edit.textCursor().selectedText() == "{{client}}"  # the place is selected
+
+    tab._prompt_edit.setPlainText("Для {{job_name}}: {{transcript}}")  # fixed
+    tab._save_button.click()
+    assert TemplateStore.load().get("С ошибкой").prompt == "Для {{job_name}}: {{transcript}}"
+
+
+def test_every_unknown_wildcard_is_named_with_its_line(qapp, summary_stores):
+    tab = summary_settings_screen.TemplatesTab()
+    _new_template(tab, "Много", "{{one}}\nи {{two}}, {{one}}")
+
+    text = tab._prompt_check.text()
+
+    assert "Неизвестные wildcards: {{one}} (строка 1), {{two}} (строка 2), {{one}} (строка 2)" in text
+
+
+def test_a_template_without_the_transcript_wildcard_is_saved_with_a_warning(qapp, summary_stores):
+    tab = summary_settings_screen.TemplatesTab()
+    _new_template(tab, "Короткий", "Подведи итоги.")
+    assert "нет {{transcript}}" in tab._prompt_check.text()
+    assert summary_settings_screen.WARN_COLOR in tab._prompt_check.styleSheet()
+
+    tab._save_button.click()
+
+    assert TemplateStore.load().get("Короткий").prompt == "Подведи итоги."  # saved: it is only a warning
+    assert "сохранён" in tab._status.text() and "нет {{transcript}}" in tab._status.text()
+    assert summary_settings_screen.WARN_COLOR in tab._status.styleSheet()
+
+
+def test_a_template_with_known_wildcards_escapes_and_json_saves_without_a_warning(qapp, summary_stores):
+    tab = summary_settings_screen.TemplatesTab()
+    prompt = 'Итог по {{job_name}}.\n{{ transcript }}\nФормат: {"a": {"b": 1}}, буквально: \\{{note}} и {{"x"}}'
+    _new_template(tab, "Чистый", prompt)
+
+    assert [s.cursor.selectedText() for s in tab._prompt_edit.extraSelections()] == ["{{job_name}}", "{{ transcript }}"]
+    tab._save_button.click()
+
+    assert TemplateStore.load().get("Чистый").prompt == prompt
+    assert "сохранён" in tab._status.text() and "нет {{transcript}}" not in tab._status.text()
+    assert summary_settings_screen.OK_COLOR in tab._status.styleSheet()
+
+
+def _redirected_out_dir(monkeypatch, ini_settings, out_dir) -> None:
+    """The editor looks for jobs in the results folder of the GUI's settings: point those at a temp file."""
+    _path, factory = ini_settings
+    settings = factory()
+    settings.setValue(settings_keys.OUT_DIR, str(out_dir))
+    settings.sync()
+    monkeypatch.setattr(summary_settings_screen, "QSettings", factory)
+
+
+def test_the_preview_button_shows_the_request_of_the_unsaved_prompt_for_a_finished_job(
+    qapp, tmp_path, ini_settings, monkeypatch, model
+):
+    job = _job_with_protocol(tmp_path)
+    (tmp_path / "out" / "unfinished_20261022_000000").mkdir()  # no result: it is not offered
+    _redirected_out_dir(monkeypatch, ini_settings, tmp_path / "out")
+    opened = []
+    monkeypatch.setattr(prompt_preview_dialog.PromptPreviewDialog, "exec", lambda self: opened.append(self) or 0)
+    tab = summary_settings_screen.TemplatesTab()
+    _new_template(tab, "Черновик", "Заметка: {{note}}\n{{transcript}}")  # typed, not saved
+
+    tab._preview_button.click()
+
+    (dialog,) = opened
+    assert dialog._job_combo.count() == 1 and dialog._job_combo.currentData() == str(job)
+    assert dialog._view.toPlainText() == f"Заметка: \n<transcript>\n{TRANSCRIPT.strip()}\n</transcript>\n"
+    assert "Ничего не отправлено" in dialog._info.text()
+    assert model.prompts == []  # looking is not asking a model
+    assert "Черновик" not in TemplateStore.load().templates()  # and it saved nothing
+
+
+def test_the_preview_without_a_finished_job_says_where_it_looked(qapp, tmp_path, ini_settings, monkeypatch):
+    empty = tmp_path / "no_jobs_here"
+    empty.mkdir()
+    _redirected_out_dir(monkeypatch, ini_settings, empty)
+    opened = []
+    monkeypatch.setattr(prompt_preview_dialog.PromptPreviewDialog, "exec", lambda self: opened.append(self) or 0)
+    tab = summary_settings_screen.TemplatesTab()
+
+    tab._preview_button.click()
+
+    (dialog,) = opened
+    assert dialog._view.toPlainText() == ""
+    assert "нет готовых заданий" in dialog._info.text() and str(empty) in dialog._info.text()
+
+
+def test_the_preview_is_exactly_what_a_run_sends(qapp, tmp_path, configured, model):
+    job = _job_with_protocol(tmp_path)
+    prompt = "Итоги по {{job_name}} от {{date}}.\nЗаметка: {{note}}\n\n{{transcript}}"
+    dialog = prompt_preview_dialog.PromptPreviewDialog(None, prompt, "Т", [("meeting", job)], note="сроки")
+    shown = dialog._view.toPlainText()
+    assert model.prompts == []
+
+    service.summarize_job(job, PromptTemplate(name="Т", prompt=prompt), ProviderStore.load().get("gw"), note="сроки")
+
+    assert model.prompts == [shown]
+    assert "Итоги по meeting от 2026-10-22." in shown and "Заметка: сроки" in shown
+
+    dialog._note_edit.setPlainText("другое")  # the preview follows the note
+    assert "Заметка: другое" in dialog._view.toPlainText()
+
+
+def test_the_preview_says_what_is_wrong_instead_of_failing(qapp, tmp_path):
+    job = _job_with_protocol(tmp_path)
+    broken = prompt_preview_dialog.PromptPreviewDialog(None, "Для {{client}} {{transcript}}", "Т", [("m", job)])
+    assert broken._view.toPlainText() == ""
+    assert "Неизвестный wildcard: {{client}} (строка 1)" in broken._info.text()
+
+    no_result = tmp_path / "out" / "empty_job"
+    no_result.mkdir()
+    missing = prompt_preview_dialog.PromptPreviewDialog(None, "Итоги", "Т", [("e", no_result)])
+    assert missing._view.toPlainText() == "" and "result.md" in missing._info.text()
+
+    nothing = prompt_preview_dialog.PromptPreviewDialog(None, "Итоги", "Т", [], empty_hint="Нет заданий.")
+    assert nothing._view.toPlainText() == "" and nothing._info.text() == "Нет заданий."
+
+
+def test_the_preview_repeats_the_editors_warnings(qapp, tmp_path):
+    job = _job_with_protocol(tmp_path)
+    dialog = prompt_preview_dialog.PromptPreviewDialog(None, "Подведи итоги.", "Т", [("m", job)], note="сроки")
+
+    text = dialog._info.text()
+
+    assert "нет {{transcript}}" in text and "нет {{note}}" in text
+    assert dialog._view.toPlainText().startswith("Подведи итоги.\n\nсроки\n\n<transcript>")
+
+
+def test_only_finished_jobs_of_the_results_folder_are_offered_newest_first(tmp_path, ini_settings):
+    for name in ("a_20260101_100000", "b_20260301_100000"):
+        (tmp_path / "out" / name / "export").mkdir(parents=True)
+        (tmp_path / "out" / name / "export" / "result.md").write_text("x", encoding="utf-8")
+    (tmp_path / "out" / "c_20260401_100000").mkdir()  # not finished
+    _path, factory = ini_settings
+    settings = factory()
+    settings.setValue(settings_keys.OUT_DIR, str(tmp_path / "out"))
+    settings.sync()
+
+    jobs, out_dir = prompt_preview_dialog.completed_jobs(factory())
+
+    assert out_dir == tmp_path / "out"
+    assert [job.name for _title, job in jobs] == ["b_20260301_100000", "a_20260101_100000"]

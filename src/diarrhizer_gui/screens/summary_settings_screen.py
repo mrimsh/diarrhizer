@@ -7,14 +7,15 @@ that is not kept there: like the Hugging Face token it goes to the repo-root
 the variable. Summaries themselves are made from a finished job's Result
 screen (summary_dialog.py).
 
-Only PySide6 + the stdlib-only diarrhizer.summary modules at import time.
+Only PySide6, the stdlib-only diarrhizer.summary modules and the GUI's own light modules at import time.
 """
 
 import os
 import shlex
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QTabWidget,
+    QTextEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -52,17 +54,23 @@ from diarrhizer.summary.providers import (
     default_key_env,
 )
 from diarrhizer.summary.templates import PromptTemplate, TemplateStore
-from diarrhizer_gui import env_file, provider_text
+from diarrhizer.summary.wildcards import WILDCARDS, find_wildcards
+from diarrhizer_gui import env_file, provider_text, wildcard_text
 from diarrhizer_gui.child_tasks import run_account_task, run_provider_check_task
 from diarrhizer_gui.llm_worker import LlmWorker
 from diarrhizer_gui.screens.account_panel import AccountPanel
 from diarrhizer_gui.screens.model_combo import ModelCombo
+from diarrhizer_gui.screens.prompt_preview_dialog import PromptPreviewDialog, completed_jobs
 
 ENV_PATH = env_file.REPO_ROOT / ".env"
 
 OK_COLOR = "#2f7d52"
 ERROR_COLOR = "#b23b35"
+WARN_COLOR = "#a85520"
 MUTED_COLOR = "#7d8394"
+# How wildcards look in the prompt: a known one tinted, an unknown one red and wavy.
+KNOWN_WILDCARD_BACKGROUND = "#dce9f8"
+UNKNOWN_WILDCARD_BACKGROUND = "#f6d9d6"
 
 KIND_LABELS = {
     KIND_CODEX_CLI: "ChatGPT — аккаунт с подпиской (Codex CLI)",
@@ -117,10 +125,15 @@ DEFAULT_ENDPOINTS = {
 }
 
 
-def _set_status(label: QLabel, message: str, ok: Optional[bool]) -> None:
-    """ok=True green, False red, None muted."""
+def _set_status(label: QLabel, message: str, ok: Optional[bool], color: Optional[str] = None) -> None:
+    """ok=True green, False red, None muted; `color` overrides (for a warning)."""
     label.setText(message)
-    label.setStyleSheet(f"color: {MUTED_COLOR if ok is None else OK_COLOR if ok else ERROR_COLOR};")
+    label.setStyleSheet(f"color: {color or (MUTED_COLOR if ok is None else OK_COLOR if ok else ERROR_COLOR)};")
+
+
+def _qt_offset(text: str, index: int) -> int:
+    """A character index of `text` as a QTextDocument position (UTF-16 units: an emoji counts twice)."""
+    return len(text[:index].encode("utf-16-le")) // 2
 
 
 def _status_label() -> QLabel:
@@ -183,21 +196,26 @@ class TemplatesTab(QWidget):
         self._description_field = QLineEdit()
         self._description_field.setPlaceholderText("необязательно — подсказка в списке шаблонов")
         self._prompt_edit = QPlainTextEdit()
-        self._prompt_edit.setMinimumHeight(240)
+        self._prompt_edit.setMinimumHeight(330)  # room for most of the wildcard list beside it
         self._prompt_edit.setPlaceholderText(
             "Что сделать с расшифровкой, например:\n"
             "«Составь протокол встречи: участники, решения, задачи с ответственными и сроками.»"
         )
-        hint = _muted_label(
-            "К промпту автоматически добавляется расшифровка разговора (export/result.md) — "
-            "включать её в шаблон не нужно."
-        )
+        self._prompt_edit.textChanged.connect(self._update_prompt_check)
+        # What the prompt gets right or wrong, live: an unknown wildcard, a missing {{transcript}}.
+        self._prompt_check = _status_label()
+
+        prompt_row = QWidget()
+        prompt_layout = QHBoxLayout(prompt_row)
+        prompt_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_layout.addWidget(self._prompt_edit, stretch=1)
+        prompt_layout.addWidget(self._build_wildcard_panel())
 
         form = QFormLayout()
         form.addRow("Название:", self._name_field)
         form.addRow("Описание:", self._description_field)
-        form.addRow("Промпт:", self._prompt_edit)
-        form.addRow("", hint)
+        form.addRow("Промпт:", prompt_row)
+        form.addRow("", self._prompt_check)
 
         self._new_button = QPushButton("Новый")
         self._new_button.clicked.connect(self._new)
@@ -210,9 +228,15 @@ class TemplatesTab(QWidget):
         self._delete_button.clicked.connect(self._delete)
         self._default_button = QPushButton("Сделать по умолчанию")
         self._default_button.clicked.connect(self._make_default)
+        self._preview_button = QPushButton("Показать собранный запрос…")
+        self._preview_button.setToolTip(
+            "Выбрать готовое задание и показать запрос, как он уйдёт модели, по тексту промпта из формы "
+            "(даже несохранённому). Ничего не отправляется."
+        )
+        self._preview_button.clicked.connect(self._show_request)
         buttons = QHBoxLayout()
         for button in (self._new_button, self._duplicate_button, self._save_button,
-                       self._delete_button, self._default_button):
+                       self._delete_button, self._default_button, self._preview_button):
             buttons.addWidget(button)
         buttons.addStretch(1)
 
@@ -229,6 +253,30 @@ class TemplatesTab(QWidget):
         layout.addLayout(right, stretch=1)
 
         self.reload()
+
+    def _build_wildcard_panel(self) -> QScrollArea:
+        """The registry's wildcards, always in view: a button to insert each, with a line about it."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 6, 0)
+        layout.addWidget(_muted_label("Wildcards: нажмите, чтобы вставить в место курсора"))
+        self._wildcard_buttons: dict[str, QPushButton] = {}
+        for name, wildcard in WILDCARDS.items():
+            button = QPushButton(wildcard_text.token(name))
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # the prompt keeps its cursor and focus
+            button.setStyleSheet("text-align: left; padding: 3px 8px;")
+            button.setToolTip(wildcard_text.short_description(wildcard))
+            button.clicked.connect(lambda checked=False, n=name: self._insert_wildcard(n))
+            self._wildcard_buttons[name] = button
+            layout.addWidget(button)
+            layout.addWidget(_muted_label(wildcard_text.short_description(wildcard)))
+        layout.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFixedWidth(330)
+        scroll.setWidget(panel)
+        return scroll
 
     # --- state ---------------------------------------------------------------
 
@@ -268,7 +316,8 @@ class TemplatesTab(QWidget):
     def _set_enabled(self, enabled: bool) -> None:
         for widget in (self._list, self._name_field, self._description_field, self._prompt_edit,
                        self._new_button, self._duplicate_button, self._save_button,
-                       self._delete_button, self._default_button):
+                       self._delete_button, self._default_button, self._preview_button,
+                       *self._wildcard_buttons.values()):
             widget.setEnabled(enabled)
 
     def _show(self, name: str) -> None:
@@ -315,6 +364,74 @@ class TemplatesTab(QWidget):
             return
         self._show(current.data(Qt.ItemDataRole.UserRole))
 
+    def _update_prompt_check(self) -> None:
+        """Mark the wildcards in the prompt and say what is wrong with it, live."""
+        prompt = self._prompt_edit.toPlainText()
+        selections = []
+        for ref in find_wildcards(prompt):
+            cursor = QTextCursor(self._prompt_edit.document())
+            cursor.setPosition(_qt_offset(prompt, ref.start))
+            cursor.setPosition(_qt_offset(prompt, ref.end), QTextCursor.MoveMode.KeepAnchor)
+            marking = QTextCharFormat()
+            marking.setBackground(QColor(KNOWN_WILDCARD_BACKGROUND if ref.known else UNKNOWN_WILDCARD_BACKGROUND))
+            if not ref.known:
+                marking.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
+                marking.setUnderlineColor(QColor(ERROR_COLOR))
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor, selection.format = cursor, marking
+            selections.append(selection)
+        self._prompt_edit.setExtraSelections(selections)
+
+        unknown = wildcard_text.unknown_message(prompt)
+        missing = wildcard_text.missing_transcript_message(prompt) if prompt.strip() else ""
+        if unknown:
+            _set_status(self._prompt_check, unknown + " Шаблон с таким wildcard не сохранить.", ok=False)
+        elif missing:
+            _set_status(self._prompt_check, missing, ok=None, color=WARN_COLOR)
+        else:
+            _set_status(
+                self._prompt_check,
+                "Расшифровка подставляется туда, где в промпте стоит {{transcript}}; "
+                "если её там нет, она добавляется в конец запроса.",
+                ok=None,
+            )
+
+    def _insert_wildcard(self, name: str) -> None:
+        """Put {{name}} where the prompt's cursor is (replacing a selection) and give the prompt the focus back."""
+        if self._prompt_edit.isReadOnly():
+            _set_status(
+                self._status, "Встроенный шаблон нельзя изменить — «Дублировать» создаст его копию.", ok=None
+            )
+            return
+        cursor = self._prompt_edit.textCursor()
+        cursor.insertText(wildcard_text.token(name))
+        self._prompt_edit.setTextCursor(cursor)
+        self._prompt_edit.setFocus()
+
+    def _show_request(self) -> None:
+        """The request the form's prompt gives for a finished job - not sent anywhere."""
+        jobs, out_dir = completed_jobs(QSettings("Diarrhizer", "DiarrhizerGUI"))
+        PromptPreviewDialog(
+            self,
+            self._prompt_edit.toPlainText(),
+            self._name_field.text().strip(),
+            jobs,
+            empty_hint=(
+                f"В папке результатов ({out_dir}) нет готовых заданий с export/result.md. Обработайте запись "
+                "или укажите другую папку результатов в настройках."
+            ),
+        ).exec()
+
+    def _select_first_unknown_wildcard(self, prompt: str) -> None:
+        for ref in find_wildcards(prompt):
+            if not ref.known:
+                cursor = QTextCursor(self._prompt_edit.document())
+                cursor.setPosition(_qt_offset(prompt, ref.start))
+                cursor.setPosition(_qt_offset(prompt, ref.end), QTextCursor.MoveMode.KeepAnchor)
+                self._prompt_edit.setTextCursor(cursor)
+                self._prompt_edit.setFocus()
+                return
+
     def _start_new_form(self, name: str, description: str, prompt: str) -> None:
         self._list.blockSignals(True)
         self._list.setCurrentRow(-1)
@@ -356,6 +473,12 @@ class TemplatesTab(QWidget):
         except ValueError as e:
             _set_status(self._status, str(e), ok=False)
             return
+        # An unknown wildcard would fail every run with this template: refuse, and show where it is.
+        problem = wildcard_text.unknown_message(template.prompt)
+        if problem:
+            self._select_first_unknown_wildcard(template.prompt)
+            _set_status(self._status, f"Шаблон не сохранён. {problem}", ok=False)
+            return
         renamed_from = self._editing if self._editing != template.name else None
         was_default = renamed_from is not None and self._store.default_name == renamed_from
         try:
@@ -371,7 +494,14 @@ class TemplatesTab(QWidget):
             return
         self._editing = template.name
         self.reload(select=template.name)
-        _set_status(self._status, f"Шаблон «{template.name}» сохранён в {self._store.path.name}", ok=True)
+        # No {{transcript}} is fine - it is added at the end - but worth a word.
+        warning = wildcard_text.missing_transcript_message(template.prompt)
+        _set_status(
+            self._status,
+            f"Шаблон «{template.name}» сохранён в {self._store.path.name}" + (f". {warning}" if warning else ""),
+            ok=True,
+            color=WARN_COLOR if warning else None,
+        )
 
     def _delete(self) -> None:
         if self._store is None or self._editing is None or self._store.is_builtin(self._editing):
@@ -988,7 +1118,13 @@ class ProvidersTab(QWidget):
 # @purpose: Let the user create prompt templates and configure the providers that write summaries
 # @description: Two tabs over the shared JSON stores (CONFIG:SUMMARY_TEMPLATES / CONFIG:SUMMARY_PROVIDERS).
 #   Templates: built-ins are read-only ("Дублировать" copies one into an editable template), a user template
-#   can be renamed, deleted or made the default. Providers are created from four presets (ChatGPT / Claude
+#   can be renamed, deleted or made the default. Beside the prompt the editor always shows the wildcards of
+#   the registry (SUMMARY:WILDCARDS - names and short descriptions are read from it, not listed here); a
+#   click inserts {{name}} at the prompt's cursor. The prompt is checked as it is typed and on saving: wildcards
+#   are tinted in it, an unknown one is red and wavy and the template is not saved (its place is selected, the
+#   message names it and lists the valid ones); a prompt without {{transcript}} only gets a warning, because the
+#   transcript is then added at the end. "Показать собранный запрос…" opens GUI:PROMPT_PREVIEW on a finished
+#   job of the results folder (QSettings app/out_dir) with the form's prompt, saved or not. Providers are created from four presets (ChatGPT / Claude
 #   subscription via their CLIs, OpenAI-compatible API, Anthropic API); an API key typed in the form is written
 #   to the repo-root .env under the provider's variable and into os.environ, never to the JSON file. "Проверить"
 #   sends a trivial prompt through a child process (LlmWorker) using the form's current values, saved or not,
@@ -1004,7 +1140,7 @@ class ProvidersTab(QWidget):
 # @outputs: the two JSON stores, API keys in .env
 # @sideEffects: Writes the stores and .env, os.environ; spawns a child process for the connection check
 # @errors: Store/validation errors are shown in the tab's status line
-# @see: CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS, GUI:ACCOUNT_PANEL, GUI:LLM_WORKER, GUI:SUMMARY_DIALOG, CONFIG:ENV
+# @see: CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS, SUMMARY:WILDCARDS, GUI:PROMPT_PREVIEW, GUI:ACCOUNT_PANEL, GUI:LLM_WORKER, GUI:SUMMARY_DIALOG, CONFIG:ENV
 class SummarySettingsScreen(QWidget):
     """Sidebar screen "Саммаризация": the templates and providers tabs."""
 

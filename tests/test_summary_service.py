@@ -572,7 +572,7 @@ def test_every_registered_wildcard_has_a_description_and_is_described_in_the_doc
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     architecture = (REPO_ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
     for name, wildcard in WILDCARDS.items():
-        assert wildcard.name == name and wildcard.description.strip()
+        assert wildcard.name == name and wildcard.description.strip() and wildcard.description_ru.strip()  # + the GUI's line
         assert "{{" + name + "}}" in readme, f"README.md does not describe {{{{{name}}}}}"
         assert "{{" + name + "}}" in architecture, f"docs/architecture.md does not describe {{{{{name}}}}}"
 
@@ -690,3 +690,68 @@ def test_summarize_reports_an_unknown_wildcard_of_a_template_and_sends_nothing(r
     assert code == 1
     assert "Unknown wildcard {{client}} in line 1 of the template 'С ошибкой'" in err and "{{transcript}}" in err
     assert model.prompts == [] and not (job_dir / "summary").exists()
+
+
+# --- finding wildcards, previewing the request, the note in a title -------------------------------------------
+
+
+def test_a_job_folder_renamed_after_a_clash_still_gives_its_date_and_name(tmp_path, model):
+    job = tmp_path / "out" / "meeting_20261022_101500_2"  # new_job_dir() adds _2 when the name is taken
+    (job / "export").mkdir(parents=True)
+    (job / "export" / "result.md").write_text(TRANSCRIPT, encoding="utf-8")
+
+    service.summarize_job(job, template_with("{{job_name}}|{{date}}"), PROVIDER)
+
+    assert model.prompts[0].startswith("meeting|2026-10-22\n")
+
+
+def test_a_wildcard_does_not_span_lines(job_dir, model):
+    service.summarize_job(job_dir, template_with("a {{\nnote\n}} b {{ note\t}}"), PROVIDER, note="N")
+
+    assert model.prompts[0].startswith("a {{\nnote\n}} b N\n")  # the first is not a wildcard, the second is
+
+
+def test_find_wildcards_gives_every_reference_with_its_place(job_dir):
+    from diarrhizer.summary.wildcards import find_wildcards
+
+    prompt = "Для {{client}}\n\\{{note}} и {{ note }}, {{transcript}}"
+
+    refs = find_wildcards(prompt)
+
+    assert [(r.name, r.known, r.line) for r in refs] == [("client", False, 1), ("note", True, 2), ("transcript", True, 2)]
+    assert [prompt[r.start:r.end] for r in refs] == ["{{client}}", "{{ note }}", "{{transcript}}"]  # the escaped one is not
+    assert find_wildcards("без wildcards {} {{}} {{1}}") == []
+
+
+def test_preview_prompt_is_what_a_run_sends_and_sends_nothing(job_dir, model):
+    prompt = "Итоги «{{job_name}}»: {{note}}"
+
+    preview = service.preview_prompt(job_dir, prompt, "про сроки", "Свой")
+    assert model.prompts == []  # built, not sent
+
+    service.summarize_job(job_dir, template_with(prompt), PROVIDER, note="про сроки")
+    assert model.prompts == [preview.text]
+    assert preview.wildcards_used == ["job_name", "note"] and preview.warnings == []
+
+
+def test_preview_prompt_reports_the_same_problems_as_a_run(job_dir, tmp_path):
+    with pytest.raises(UnknownWildcardError, match=r"\{\{client\}\}"):
+        service.preview_prompt(job_dir, "{{client}}")
+    with pytest.raises(FileNotFoundError, match="result.md"):
+        service.preview_prompt(tmp_path / "nowhere", "x")
+    assert service.preview_prompt(job_dir, "Итоги.", "заметка").warnings  # a note with no place: warned
+
+
+def test_a_summary_line_carries_the_start_of_its_note():
+    summary = {"created_at": "2026-10-22T10:00:00", "template": "T", "provider": {"name": "p"}}
+    base = "22.10.2026 10:00 · T · p"
+
+    assert service.summary_title(summary) == base
+    assert service.summary_title({**summary, "user_fields": {"note": ""}}) == base
+    assert service.summary_title({**summary, "user_fields": {"note": "про\nсроки \n и людей"}}) == base + " · «про сроки и людей»"
+    long = service.summary_title({**summary, "user_fields": {"note": "x" * 100}})
+    assert long == base + " · «" + "x" * service.NOTE_TITLE_CHARS + "…»"
+    for damaged in ("garbage", ["note"], {"note": 5}, None):  # a damaged file is not a crash
+        assert service.summary_title({**summary, "user_fields": damaged}) == base
+        assert service.summary_note({**summary, "user_fields": damaged}) == ""
+    assert service.summary_note({**summary, "user_fields": {"note": "  текст \n"}}) == "текст"

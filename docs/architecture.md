@@ -468,8 +468,9 @@ export/result.md ──► SUMMARY:JOB ──► ADAPTER:LLM ──► provider 
   `audio_formats.json`: missing file = empty, malformed = `ValueError` naming the file).
 - **Wildcards** (`summary/wildcards.py`, `CONFIG:SUMMARY_WILDCARDS` / `SUMMARY:WILDCARDS`): a template says where
   a value goes by writing `{{name}}`. The one registry `WILDCARDS` (name → description → function of a
-  `PromptContext`) defines them; validation, the `summarize --list-wildcards` listing and the error that names
-  the valid ones all read it, so a new wildcard is one entry there (plus a line in the README table).
+  `PromptContext`, plus a short Russian line for the GUI) defines them; validation (`find_wildcards`), the
+  `summarize --list-wildcards` listing, the error that names the valid ones and the GUI's wildcard list all read
+  it, so a new wildcard is one entry there (plus a line in the README table).
 
   | Wildcard | Value | Source |
   |----------|-------|--------|
@@ -481,7 +482,7 @@ export/result.md ──► SUMMARY:JOB ──► ADAPTER:LLM ──► provider 
   | `{{speakers}}` | speakers in order of appearance, comma-separated | `merged/segments.json` + the names in `speakers.json` (an unnamed speaker keeps `Speaker_NN`) |
   | `{{language}}` | language code | `meta/run.json` `pipeline_config.language`; for `auto` the detected one from `asr/transcript.json` |
 
-  Syntax: `{{name}}`, spaces inside the braces allowed; single braces and `{{` + a non-name (JSON) are never
+  Syntax: `{{name}}`, spaces and tabs (not line breaks) inside the braces allowed; single braces and `{{` + a non-name (JSON) are never
   touched; `\{{` is an escaped literal `{{`. One left-to-right pass, so a value is never scanned again. Job
   facts come from what the job already records and are `""` when it is missing or malformed - never an error.
   Rules: no `{{transcript}}` → the fenced transcript is appended (templates written before wildcards are
@@ -533,10 +534,20 @@ stores. A subscription provider there has an account box (`screens/account_panel
 the signed-in account and one button that signs in, cancels a sign-in or signs out, plus the plan's limits;
 the model field is a list the provider fills (`screens/model_combo.py`) that still accepts a typed id. The
 Result screen's **Саммаризация…** opens `screens/summary_dialog.py` (`GUI:SUMMARY_DIALOG`), which shows what
-each request used. Everything that talks to a provider - a summary, a check, a sign-in, a model query - runs in
+each request used - and the note it was made with. The dialog has a multi-line **Заметка** field (empty on every
+open, never remembered; passed through `run_summary_task(…, note)` to `summarize_job`) and a warning beside it
+when the chosen template has no `{{note}}`. The template editor (`TemplatesTab`) builds its list of wildcard
+buttons from `WILDCARDS` (the name and `description_ru` of each entry - no list of its own), tints the
+wildcards of the prompt with extra selections, refuses to save an unknown one (it selects the first) and only
+warns about a missing `{{transcript}}`. **Показать запрос** (dialog) / **Показать собранный запрос…** (editor)
+open `screens/prompt_preview_dialog.py` (`GUI:PROMPT_PREVIEW`), which shows
+`service.preview_prompt()` - the same code a run uses - for a job and a note; the editor picks the job from the
+results folder of the GUI settings (`app/out_dir`). Everything that talks to a provider - a summary, a check, a
+sign-in, a model query - runs in
 a child process (`llm_worker.py` + `child_tasks.run_summary_task` / `run_provider_check_task` /
 `run_account_task`; a sign-in reports the address to open as an event), so it can be cancelled together with
-whatever the CLI started. The Russian wording of usage, cost and limits is `provider_text.py`.
+whatever the CLI started. The Russian wording of usage, cost and limits is `provider_text.py`, that of the
+wildcard checks `wildcard_text.py`.
 
 ---
 

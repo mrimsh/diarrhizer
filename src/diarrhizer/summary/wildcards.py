@@ -23,12 +23,12 @@ from diarrhizer.export.speakers import resolve_speaker_name
 from diarrhizer.export.turns import format_timestamp
 from diarrhizer.utils import read_json
 
-# `\{{` (an escaped literal "{{", no group) or `{{ name }}` (group 1 = name). A wildcard in the template is
-# found once, left to right, and a value is never scanned again: a transcript that happens to contain
-# "{{note}}" stays as it is.
-_TOKEN = re.compile(r"\\\{\{|\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
-# generate_job_id() ends every job folder name with _YYYYMMDD_HHMMSS.
-_JOB_STAMP = re.compile(r"_(\d{8})_\d{6}$")  # group 1 = the date
+# `\{{` (an escaped literal "{{", no group) or `{{ name }}` (group 1 = name; spaces and tabs only, so a
+# wildcard never spans lines). A wildcard in the template is found once, left to right, and a value is never
+# scanned again: a transcript that happens to contain "{{note}}" stays as it is.
+_TOKEN = re.compile(r"\\\{\{|\{\{[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*\}\}")
+# generate_job_id() ends every job folder name with _YYYYMMDD_HHMMSS; new_job_dir() adds _2, _3... on a clash.
+_JOB_STAMP = re.compile(r"_(\d{8})_\d{6}(?:_\d+)?$")  # group 1 = the date
 
 
 class PromptContext:
@@ -71,8 +71,9 @@ class PromptContext:
 @dataclass(frozen=True)
 class Wildcard:
     name: str
-    description: str
+    description: str  # English, for the CLI and the docs
     value: Callable[[PromptContext], str]
+    description_ru: str = ""  # one short Russian line for the GUI's list (the GUI falls back to `description`)
 
 
 def _text(value: object) -> str:
@@ -139,7 +140,8 @@ def _language(ctx: PromptContext) -> str:
 
 # [SEMANTIC-BEGIN] CONFIG:SUMMARY_WILDCARDS
 # @purpose: The one list of wildcards a prompt template may use
-# @description: name -> Wildcard(name, description, value function). The value functions take a PromptContext
+# @description: name -> Wildcard(name, description, value function, a short Russian line for the GUI's list;
+#   find_wildcards() reads the references out of a prompt against it). The value functions take a PromptContext
 #   and return a string; job facts come from what the job already records (meta/run.json,
 #   merged/segments.json, speakers.json, asr/transcript.json, the folder name) and are "" when that is
 #   missing. To add a wildcard, add an entry here and name it in README.md and docs/architecture.md.
@@ -147,7 +149,7 @@ def _language(ctx: PromptContext) -> str:
 # @outputs: str per wildcard
 # @sideEffects: Reads job files (read-only)
 # @errors: None (missing data gives "")
-# @see: SUMMARY:WILDCARDS, CONFIG:SUMMARY_TEMPLATES, CLI:SUMMARIZE
+# @see: SUMMARY:WILDCARDS, CONFIG:SUMMARY_TEMPLATES, CLI:SUMMARIZE, GUI:SUMMARY_SETTINGS
 WILDCARDS: dict[str, Wildcard] = {
     wildcard.name: wildcard
     for wildcard in (
@@ -156,38 +158,45 @@ WILDCARDS: dict[str, Wildcard] = {
             "The job's transcript (export/result.md, speaker names as saved) inside <transcript>...</transcript>. "
             "A template without it gets the transcript at its end.",
             _transcript,
+            "расшифровка разговора; без неё в шаблоне она добавляется в конец запроса",
         ),
         Wildcard(
             "note",
             "Your own text for this run (--note / --note-file); empty when none was given.",
             _note,
+            "ваша заметка к этому запуску; пустая, если не задана",
         ),
         Wildcard(
             "job_name",
             "Name of the input file without its extension (read from the job's folder name if the job does "
             "not record it).",
             _job_name,
+            "имя входного файла без расширения",
         ),
         Wildcard(
             "date",
             "Date of the job as YYYY-MM-DD, from its folder name: when the recording was processed "
             "(the call's own date is not recorded).",
             _date,
+            "дата задания ГГГГ-ММ-ДД (когда запись обработана)",
         ),
         Wildcard(
             "duration",
             "Length of the recording as HH:MM:SS, up to the end of the last phrase.",
             _duration,
+            "длительность записи ЧЧ:ММ:СС",
         ),
         Wildcard(
             "speakers",
             "The speakers, comma-separated, under the names given in the job (as renamed in speakers.json).",
             _speakers,
+            "спикеры через запятую, с заданными именами",
         ),
         Wildcard(
             "language",
             "Language of the recording: the one set for the job, else the one Whisper detected.",
             _language,
+            "язык записи",
         ),
     )
 }
@@ -209,22 +218,41 @@ class UnknownWildcardError(ValueError):
         )
 
 
+@dataclass(frozen=True)
+class WildcardRef:
+    """One {{name}} in a prompt: where it stands (character offsets; `end` is past the closing braces)."""
+
+    name: str
+    start: int
+    end: int
+    line: int  # 1-based
+    known: bool  # is it in WILDCARDS
+
+
+def find_wildcards(template_prompt: str) -> list[WildcardRef]:
+    """Every {{name}} in the prompt in order of appearance, the unknown ones too (an editor wants them all)."""
+    return [
+        WildcardRef(
+            match.group(1), match.start(), match.end(),
+            template_prompt.count("\n", 0, match.start()) + 1, match.group(1) in WILDCARDS,
+        )
+        for match in _TOKEN.finditer(template_prompt)
+        if match.group(1) is not None  # None = an escaped "{{"
+    ]
+
+
 def used_wildcards(template_prompt: str, template_name: str = "") -> list[str]:
     """The wildcards a prompt uses, each once, in order of first appearance.
 
     Raises:
-        UnknownWildcardError: the prompt names a wildcard that does not exist
+        UnknownWildcardError: the prompt names a wildcard that does not exist (the first one)
     """
     used: list[str] = []
-    for match in _TOKEN.finditer(template_prompt):
-        name = match.group(1)
-        if name is None:  # an escaped "{{"
-            continue
-        if name not in WILDCARDS:
-            line = template_prompt.count("\n", 0, match.start()) + 1
-            raise UnknownWildcardError(name, template_name, line)
-        if name not in used:
-            used.append(name)
+    for ref in find_wildcards(template_prompt):
+        if not ref.known:
+            raise UnknownWildcardError(ref.name, template_name, ref.line)
+        if ref.name not in used:
+            used.append(ref.name)
     return used
 
 

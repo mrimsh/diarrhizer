@@ -24,6 +24,7 @@ logger = logging.getLogger("diarrhizer.summary")
 
 SUMMARY_DIR = "summary"
 TRANSCRIPT_PATH = "export/result.md"
+NOTE_TITLE_CHARS = 40  # how much of a note summary_title() shows
 
 # What provider checks send: a request that costs next to nothing and proves the sign-in/key works.
 CHECK_PROMPT = llm.CHECK_PROMPT
@@ -92,6 +93,21 @@ def build_prompt(template_prompt: str, transcript: str, note: str = "", job_dir:
     return wildcards.render_prompt(template_prompt, wildcards.PromptContext(transcript, note, job_dir)).text
 
 
+def preview_prompt(
+    job_dir: str | Path, template_prompt: str, note: str | None = None, template_name: str = ""
+) -> wildcards.RenderedPrompt:
+    """The request summarize_job would send for this prompt and note, built and not sent: its text and warnings.
+
+    Takes the prompt as text, so an editor can preview a template that is not saved yet.
+
+    Raises:
+        FileNotFoundError/ValueError: no or empty result.md; UnknownWildcardError for an unknown wildcard
+    """
+    job_dir = Path(job_dir)
+    context = wildcards.PromptContext(read_transcript(job_dir), note or "", job_dir)
+    return wildcards.render_prompt(template_prompt, context, template_name)
+
+
 # [SEMANTIC-BEGIN] SUMMARY:JOB
 # @purpose: Produce and store a summary of one job's transcript with a chosen template and provider
 # @description: Reads export/result.md as it is (speaker names included), builds the request from the template's
@@ -110,7 +126,9 @@ def build_prompt(template_prompt: str, transcript: str, note: str = "", job_dir:
 #   clash within the same second gets a _2, _3 suffix). The transcript's size is not checked: a model
 #   whose context is too small answers with an error that is passed on as is.
 #   list_summaries() reads the .json files back, newest first, for the GUI and the CLI; a summary stored
-#   before the user's fields and wildcards were recorded lists with them empty.
+#   before the user's fields and wildcards were recorded lists with them empty, and summary_title() adds the
+#   start of the note to a summary's line. preview_prompt() builds the request text for a prompt (saved or not)
+#   and a note without sending anything.
 # @inputs: job_dir, PromptTemplate, Provider, optional note
 # @outputs: dict with path (the .md), meta_path, text, warnings and the stored metadata (incl. user_fields, wildcards_used, model, usage, cost_usd, cost_note, limits)
 # @sideEffects: Sends the transcript to the provider (and, for Codex, asks its app-server for the limits); writes summary/*.md and summary/*.json atomically
@@ -224,14 +242,25 @@ def list_summaries(job_dir: str | Path) -> list[dict]:
     return summaries
 
 
+def summary_note(summary: dict) -> str:
+    """The note a stored summary was made with; "" for none (older summaries, or a damaged field)."""
+    fields = summary.get("user_fields")
+    note = fields.get("note") if isinstance(fields, dict) else ""
+    return note.strip() if isinstance(note, str) else ""
+
+
 def summary_title(summary: dict) -> str:
-    """One line for a list of summaries: when, which template, which provider."""
+    """One line for a list of summaries: when, which template, which provider - and the start of the note, if any."""
     try:
         when = datetime.fromisoformat(summary["created_at"]).strftime("%d.%m.%Y %H:%M")
     except (KeyError, ValueError):
         when = "?"
     provider = summary.get("provider") or {}
-    return f"{when} · {summary.get('template', '?')} · {provider.get('name', '?')}"
+    title = f"{when} · {summary.get('template', '?')} · {provider.get('name', '?')}"
+    note = " ".join(summary_note(summary).split())  # one line
+    if note:
+        title += f" · «{note[:NOTE_TITLE_CHARS]}{'…' if len(note) > NOTE_TITLE_CHARS else ''}»"
+    return title
 
 
 def format_window(minutes: int | None) -> str:

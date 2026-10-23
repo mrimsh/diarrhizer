@@ -455,10 +455,18 @@ other values stand in the request: write a **wildcard**, `{{name}}`, and its val
 
 **GUI.** The **Саммаризация** screen has two tabs, "Шаблоны промптов" and "Провайдеры" (**Проверить**
 sends a one-word test request with the form's current values and shows what it used). On a job's **Результат** screen,
-**Саммаризация…** opens a dialog: pick a template and a provider, **Создать саммари**; the dialog says
+**Саммаризация…** opens a dialog: pick a template and a provider, optionally write a **Заметка** for this
+run (it goes where the template has `{{note}}`; it is empty each time the dialog opens, and a warning appears
+next to it when the chosen template has no `{{note}}`), **Создать саммари**; the dialog says
 exactly where the text will be sent, shows the summary as Markdown with the model, tokens, cost and limits
-of the request, keeps the job's earlier summaries and can copy or open them. Every request, sign-in and
-model query runs in a separate process and can be cancelled.
+of the request and the note it was made with, keeps the job's earlier summaries and can copy or open them.
+**Показать запрос** shows the request text as the model would get it, without sending it. Every request,
+sign-in and model query runs in a separate process and can be cancelled.
+
+The template editor lists all the wildcards beside the prompt (a click inserts one at the cursor), marks them
+in the text, refuses to save a template with an unknown one and only warns about a missing `{{transcript}}`;
+**Показать собранный запрос…** builds the request of the form's prompt (saved or not) for a finished job of
+the results folder.
 
 **CLI.**
 

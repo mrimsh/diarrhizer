@@ -70,10 +70,11 @@ class _QueueLogHandler(logging.Handler):
 #   as a crash. run_doctor_task() runs doctor.run_all_checks() in a fresh interpreter, so the GUI never
 #   imports torch/whisperx itself and a re-check sees packages installed since the GUI started.
 #   run_summary_task() / run_provider_check_task() run summary.service.summarize_job() / check_provider()
-#   with a template and provider passed as dicts; being a process, the model call can be cancelled.
+#   with a template and provider passed as dicts (and the user's note for the run); being a process, the model
+#   call can be cancelled.
 #   run_account_task() runs one account action of a subscription provider (status, sign in, sign out, model
 #   list, limits - ADAPTER:LLM_ACCOUNTS); a sign-in reports the address to open as an ("event", ...) message.
-# @inputs: queue, mode + run_pipeline() kwargs (picklable) | queue | job_dir + template/provider dicts | provider dict + env
+# @inputs: queue, mode + run_pipeline() kwargs (picklable) | queue | job_dir + template/provider dicts + note | provider dict + env
 # @outputs: tuples on the queue (see module docstring)
 # @sideEffects: Everything run_pipeline does (files, GPU, model downloads); doctor's imports and probes;
 #   a summary sends the transcript to the provider and writes the job's summary/ folder
@@ -109,14 +110,16 @@ def run_doctor_task(queue) -> None:
 # grandchildren of its own - a child process can be killed with its whole tree (GUI:CHILD_PROCESS), a thread
 # stuck in a socket read cannot. They receive templates/providers as dicts (their to_dict()), so what the
 # user sees on screen is what is used, saved or not.
-def run_summary_task(queue, job_dir: str, template: dict, provider: dict) -> None:
+def run_summary_task(queue, job_dir: str, template: dict, provider: dict, note: str = "") -> None:
     _ensure_std_streams()
     from diarrhizer.summary import service
     from diarrhizer.summary.providers import Provider
     from diarrhizer.summary.templates import PromptTemplate
 
     try:
-        result = service.summarize_job(job_dir, PromptTemplate.from_dict(template), Provider.from_dict(provider))
+        result = service.summarize_job(
+            job_dir, PromptTemplate.from_dict(template), Provider.from_dict(provider), note=note
+        )
     except (FileNotFoundError, RuntimeError, ValueError) as exc:  # RuntimeError covers adapters.llm.LLMError
         queue.put(("failed", type(exc).__name__, str(exc)))
         return
