@@ -177,7 +177,7 @@ python -m diarrhizer_gui.app
 
 * **Новое задание** — add files or whole folders (buttons or drag & drop onto the window), pick the
   mode and parameters, run. Every file becomes its own job; they run one after another. The
-  parameters of the last run are remembered.
+  parameters of the last run are remembered. The file list is the processing order: drag rows (several at once) or use **Вверх** / **Вниз** / **По имени**.
 * **Выполнение** — the running batch: stage progress, live log, queue, **Остановить** (stops at
   once; finished stages are kept). Reachable from the sidebar at any time; the sidebar, window title
   and a taskbar flash show progress and completion.

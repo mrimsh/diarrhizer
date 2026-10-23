@@ -15,7 +15,7 @@ EnvironmentProbe (checked in a child process), not from importing torch here.
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, QSettings, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -147,6 +147,51 @@ def hf_token_present() -> bool:
     return bool(os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN"))
 
 
+# [SEMANTIC-BEGIN] GUI:FILE_LIST
+# @purpose: The files of a New Job in the order they will be processed, reorderable by dragging
+# @description: A QListWidget in InternalMove mode: rows are dragged within the list (several selected rows
+#   at once; a line shows the insertion point) and the row order is the processing order. Items keep their
+#   path in Qt.UserRole across a move. Files dragged in from outside (Explorer) are not inserted here -
+#   they are re-emitted as paths_dropped so the screen adds them with its own filtering (InternalMove
+#   would otherwise swallow them and the window-level drop would never see them).
+# @inputs: mouse drags; external drops carrying URLs
+# @outputs: paths_dropped([str]); row order
+# @sideEffects: none
+# @errors: none
+class FileList(QListWidget):
+    paths_dropped = Signal(list)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDropIndicatorShown(True)
+
+    def _is_external(self, event) -> bool:
+        return event.source() is not self and event.mimeData().hasUrls()
+
+    def dragEnterEvent(self, event) -> None:
+        if self._is_external(event):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if self._is_external(event):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        if self._is_external(event):
+            self.paths_dropped.emit([u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()])
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
+# [SEMANTIC-END] GUI:FILE_LIST
+
+
 class NewJobScreen(QWidget):
     runs_requested = Signal(list)  # [QueuedRun]
 
@@ -160,12 +205,13 @@ class NewJobScreen(QWidget):
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
 
         # --- files ---
-        self._files = QListWidget()
-        self._files.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._files = FileList()
+        self._files.paths_dropped.connect(self.add_paths)
         self._files.setMinimumHeight(90)
         self._files.setMaximumHeight(160)
         self._files.model().rowsInserted.connect(self._validate)
         self._files.model().rowsRemoved.connect(self._validate)
+        self._files.model().rowsMoved.connect(self._validate)
         QShortcut(QKeySequence.StandardKey.Delete, self._files, self._remove_selected,
                   context=Qt.ShortcutContext.WidgetShortcut)
 
@@ -178,16 +224,29 @@ class NewJobScreen(QWidget):
         self._remove_button.clicked.connect(self._remove_selected)
         self._clear_button = QPushButton("Очистить")
         self._clear_button.clicked.connect(self._files.clear)
+        up_button = QPushButton("Вверх")
+        up_button.setToolTip("Сдвинуть выделенные файлы раньше в очереди обработки")
+        up_button.clicked.connect(lambda: self._move_selected(-1))
+        down_button = QPushButton("Вниз")
+        down_button.setToolTip("Сдвинуть выделенные файлы позже в очереди обработки")
+        down_button.clicked.connect(lambda: self._move_selected(1))
+        sort_button = QPushButton("По имени")
+        sort_button.setToolTip("Упорядочить весь список по имени файла")
+        sort_button.clicked.connect(self._sort_by_name)
         files_buttons = QHBoxLayout()
         files_buttons.addWidget(add_files)
         files_buttons.addWidget(add_folder)
         files_buttons.addStretch(1)
+        files_buttons.addWidget(up_button)
+        files_buttons.addWidget(down_button)
+        files_buttons.addWidget(sort_button)
         files_buttons.addWidget(self._remove_button)
         files_buttons.addWidget(self._clear_button)
 
         files_hint = QLabel(
             "Файлы и папки можно перетащить прямо в окно. Каждый файл — отдельное задание; "
-            "они обрабатываются по очереди с одинаковыми параметрами."
+            "они обрабатываются по очереди, сверху вниз, с одинаковыми параметрами. "
+            "Порядок меняется перетаскиванием строк или кнопками."
         )
         files_hint.setWordWrap(True)
         files_hint.setStyleSheet("color: #7d8394;")
@@ -589,6 +648,33 @@ class NewJobScreen(QWidget):
     def _remove_selected(self) -> None:
         for entry in self._files.selectedItems():
             self._files.takeItem(self._files.row(entry))
+
+    def _move_selected(self, step: int) -> None:
+        """Shift the selected rows one place up (-1) or down (+1); rows at the edge stay put."""
+        rows = sorted(self._files.row(entry) for entry in self._files.selectedItems())
+        if not rows:
+            return
+        if step < 0:
+            if rows[0] == 0:
+                return
+        elif rows[-1] == self._files.count() - 1:
+            return
+        for row in rows if step < 0 else reversed(rows):
+            entry = self._files.takeItem(row)
+            self._files.insertItem(row + step, entry)
+            entry.setSelected(True)
+        self._files.setCurrentItem(self._files.selectedItems()[0], QItemSelectionModel.SelectionFlag.NoUpdate)
+
+    def _sort_by_name(self) -> None:
+        entries = [self._files.item(i) for i in range(self._files.count())]
+        paths = sorted((e.data(Qt.ItemDataRole.UserRole) for e in entries), key=lambda p: Path(p).name.casefold())
+        by_path = {e.data(Qt.ItemDataRole.UserRole): e for e in entries}
+        selected = {p for p, e in by_path.items() if e.isSelected()}
+        for path in paths:
+            self._files.takeItem(self._files.row(by_path[path]))
+        for path in paths:
+            self._files.addItem(by_path[path])
+            by_path[path].setSelected(path in selected)
 
     def _browse_out(self) -> None:
         chosen = QFileDialog.getExistingDirectory(self, "Папка результатов", self._out_field.text())

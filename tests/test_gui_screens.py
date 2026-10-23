@@ -12,7 +12,8 @@ import pytest
 
 pytest.importorskip("PySide6", reason="GUI extra not installed")
 
-from PySide6.QtCore import QCoreApplication, QEvent  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QModelIndex, QPointF, Qt, QUrl  # noqa: E402
+from PySide6.QtGui import QDragEnterEvent, QDropEvent  # noqa: E402
 from PySide6.QtWidgets import QDialog, QMessageBox, QPushButton  # noqa: E402
 
 from diarrhizer.audio_formats import ENV_AUDIO_FORMATS_FILE  # noqa: E402
@@ -147,6 +148,77 @@ def test_busy_screen_queues_instead_of_starting(qapp, isolated, tmp_path, monkey
     screen.add_paths([_touch(tmp_path / "call.wav")])
     screen.set_busy(True)
     assert screen._run_button.text() == "Добавить в очередь"
+
+
+def _file_screen(tmp_path, names):
+    screen = new_job_screen.NewJobScreen()
+    for name in names:
+        screen.add_paths([_touch(tmp_path / name)])
+    return screen
+
+
+def _names(screen):
+    return [Path(p).name for p in screen._selected_files()]
+
+
+def test_new_job_file_order_follows_the_list_and_reaches_the_runs(qapp, isolated, tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    screen = _file_screen(tmp_path, ["a.wav", "b.wav", "c.wav"])
+    screen._files.model().moveRow(QModelIndex(), 2, QModelIndex(), 0)  # what a drag-and-drop move does
+    assert _names(screen) == ["c.wav", "a.wav", "b.wav"]
+    # the path travels with the row, and the visible text still matches it
+    for i in range(screen._files.count()):
+        entry = screen._files.item(i)
+        assert entry.data(Qt.ItemDataRole.UserRole) == str(tmp_path / entry.text().split()[0])
+    assert screen._run_button.isEnabled()
+    received = []
+    screen.runs_requested.connect(received.append)
+    screen._run_button.click()
+    (runs,) = received
+    assert [r.label for r in runs] == ["c.wav", "a.wav", "b.wav"]
+
+
+def test_new_job_up_down_buttons_move_the_selection(qapp, isolated, tmp_path):
+    screen = _file_screen(tmp_path, ["a.wav", "b.wav", "c.wav", "d.wav"])
+    files = screen._files
+    files.item(2).setSelected(True)
+    files.item(3).setSelected(True)
+    screen._move_selected(-1)
+    assert _names(screen) == ["a.wav", "c.wav", "d.wav", "b.wav"]
+    assert [e.text().split()[0] for e in files.selectedItems()] == ["c.wav", "d.wav"]
+    screen._move_selected(-1)
+    screen._move_selected(-1)  # already at the top: stays
+    assert _names(screen) == ["c.wav", "d.wav", "a.wav", "b.wav"]
+    screen._move_selected(1)
+    assert _names(screen) == ["a.wav", "c.wav", "d.wav", "b.wav"]
+    screen._move_selected(1)
+    screen._move_selected(1)  # at the bottom: stays
+    assert _names(screen) == ["a.wav", "b.wav", "c.wav", "d.wav"]
+    assert screen._files.count() == 4
+
+
+def test_new_job_sort_by_name_keeps_paths_and_selection(qapp, isolated, tmp_path):
+    screen = _file_screen(tmp_path, ["b.wav", "C.wav", "a.wav"])
+    screen._files.item(0).setSelected(True)  # b.wav
+    screen._sort_by_name()
+    assert _names(screen) == ["a.wav", "b.wav", "C.wav"]
+    assert [Path(e.data(Qt.ItemDataRole.UserRole)).name for e in screen._files.selectedItems()] == ["b.wav"]
+    assert screen._files.count() == 3
+
+
+def test_new_job_list_still_takes_files_dropped_from_outside(qapp, isolated, tmp_path):
+    screen = _file_screen(tmp_path, ["a.wav"])
+    outside = _touch(tmp_path / "other" / "z.wav")
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(outside))])
+    enter = QDragEnterEvent(QPointF(5, 5).toPoint(), Qt.DropAction.CopyAction, mime,
+                            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    screen._files.dragEnterEvent(enter)
+    assert enter.isAccepted()
+    drop = QDropEvent(QPointF(5, 5), Qt.DropAction.CopyAction, mime,
+                      Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    screen._files.dropEvent(drop)
+    assert _names(screen) == ["a.wav", "z.wav"]
 
 
 def test_plural():
