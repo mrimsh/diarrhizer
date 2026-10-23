@@ -1,4 +1,4 @@
-"""Tests for adapters.llm (ADAPTER:LLM): the HTTP providers against a local
+﻿"""Tests for adapters.llm (ADAPTER:LLM): the HTTP providers against a local
 server, the subscription CLIs against stand-in executables. Nothing here
 touches the network or a real model.
 """
@@ -262,6 +262,9 @@ if mode == "fail-codex-banner":
     sys.exit(1)
 if mode == "fail-login":
     sys.stdout.write("Not logged in - Please run /login\\n")
+    sys.exit(1)
+if mode == "lost-session" and "resume" in argv:  # what codex 0.155 prints for an id it has no rollout for
+    sys.stderr.write("Error: thread/resume: thread/resume failed: no rollout found for thread id x (code -32600)\\n")
     sys.exit(1)
 
 def emit(*events):
@@ -861,3 +864,114 @@ def test_a_cost_the_provider_reports_still_wins_over_cache_prices(api):
     reply = complete_chat(_openai(api, **CACHE_PRICES), _conversation())
 
     assert reply.cost_usd == pytest.approx(0.00042) and reply.cost_note == "reported by the provider"
+
+
+# --- keeping a CLI session (docs/cli-sessions.md) ---------------------------------------------------------
+
+
+def _history() -> list:
+    return [
+        Message("system", "Правила."),
+        Message("user", "Первый вопрос"),
+        Message("assistant", "Первый ответ"),
+        Message("user", "Второй вопрос"),
+    ]
+
+
+def test_a_one_shot_complete_leaves_no_session_and_says_it_sent_the_whole_text(fake_cli):
+    make, log = fake_cli
+
+    reply = complete(_codex(make), PROMPT)
+
+    assert "--ephemeral" in log()[0]["argv"]  # nothing is written to the user's Codex history
+    assert reply.session_id == "" and reply.context_mode == llm.CONTEXT_FULL_HISTORY
+    assert reply.context_chars == len(PROMPT) and reply.cache_available is False
+
+
+def test_the_first_turn_of_a_kept_codex_session_is_written_to_disk_and_returns_its_id(fake_cli):
+    make, log = fake_cli
+
+    reply = complete_chat(_codex(make), [Message("user", "Первый вопрос")], keep_session=True)
+
+    argv = log()[0]["argv"]
+    assert "--ephemeral" not in argv and "--ignore-user-config" in argv  # a session to resume must exist on disk
+    assert argv[:3] == ["exec", "--json", "--skip-git-repo-check"] and "resume" not in argv
+    assert reply.session_id == "t" and reply.context_mode == llm.CONTEXT_FULL_HISTORY
+    assert reply.cache_available is None
+
+
+def test_a_resumed_codex_session_is_sent_only_the_new_message(fake_cli):
+    make, log = fake_cli
+
+    reply = complete_chat(_codex(make, model="gpt-5"), _history(), session_id="t")
+
+    call = log()[0]
+    argv = call["argv"]
+    assert argv[:3] == ["exec", "resume", "--json"] and argv[-2:] == ["t", "-"]
+    assert "--ephemeral" not in argv and "--sandbox" not in argv and "--color" not in argv  # resume takes neither
+    assert "--ignore-user-config" in argv and argv[argv.index("--model") + 1] == "gpt-5"
+    assert call["stdin"] == "Второй вопрос"  # not the history, not the system message
+    assert reply.session_id == "t" and reply.context_mode == llm.CONTEXT_SESSION
+    assert reply.context_chars == len("Второй вопрос") and reply.cache_available is True
+    assert reply.text == "Ответ codex"
+
+
+def test_a_session_that_is_gone_is_replaced_by_the_whole_conversation_in_a_new_one(fake_cli, monkeypatch):
+    make, log = fake_cli
+    monkeypatch.setenv("FAKE_MODE", "lost-session")
+
+    reply = complete_chat(_codex(make), _history(), session_id="old")
+
+    resume, fresh = log()
+    assert "resume" in resume["argv"] and "resume" not in fresh["argv"]
+    assert fresh["stdin"].startswith("System:\nПравила.") and fresh["stdin"].endswith("User:\nВторой вопрос")
+    assert reply.context_mode == llm.CONTEXT_FULL_HISTORY and reply.session_id == "t"  # the interface can say so
+
+
+def test_other_failures_of_a_resume_are_not_papered_over(fake_cli, monkeypatch):
+    make, log = fake_cli
+    monkeypatch.setenv("FAKE_MODE", "fail-codex-banner")
+    with pytest.raises(LLMError, match="not supported"):
+        complete_chat(_codex(make), _history(), session_id="t")
+    assert len(log()) == 1  # no second attempt
+
+
+def test_claude_is_always_sent_the_whole_history_and_says_so(fake_cli):
+    make, log = fake_cli
+
+    reply = complete_chat(_claude(make), _history(), keep_session=True, session_id="whatever")
+
+    call = log()[0]
+    assert "--no-session-persistence" in call["argv"] and "--resume" not in call["argv"]
+    assert call["stdin"].count("Первый ответ") == 1  # the history is in the request
+    assert reply.session_id == "" and reply.context_mode == llm.CONTEXT_FULL_HISTORY
+    assert reply.context_chars == len(call["stdin"]) and reply.cache_available is False
+
+
+def test_an_api_reply_says_it_got_the_whole_conversation(api):
+    api.body = _openai_reply()
+    reply = complete_chat(_openai(api), _history())
+    assert reply.context_mode == llm.CONTEXT_FULL_HISTORY
+    assert reply.context_chars == len("Правила.Первый вопросПервый ответВторой вопрос") and reply.session_id == ""
+
+
+def test_what_a_session_has_not_seen_is_whatever_follows_the_last_assistant_message():
+    messages = _history()
+    assert llm._messages_since_last_reply(messages) == [Message("user", "Второй вопрос")]
+    first = [Message("system", "S"), Message("user", "U1")]
+    assert llm._messages_since_last_reply(first) == [Message("user", "U1")]  # no reply yet: the system part is dropped
+    two = _history() + [Message("user", "Ещё")]
+    assert [m.text for m in llm._messages_since_last_reply(two)] == ["Второй вопрос", "Ещё"]
+
+
+def test_codex_reports_its_thread_and_the_cache_write_counter():
+    events = (
+        '{"type":"thread.started","thread_id":"01a16991-2845"}\n'
+        '{"type":"turn.completed","usage":{"input_tokens":39102,"cached_input_tokens":31360,'
+        '"cache_write_input_tokens":0,"output_tokens":21,"reasoning_output_tokens":0}}\n'
+    )
+
+    reply = llm._codex_reply(Provider(name="c", kind=KIND_CODEX_CLI), events, __import__("pathlib").Path("none.txt"))
+
+    assert reply.session_id == "01a16991-2845"
+    assert (reply.usage.cached_tokens, reply.usage.cache_write_tokens, reply.usage.uncached_input_tokens) == (31360, 0, 7742)

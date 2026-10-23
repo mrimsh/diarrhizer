@@ -99,6 +99,13 @@ class LLMReply:
         cost_usd: What the request cost in USD, when known (see cost_note for how it is known)
         cost_note: Where cost_usd comes from, e.g. an estimate that is not a bill
         limits: The plan's limits as the request saw them, when the provider reports them with a reply
+        session_id: A CLI session that holds this conversation, to pass back to continue it ("" = none kept)
+        context_mode: What was sent: CONTEXT_SESSION (only the new message, the CLI's session has the rest) or
+            CONTEXT_FULL_HISTORY (the whole conversation)
+        context_chars: Characters of message text in the request - the size of the context that was sent
+        cache_available: Whether the provider can reuse what it has already seen: True for a resumed CLI session,
+            False for a CLI that was sent the whole history, None when this is not known (API providers say it
+            in usage)
     """
 
     text: str
@@ -108,6 +115,16 @@ class LLMReply:
     cost_usd: Optional[float] = None
     cost_note: str = ""
     limits: Optional[Limits] = None
+    session_id: str = ""
+    context_mode: str = ""
+    context_chars: Optional[int] = None
+    cache_available: Optional[bool] = None
+
+
+CONTEXT_SESSION = "cli-session"
+CONTEXT_FULL_HISTORY = "full-history"
+# What Codex says when the session to resume is not on disk (checked against codex-cli 0.155.1).
+SESSION_LOST_RE = re.compile(r"no rollout found|thread/resume failed", re.I)
 
 
 ROLES = ("system", "user", "assistant")
@@ -214,8 +231,12 @@ def messages_as_text(messages: "Sequence[Message]") -> str:
 #   and cache_control {"type": "ephemeral"} on each block flagged cache; openai-compatible APIs get plain
 #   messages (a message's blocks run together) and nothing about caching, which they do by repeated prefix.
 #   A CLI provider gets the whole conversation as one text request every time (a lone user message verbatim,
-#   a longer conversation with a "System:/User:/Assistant:" label ahead of each message); keeping a CLI session
-#   between requests is not done here.
+#   a longer conversation with a "System:/User:/Assistant:" label ahead of each message). Codex can keep its
+#   session: keep_session=True writes it to disk (no --ephemeral) and the reply carries session_id; passing
+#   session_id resumes it with `codex exec resume` and sends only the messages after the last assistant one - if
+#   that session is gone the whole conversation goes again in a new session. Claude Code is always sent the whole
+#   history (its resume was not run here). Every reply says what happened: context_mode (cli-session /
+#   full-history), context_chars (size of the context sent) and cache_available (docs/cli-sessions.md).
 #   codex-cli runs `codex exec --json --sandbox read-only` and claude-cli runs `claude -p --tools ""
 #   --output-format stream-json`, both with the prompt on stdin, in an empty temporary working directory (so
 #   neither tool wanders into or loads the context of the repo), without the API-key variables that would
@@ -239,16 +260,25 @@ def messages_as_text(messages: "Sequence[Message]") -> str:
 #   creates and removes a temporary directory
 # @errors: LLMError (tool missing, not signed in, HTTP/network failure, timeout, empty or malformed reply); ValueError for malformed messages
 # @see: CONFIG:SUMMARY_PROVIDERS, CONFIG:PROVIDER_INFO, ADAPTER:LLM_ACCOUNTS, SUMMARY:JOB, GUI:CHILD_TASKS
-def complete_chat(provider: Provider, messages: "Sequence[Message | Mapping]") -> LLMReply:
+def complete_chat(
+    provider: Provider,
+    messages: "Sequence[Message | Mapping]",
+    keep_session: bool = False,
+    session_id: str = "",
+) -> LLMReply:
     chat = coerce_messages(messages)
     if provider.is_cli:
-        reply = _complete_cli(provider, messages_as_text(chat))
-    elif provider.kind == KIND_OPENAI_API:
-        reply = _complete_openai(provider, chat)
-    elif provider.kind == KIND_ANTHROPIC_API:
-        reply = _complete_anthropic(provider, chat)
-    else:  # Provider validates its kind; this guards a kind added without a backend.
-        raise LLMError(f"Provider '{provider.name}': unsupported kind {provider.kind!r}")
+        reply = _complete_cli(provider, chat, keep_session, session_id)
+    else:
+        if provider.kind == KIND_OPENAI_API:
+            reply = _complete_openai(provider, chat)
+        elif provider.kind == KIND_ANTHROPIC_API:
+            reply = _complete_anthropic(provider, chat)
+        else:  # Provider validates its kind; this guards a kind added without a backend.
+            raise LLMError(f"Provider '{provider.name}': unsupported kind {provider.kind!r}")
+        reply = dataclasses.replace(
+            reply, context_mode=CONTEXT_FULL_HISTORY, context_chars=sum(len(m.text) for m in chat)
+        )
     if not reply.text.strip():
         raise LLMError(f"Provider '{provider.name}' returned an empty reply")
     return dataclasses.replace(reply, text=reply.text.strip())
@@ -263,12 +293,50 @@ def complete(provider: Provider, prompt: str) -> LLMReply:
 # --- subscription CLIs ---------------------------------------------------------
 
 
-def _complete_cli(provider: Provider, prompt: str) -> LLMReply:
+def _complete_cli(provider: Provider, chat: list[Message], keep_session: bool, session_id: str) -> LLMReply:
+    """One CLI request. Codex can keep its session (see the module's docs/cli-sessions.md): then a request with
+    a session_id sends only the messages after the last assistant one; if that session is gone the whole
+    conversation goes again, in a new session. Claude Code always gets the whole conversation."""
     executable = find_executable(provider)
+    can_keep = provider.kind == KIND_CODEX_CLI and (keep_session or bool(session_id))
+    full = messages_as_text(chat)
+    if can_keep and session_id:
+        new = messages_as_text(_messages_since_last_reply(chat))
+        try:
+            reply = _run_cli(provider, executable, new, session_id)
+            return dataclasses.replace(
+                reply, session_id=reply.session_id or session_id, context_mode=CONTEXT_SESSION,
+                context_chars=len(new), cache_available=True,
+            )
+        except LLMError as e:
+            if not SESSION_LOST_RE.search(str(e)):
+                raise
+            logger.warning("[summary] %s: session %s is gone, sending the whole conversation", provider.name, session_id)
+    reply = _run_cli(provider, executable, full, "", keep=can_keep)
+    return dataclasses.replace(
+        reply,
+        session_id=reply.session_id if can_keep else "",  # an ephemeral run has an id but nothing to resume
+        context_mode=CONTEXT_FULL_HISTORY,
+        context_chars=len(full),
+        cache_available=None if can_keep else False,
+    )
+
+
+def _messages_since_last_reply(chat: list[Message]) -> list[Message]:
+    """What the session has not seen: the messages after the last assistant message (system ones never resent)."""
+    last = max((i for i, message in enumerate(chat) if message.role == "assistant"), default=-1)
+    tail = [message for message in chat[last + 1:] if message.role != "system"]
+    return tail or chat[-1:]
+
+
+def _run_cli(
+    provider: Provider, executable: str, prompt: str, session_id: str, keep: bool = False
+) -> LLMReply:
+    keep = keep or bool(session_id)
     with tempfile.TemporaryDirectory(prefix="diarrhizer-llm-", ignore_cleanup_errors=True) as workdir:
         reply_file = Path(workdir) / "reply.txt"
         for isolated in (True, False):
-            argv = _cli_argv(provider, executable, reply_file, isolated)
+            argv = _cli_argv(provider, executable, reply_file, isolated, keep, session_id)
             code, stdout, stderr = run_cli(provider, argv, prompt, workdir)
             if code == 0 and provider.kind == KIND_CLAUDE_CLI and _claude_result(stdout).get("is_error"):
                 code = 1  # Claude reports a failure inside the run (e.g. not signed in) as an error result
@@ -282,11 +350,17 @@ def _complete_cli(provider: Provider, prompt: str) -> LLMReply:
         return _codex_reply(provider, stdout, reply_file)
 
 
-def _cli_argv(provider: Provider, executable: str, reply_file: Path, isolated: bool) -> list[str]:
+def _cli_argv(
+    provider: Provider, executable: str, reply_file: Path, isolated: bool, keep: bool = False, session_id: str = ""
+) -> list[str]:
     isolation = list(ISOLATION_FLAGS[provider.kind]) if isolated else []
+    if keep:  # a session that is to be resumed must be written to disk: no --ephemeral
+        isolation = [flag for flag in isolation if flag != "--ephemeral"]
     if provider.kind == KIND_CLAUDE_CLI:
         argv = [executable, "-p", "--tools", "", "--no-session-persistence",
                 "--output-format", "stream-json", "--verbose"]
+    elif session_id:  # `exec resume` takes no --sandbox/--color: the session keeps the policy it started with
+        argv = [executable, "exec", "resume", "--json", "--skip-git-repo-check", "--output-last-message", str(reply_file)]
     else:
         argv = [executable, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--color", "never",
                 "--output-last-message", str(reply_file)]
@@ -295,6 +369,8 @@ def _cli_argv(provider: Provider, executable: str, reply_file: Path, isolated: b
         argv += ["--model", provider.model]
     argv += list(provider.extra_args)
     if provider.kind == KIND_CODEX_CLI:
+        if session_id:
+            argv.append(session_id)
         argv.append("-")  # the prompt comes from stdin
     return argv
 
@@ -380,9 +456,13 @@ def _codex_reply(provider: Provider, stdout: str, reply_file: Path) -> LLMReply:
         data = completed[-1]
         usage = _inclusive_usage(  # Codex counts the cached tokens inside input_tokens, as OpenAI does
             _count(data, "input_tokens"), _count(data, "output_tokens"), _opt_count(data, "cached_input_tokens"),
-            None, _count(data, "reasoning_output_tokens"),
+            _opt_count(data, "cache_write_input_tokens"), _count(data, "reasoning_output_tokens"),
         )
-    return LLMReply(text=text, model=provider.model, usage=usage if usage and usage.total else None)
+    thread = next((e.get("thread_id") for e in events if e.get("type") == "thread.started"), "")
+    return LLMReply(
+        text=text, model=provider.model, usage=usage if usage and usage.total else None,
+        session_id=thread if isinstance(thread, str) else "",
+    )
 
 
 def _count(data: dict, key: str) -> int:

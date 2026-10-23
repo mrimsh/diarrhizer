@@ -513,7 +513,10 @@ export/result.md ──► SUMMARY:JOB ──► ADAPTER:LLM ──► provider 
   `cache` gets `cache_control: {"type": "ephemeral"}`. OpenAI-compatible APIs: plain messages (a message's blocks
   run together) and nothing about caching - they cache a repeated prefix by themselves. CLIs get the whole
   conversation as one text request every time (a lone user message verbatim; a longer one with `System:` /
-  `User:` / `Assistant:` ahead of each message); keeping a CLI session between requests is not done.
+  `User:` / `Assistant:` ahead of each message); Codex can keep its session (`keep_session=True`, then
+  `session_id=` resumes it and sends only the new messages), Claude Code is sent the whole history. `LLMReply`
+  carries `session_id`, `context_mode` (`cli-session` / `full-history`), `context_chars` and `cache_available`.
+  What was tested and what is only from documentation: [cli-sessions.md](cli-sessions.md).
   CLIs get the prompt on stdin (no argv length or quoting limits) and run in an
   empty temporary folder, with the API-key variables that would switch the billing removed and with flags that
   skip the user's own tool setup (retried without them if the installed version rejects a flag); a timeout kills
