@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from diarrhizer.summary.provider_info import ModelOption
 from diarrhizer.summary.providers import (
     CLI_KINDS,
     DEFAULT_ANTHROPIC_ENDPOINT,
@@ -51,9 +52,11 @@ from diarrhizer.summary.providers import (
     default_key_env,
 )
 from diarrhizer.summary.templates import PromptTemplate, TemplateStore
-from diarrhizer_gui import env_file
-from diarrhizer_gui.child_tasks import run_provider_check_task
+from diarrhizer_gui import env_file, provider_text
+from diarrhizer_gui.child_tasks import run_account_task, run_provider_check_task
 from diarrhizer_gui.llm_worker import LlmWorker
+from diarrhizer_gui.screens.account_panel import AccountPanel
+from diarrhizer_gui.screens.model_combo import ModelCombo
 
 ENV_PATH = env_file.REPO_ROOT / ".env"
 
@@ -75,14 +78,14 @@ KIND_SHORT = {
 }
 KIND_HINTS = {
     KIND_CODEX_CLI: (
-        "Используется вход, выполненный в Codex CLI (тарифный план ChatGPT): один раз выполните в "
-        "терминале «codex login». Пароль и токены подписки Diarrhizer не хранит и не видит. "
-        "Расшифровка отправляется в OpenAI через Codex."
+        "Подписка ChatGPT через Codex. Вход выполняется на странице OpenAI (кнопка «Войти через ChatGPT» ниже), "
+        "токены остаются у Codex — Diarrhizer их не видит и не хранит. Модели, лимиты и расход берутся "
+        "у провайдера. Расшифровка отправляется в OpenAI."
     ),
     KIND_CLAUDE_CLI: (
-        "Используется вход, выполненный в Claude Code (подписка Claude): один раз выполните в "
-        "терминале «claude auth login». Пароль и токены подписки Diarrhizer не хранит и не видит. "
-        "Расшифровка отправляется в Anthropic через Claude Code."
+        "Подписка Claude через Claude Code. Вход выполняется на странице Anthropic (кнопка «Войти через Claude» "
+        "ниже) штатной командой Claude Code: по правилам Anthropic приложение не реализует свой вход и не "
+        "получает токены. Модели и расход берутся у провайдера. Расшифровка отправляется в Anthropic."
     ),
     KIND_OPENAI_API: (
         "Любой сервис с OpenAI-совместимым API: OpenAI, OpenRouter, DeepSeek, Groq, а также локальные "
@@ -94,8 +97,8 @@ KIND_HINTS = {
     ),
 }
 MODEL_PLACEHOLDERS = {
-    KIND_CODEX_CLI: "необязательно — модель по умолчанию у Codex",
-    KIND_CLAUDE_CLI: "необязательно — модель по умолчанию у Claude Code, например sonnet",
+    KIND_CODEX_CLI: "выберите из списка провайдера или оставьте модель по умолчанию",
+    KIND_CLAUDE_CLI: "выберите из списка провайдера или оставьте модель по умолчанию",
     KIND_OPENAI_API: "например gpt-4o-mini, deepseek-chat, llama3.1",
     KIND_ANTHROPIC_API: "например claude-sonnet-5-5",
 }
@@ -410,6 +413,11 @@ class ProvidersTab(QWidget):
         # The form's values as they were filled in; the form is "dirty" once they differ.
         self._baseline: tuple = ()
         self._worker: Optional[LlmWorker] = None
+        self._models_worker: Optional[LlmWorker] = None
+        # Models fetched from a provider, by (kind, command or endpoint): a list survives selecting another provider.
+        self._models_cache: dict = {}
+        self._account_key: Optional[tuple] = None  # what the account panel was last pointed at
+        self._models_requested_for: tuple = ()  # the cache key a running model-list request is for
 
         self._list = QListWidget()
         self._list.setFixedWidth(260)
@@ -439,7 +447,19 @@ class ProvidersTab(QWidget):
         self._command_field = QLineEdit()
         self._extra_args_field = QLineEdit()
         self._extra_args_field.setPlaceholderText('необязательно, например: -c model_reasoning_effort="low"')
-        self._model_field = QLineEdit()
+        self._model_field = ModelCombo()
+        self._model_field.currentIndexChanged.connect(self._update_model_info)
+        self._model_field.editTextChanged.connect(self._update_model_info)
+        self._models_button = QPushButton("Список моделей")
+        self._models_button.setToolTip("Получить список моделей у самого провайдера")
+        self._models_button.clicked.connect(self._load_models_or_cancel)
+        model_row = QWidget()
+        model_layout = QHBoxLayout(model_row)
+        model_layout.setContentsMargins(0, 0, 0, 0)
+        model_layout.addWidget(self._model_field, stretch=1)
+        model_layout.addWidget(self._models_button)
+        self._model_row = model_row
+        self._model_info = _muted_label("")
         self._endpoint_field = QLineEdit()
         self._endpoint_field.setPlaceholderText("https://api.example.com/v1")
 
@@ -460,6 +480,19 @@ class ProvidersTab(QWidget):
         self._temperature_field.setPlaceholderText("по умолчанию сервиса")
         self._max_tokens_field = QLineEdit()
         self._max_tokens_field.setPlaceholderText("по умолчанию сервиса")
+        self._price_in_field = QLineEdit()
+        self._price_in_field.setPlaceholderText("вход")
+        self._price_out_field = QLineEdit()
+        self._price_out_field.setPlaceholderText("выход")
+        prices_row = QWidget()
+        prices_layout = QHBoxLayout(prices_row)
+        prices_layout.setContentsMargins(0, 0, 0, 0)
+        prices_layout.addWidget(self._price_in_field)
+        prices_layout.addWidget(self._price_out_field)
+        self._prices_row = prices_row
+        self._prices_row.setToolTip(
+            "Необязательно: цены провайдера за миллион токенов — по ним считается стоимость запроса"
+        )
         self._timeout_spin = QSpinBox()
         self._timeout_spin.setRange(1, 24 * 3600)
         self._timeout_spin.setSuffix(" с")
@@ -470,19 +503,24 @@ class ProvidersTab(QWidget):
         self._form.addRow("Название:", self._name_field)
         self._form.addRow("Тип:", self._kind_combo)
         self._form.addRow("", self._kind_hint)
+        self._account_panel = AccountPanel(self._account_provider)
+        self._account_panel.signed_in_changed.connect(self._on_signed_in_changed)
+        self._form.addRow(self._account_panel)
         self._form.addRow("Команда:", self._command_field)
         self._form.addRow("Endpoint:", self._endpoint_field)
-        self._form.addRow("Модель:", self._model_field)
+        self._form.addRow("Модель:", self._model_row)
+        self._form.addRow("", self._model_info)
         self._form.addRow("Ключ API:", self._key_row)
         self._form.addRow("Переменная ключа:", self._key_env_field)
         self._form.addRow("Доп. аргументы:", self._extra_args_field)
         self._form.addRow("Температура:", self._temperature_field)
         self._form.addRow("Макс. токенов ответа:", self._max_tokens_field)
+        self._form.addRow("Цена, $ за 1 млн токенов:", self._prices_row)
         self._form.addRow("Таймаут:", self._timeout_spin)
-        self._cli_widgets = (self._command_field, self._extra_args_field)
+        self._cli_widgets = (self._account_panel, self._command_field, self._extra_args_field)
         self._api_widgets = (
             self._endpoint_field, self._key_row, self._key_env_field,
-            self._temperature_field, self._max_tokens_field,
+            self._temperature_field, self._max_tokens_field, self._prices_row,
         )
 
         self._save_button = QPushButton("Сохранить")
@@ -493,8 +531,8 @@ class ProvidersTab(QWidget):
         self._default_button.clicked.connect(self._make_default)
         self._test_button = QPushButton("Проверить")
         self._test_button.setToolTip(
-            "Отправить модели короткий тестовый запрос с текущими значениями формы (без сохранения). "
-            "Для подписки это расходует ничтожную долю лимита."
+            "Отправить модели короткий тестовый запрос с текущими значениями формы (без сохранения) и показать, "
+            "что он израсходовал. Для подписки это ничтожная доля лимита."
         )
         self._test_button.clicked.connect(self._test_or_cancel)
         buttons = QHBoxLayout()
@@ -571,10 +609,10 @@ class ProvidersTab(QWidget):
 
     def _set_enabled(self, enabled: bool) -> None:
         for widget in (self._list, self._add_button, self._name_field, self._kind_combo, self._command_field,
-                       self._extra_args_field, self._model_field, self._endpoint_field, self._key_field,
-                       self._key_env_field, self._temperature_field, self._max_tokens_field,
-                       self._timeout_spin, self._save_button, self._delete_button, self._default_button,
-                       self._test_button):
+                       self._extra_args_field, self._model_field, self._models_button, self._endpoint_field,
+                       self._key_field, self._key_env_field, self._temperature_field, self._max_tokens_field,
+                       self._price_in_field, self._price_out_field, self._timeout_spin, self._save_button,
+                       self._delete_button, self._default_button, self._test_button):
             widget.setEnabled(enabled)
 
     def _apply_kind(self, kind: str) -> None:
@@ -584,7 +622,8 @@ class ProvidersTab(QWidget):
         for widget in self._api_widgets:
             self._form.setRowVisible(widget, not is_cli)
         self._kind_hint.setText(KIND_HINTS[kind])
-        self._model_field.setPlaceholderText(MODEL_PLACEHOLDERS[kind])
+        self._model_field.lineEdit().setPlaceholderText(MODEL_PLACEHOLDERS[kind])
+        self._apply_models(kind)
         self._command_field.setPlaceholderText(
             f"{DEFAULT_COMMANDS[kind]} — или полный путь к исполняемому файлу" if is_cli else ""
         )
@@ -594,6 +633,7 @@ class ProvidersTab(QWidget):
         self._apply_kind(kind)
         if kind in DEFAULT_ENDPOINTS and not self._endpoint_field.text().strip():
             self._endpoint_field.setText(DEFAULT_ENDPOINTS[kind])
+        self._refresh_account()
 
     def _toggle_key_visibility(self, checked: bool) -> None:
         self._key_field.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
@@ -613,7 +653,11 @@ class ProvidersTab(QWidget):
         self._key_field.setText(provider.api_key())
         self._temperature_field.setText("" if provider.temperature is None else f"{provider.temperature:g}")
         self._max_tokens_field.setText("" if provider.max_tokens is None else str(provider.max_tokens))
+        self._price_in_field.setText("" if provider.price_input is None else f"{provider.price_input:g}")
+        self._price_out_field.setText("" if provider.price_output is None else f"{provider.price_output:g}")
         self._timeout_spin.setValue(provider.timeout_seconds)
+        self._apply_models(provider.kind)  # the list of the provider's models, if it was fetched before
+        self._model_field.setText(provider.model)
         self._baseline = self._snapshot()
 
     def _fill_blank(self, kind: str, name: str) -> None:
@@ -622,9 +666,10 @@ class ProvidersTab(QWidget):
         self._kind_combo.setCurrentIndex(self._kind_combo.findData(kind))
         self._kind_combo.blockSignals(False)
         self._apply_kind(kind)
-        for field in (self._command_field, self._extra_args_field, self._model_field, self._key_field,
-                      self._key_env_field, self._temperature_field, self._max_tokens_field):
+        for field in (self._command_field, self._extra_args_field, self._key_field, self._key_env_field,
+                      self._temperature_field, self._max_tokens_field, self._price_in_field, self._price_out_field):
             field.clear()
+        self._model_field.setText("")
         self._endpoint_field.setText(DEFAULT_ENDPOINTS.get(kind, ""))
         if kind == KIND_ANTHROPIC_API:  # the one API kind that cannot go without a key
             self._key_env_field.setText(default_key_env(name))
@@ -636,6 +681,7 @@ class ProvidersTab(QWidget):
         self._fill(self._store.get(name))
         self._update_buttons()
         self._status.clear()
+        self._refresh_account()
 
     def _update_buttons(self) -> None:
         stored = self._editing is not None
@@ -649,6 +695,7 @@ class ProvidersTab(QWidget):
             self._extra_args_field.text(), self._model_field.text(), self._endpoint_field.text(),
             self._key_field.text(), self._key_env_field.text(), self._temperature_field.text(),
             self._max_tokens_field.text(), self._timeout_spin.value(),
+            self._price_in_field.text(), self._price_out_field.text(),
         )
 
     def _dirty(self) -> bool:
@@ -680,6 +727,8 @@ class ProvidersTab(QWidget):
             api_key_env=key_env,
             temperature=_optional_number(self._temperature_field.text(), float, "Температура"),
             max_tokens=_optional_number(self._max_tokens_field.text(), int, "Макс. токенов ответа"),
+            price_input=_optional_number(self._price_in_field.text(), float, "Цена за вход"),
+            price_output=_optional_number(self._price_out_field.text(), float, "Цена за выход"),
             **common,
         )
 
@@ -705,6 +754,7 @@ class ProvidersTab(QWidget):
         name = _unique_name(NEW_PROVIDER_NAMES[kind], self._store.providers)
         self._fill_blank(kind, name)
         self._update_buttons()
+        self._refresh_account()
         self._name_field.setFocus()
         self._name_field.selectAll()
         _set_status(self._status, "Новый провайдер: заполните поля и нажмите «Сохранить».", ok=None)
@@ -780,6 +830,113 @@ class ProvidersTab(QWidget):
         self.reload(select=name)
         _set_status(self._status, f"«{name}» — провайдер по умолчанию (GUI и CLI)", ok=True)
 
+    # --- account and models ---------------------------------------------------------
+
+    def _account_provider(self) -> Provider:
+        """What the account panel acts on: the kind and the command of the form (a name does not matter there)."""
+        kind = self._kind_combo.currentData()
+        return Provider(
+            name=NEW_PROVIDER_NAMES[kind], kind=kind, command=self._command_field.text().strip(),
+            timeout_seconds=120,
+        )
+
+    def _refresh_account(self) -> None:
+        """Point the account panel at the provider now shown (and check its sign-in) - once per kind/command."""
+        kind = self._kind_combo.currentData()
+        key = (kind, self._command_field.text().strip())
+        if key == self._account_key:
+            return
+        self._account_key = key
+        self._account_panel.set_kind(kind, check=kind in CLI_KINDS)
+
+    def _on_signed_in_changed(self, signed_in: bool) -> None:
+        # The list of models is the provider's to give, and it is there once signed in.
+        kind = self._kind_combo.currentData()
+        if signed_in and kind in CLI_KINDS and self._models_cache_key() not in self._models_cache:
+            self._load_models_or_cancel()
+
+    def _models_cache_key(self) -> tuple:
+        kind = self._kind_combo.currentData()
+        return (kind, self._command_field.text().strip() if kind in CLI_KINDS else self._endpoint_field.text().strip())
+
+    def _apply_models(self, kind: str) -> None:
+        """Offer the fetched models of the provider shown (or none yet), keeping the value in the field."""
+        key = (kind, self._command_field.text().strip() if kind in CLI_KINDS else self._endpoint_field.text().strip())
+        self._model_field.set_models(self._models_cache.get(key, []), allow_default=kind in CLI_KINDS)
+        self._update_model_info()
+
+    def _update_model_info(self) -> None:
+        option = self._model_field.option()
+        if option is None:
+            self._model_info.setText("")
+            return
+        text = option.description
+        if option.resolved and option.resolved != option.id:
+            text += f" [{option.resolved}]" if text else option.resolved
+        self._model_info.setText(text)
+
+    def _provider_for_models(self) -> tuple:
+        """(Provider, env) to list the models with. For an API provider the model is not known yet, so a
+        placeholder passes the validation - listing only needs the endpoint and the key."""
+        kind = self._kind_combo.currentData()
+        name = NEW_PROVIDER_NAMES[kind]
+        if kind in CLI_KINDS:
+            return Provider(name=name, kind=kind, command=self._command_field.text().strip(), timeout_seconds=60), {}
+        endpoint = self._endpoint_field.text().strip()
+        if not endpoint:
+            raise ValueError("Укажите endpoint — без него нечего спрашивать о моделях.")
+        key = self._key_field.text().strip()
+        key_env = self._key_env_field.text().strip()
+        if not key_env and (key or kind == KIND_ANTHROPIC_API):
+            key_env = default_key_env(self._name_field.text().strip() or name)
+        provider = Provider(name=name, kind=kind, endpoint=endpoint, model="-", api_key_env=key_env, timeout_seconds=60)
+        return provider, ({key_env: key} if key_env and key else {})
+
+    def _load_models_or_cancel(self) -> None:
+        if self._models_worker is not None:
+            self._models_worker.cancel()
+            return
+        try:
+            provider, env = self._provider_for_models()
+        except ValueError as e:
+            _set_status(self._status, str(e), ok=False)
+            return
+        worker = LlmWorker(run_account_task, ("models", provider.to_dict(), env), self)
+        worker.finished.connect(self._on_models_loaded)
+        worker.failed.connect(self._on_models_failed)
+        worker.cancelled.connect(self._on_models_cancelled)
+        self._models_worker = worker
+        self._models_requested_for = self._models_cache_key()
+        self._models_button.setText("Отмена")
+        _set_status(self._status, "Загружаю список моделей у провайдера…", ok=None)
+        try:
+            worker.start()
+        except OSError as e:
+            self._end_models(f"Не удалось запустить запрос: {e}", ok=False)
+
+    def _on_models_loaded(self, result: dict) -> None:
+        models = [ModelOption.from_dict(item) for item in result.get("models") or []]
+        self._models_cache[self._models_requested_for] = models
+        self._end_models(
+            f"Моделей у провайдера: {len(models)}." if models else "Провайдер вернул пустой список моделей.",
+            ok=True if models else False,
+        )
+        if self._models_requested_for == self._models_cache_key():
+            self._apply_models(self._kind_combo.currentData())
+
+    def _on_models_failed(self, _error_type: str, message: str) -> None:
+        self._end_models(message, ok=False)
+
+    def _on_models_cancelled(self) -> None:
+        self._end_models("Загрузка списка отменена.", ok=None)
+
+    def _end_models(self, message: str, ok: Optional[bool]) -> None:
+        if self._models_worker is not None:
+            self._models_worker.deleteLater()
+            self._models_worker = None
+        self._models_button.setText("Список моделей")
+        _set_status(self._status, message, ok=ok)
+
     # --- connection check ----------------------------------------------------------
 
     def _test_or_cancel(self) -> None:
@@ -807,7 +964,8 @@ class ProvidersTab(QWidget):
             self._end_test(f"Не удалось запустить проверку: {e}", ok=False)
 
     def _on_test_finished(self, result: dict) -> None:
-        self._end_test(f"✓ Провайдер отвечает. Ответ: {result.get('reply', '')}", ok=True)
+        lines = [f"✓ Провайдер отвечает. Ответ: {result.get('reply', '')}", *provider_text.run_lines(result)]
+        self._end_test("\n".join(lines), ok=True)
 
     def _on_test_failed(self, _error_type: str, message: str) -> None:
         self._end_test(message, ok=False)
@@ -831,14 +989,19 @@ class ProvidersTab(QWidget):
 #   subscription via their CLIs, OpenAI-compatible API, Anthropic API); an API key typed in the form is written
 #   to the repo-root .env under the provider's variable and into os.environ, never to the JSON file. "Проверить"
 #   sends a trivial prompt through a child process (LlmWorker) using the form's current values, saved or not,
-#   and can be cancelled. An unsaved form survives a visit to another screen and asks before being discarded
+#   and can be cancelled; its result lists the model, the tokens, the cost and the limits the provider reported.
+#   A subscription provider (ChatGPT, Claude) has an AccountPanel (GUI:ACCOUNT_PANEL): the one sign-in button, the
+#   account, the plan's limits. Models are the provider's to give: "Список моделей" fetches them (for subscriptions
+#   automatically once signed in), the model field is a list that still accepts a typed id; API providers may
+#   carry prices per million tokens so a request's cost can be estimated. An unsaved form survives a visit to
+#   another screen and asks before being discarded
 #   by a selection change. A malformed store file is shown as an error and the tab is disabled instead of
 #   overwriting the user's hand-written file.
 # @inputs: user edits; summary_templates.json, summary_providers.json, .env
 # @outputs: the two JSON stores, API keys in .env
 # @sideEffects: Writes the stores and .env, os.environ; spawns a child process for the connection check
 # @errors: Store/validation errors are shown in the tab's status line
-# @see: CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS, GUI:LLM_WORKER, GUI:SUMMARY_DIALOG, CONFIG:ENV
+# @see: CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS, GUI:ACCOUNT_PANEL, GUI:LLM_WORKER, GUI:SUMMARY_DIALOG, CONFIG:ENV
 class SummarySettingsScreen(QWidget):
     """Sidebar screen "Саммаризация": the templates and providers tabs."""
 

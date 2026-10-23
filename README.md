@@ -370,7 +370,8 @@ A finished job's transcript (`export/result.md`, with the speaker names as saved
 a language model. A summary is an on-demand add-on, not a pipeline stage: you ask for it, as often as
 you like and with different templates, and it never touches the job's cached stages. Each one is stored
 in the job folder as `summary/<timestamp>_<template>.md` (the model's reply, verbatim) plus a `.json`
-next to it with what produced it (template, prompt, provider, model, duration).
+next to it with what produced it (template, prompt, provider, the model that answered, duration, tokens,
+cost and limits as far as the provider reports them).
 
 **Templates.** A template is a named prompt; the transcript is attached to it automatically (inside
 `<transcript>` tags) when the request is sent, so the prompt only says what to do. Three built-in
@@ -381,18 +382,34 @@ templates (short summary, meeting minutes, call review) are read-only; yours liv
 
 | Kind | How it works | You need |
 |------|--------------|----------|
-| ChatGPT subscription | runs the official Codex CLI (`codex exec`) | `codex login` once, in a terminal |
-| Claude subscription | runs Claude Code (`claude -p`, tools off) | `claude auth login` once, in a terminal |
-| OpenAI-compatible API | `POST <endpoint>/chat/completions` — OpenAI, OpenRouter, DeepSeek, Groq, and local Ollama, LM Studio, vLLM | endpoint, model, API key (not needed for a local server) |
-| Anthropic API | `POST <endpoint>/v1/messages` | model, API key |
+| ChatGPT subscription | the official Codex CLI: sign-in, models and limits through `codex app-server`, requests through `codex exec` | the **Войти через ChatGPT** button |
+| Claude subscription | Claude Code: `claude auth login`, requests through `claude -p` (tools off) | the **Войти через Claude** button |
+| OpenAI-compatible API | `POST <endpoint>/chat/completions` — OpenAI, OpenRouter, DeepSeek, Groq, and local Ollama, LM Studio, vLLM | endpoint, API key (not needed for a local server) |
+| Anthropic API | `POST <endpoint>/v1/messages` | API key |
 
-* Subscription providers use the sign-in you already made in those tools: Diarrhizer never sees or stores
-  the account password or token. The tool is started in an empty temporary folder, without your personal
-  tool setup (hooks, plugins, MCP servers; for Codex also its `config.toml`, whose model or reasoning
-  effort may not suit `exec`) and without `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `CODEX_API_KEY` in its
-  environment, so a key kept for an API provider cannot silently switch the billing from the subscription.
-  A model and extra command-line arguments (e.g. `-c model_reasoning_effort="low"` for Codex) can be set
-  per provider.
+* **Signing in is one button, and it is the vendor's own sign-in.** In the GUI, a ChatGPT or Claude provider
+  has an account box: it shows who is signed in (e-mail, plan), and one button signs in, cancels a sign-in in
+  progress, or signs out. ChatGPT: the address of OpenAI's sign-in page comes from Codex's app-server and is
+  opened in your browser. Claude: the unmodified `claude auth login` opens Anthropic's page itself — Anthropic
+  does not allow other applications to offer a Claude.ai sign-in or to collect, store or relay its
+  credentials, so Diarrhizer deliberately has no sign-in of its own. In both cases the tokens stay in the
+  tool's own store; Diarrhizer never sees them. (CLI: `codex login` / `claude auth login` do the same.)
+* **The provider says which models exist.** **Список моделей** fetches them from the provider (Codex
+  `model/list`, Claude Code's own list with its descriptions and prices, `GET /models` for API providers; for
+  subscriptions this happens by itself once you are signed in). The field is a list that also accepts a typed
+  model id; for a subscription the first entry is the tool's own default.
+* **Limits and cost, as far as the provider tells.** ChatGPT: the plan's usage windows (percent used, reset time)
+  and credits, read from Codex and shown in the account box and after every summary; tokens per request.
+  Claude: tokens, a cost estimate from Claude Code (list prices — a subscription is not billed per token) and
+  the rate-limit status that came with the reply; Claude has no limits query, so **Обновить лимиты** sends a
+  one-word request and says so. API providers: tokens, and a cost — the provider's own if its reply has one
+  (OpenRouter), else computed from prices you may set per provider (USD per million tokens). A figure the
+  provider did not report is not shown, never guessed.
+* A subscription tool is started in an empty temporary folder, without your personal tool setup (hooks,
+  plugins, MCP servers; for Codex also its `config.toml`, whose model or reasoning effort may not suit `exec`)
+  and without `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `CODEX_API_KEY` in its environment, so a key kept for
+  an API provider cannot silently switch the billing from the subscription. Extra command-line arguments
+  (e.g. `-c model_reasoning_effort="low"` for Codex) can be set per provider.
 * An API key never goes into `summary_providers.json`: the provider names an environment variable
   (`api_key_env`) and the key lives in `.env` (git-ignored) — the GUI writes it there for you, like the
   Hugging Face token.
@@ -400,10 +417,11 @@ templates (short summary, meeting minutes, call review) are read-only; yours liv
   `DIARRHIZER_SUMMARY_PROVIDERS_FILE` / `DIARRHIZER_SUMMARY_TEMPLATES_FILE` move the two files.
 
 **GUI.** The **Саммаризация** screen has two tabs, "Шаблоны промптов" and "Провайдеры" (**Проверить**
-sends a one-word test request with the form's current values). On a job's **Результат** screen,
+sends a one-word test request with the form's current values and shows what it used). On a job's **Результат** screen,
 **Саммаризация…** opens a dialog: pick a template and a provider, **Создать саммари**; the dialog says
-exactly where the text will be sent, shows the summary as Markdown, keeps the job's earlier summaries and
-can copy or open them. The request runs in a separate process and can be cancelled.
+exactly where the text will be sent, shows the summary as Markdown with the model, tokens, cost and limits
+of the request, keeps the job's earlier summaries and can copy or open them. Every request, sign-in and
+model query runs in a separate process and can be cancelled.
 
 **CLI.**
 
@@ -413,7 +431,8 @@ python -m diarrhizer summarize ".\out\meeting_20260101_120000" --template "Пр�
 ```
 
 `--template` / `--provider` default to the ones marked as default; the argument may also be the job's
-`export/result.md`.
+`export/result.md`. After the summary is saved the command prints what the request used (tokens, cost,
+limits) when the provider reported it.
 
 Things to know:
 
@@ -422,7 +441,8 @@ Things to know:
 * The whole transcript goes in one request. A very long recording needs a model with a large enough
   context window; when it is too small, the provider's own error is shown. A reply cut off at the
   provider's length limit is flagged (raise `max_tokens` for API providers).
-* A subscription request counts against that subscription's usage limits.
+* A subscription request counts against that subscription's usage limits (Codex adds about 14 thousand
+  input tokens of its own instructions to even the shortest request).
 
 ---
 

@@ -5,14 +5,13 @@ touches the network or a real model.
 
 import json
 import sys
-import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from diarrhizer.adapters import llm
 from diarrhizer.adapters.llm import LLMError, complete
+from diarrhizer.summary.provider_info import Usage
 from diarrhizer.summary.providers import (
     KIND_ANTHROPIC_API,
     KIND_CLAUDE_CLI,
@@ -22,60 +21,6 @@ from diarrhizer.summary.providers import (
 )
 
 PROMPT = "Сделай резюме.\n\n<transcript>\nПривет, мир\n</transcript>\n"
-
-
-# --- a local stand-in for an HTTP API --------------------------------------------
-
-
-class FakeApi:
-    """Records every request and answers each with the configured status/body."""
-
-    def __init__(self) -> None:
-        self.requests: list = []
-        self.status = 200
-        self.body: object = {}
-        self.delay = 0.0
-        outer = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                length = int(self.headers.get("Content-Length", 0))
-                payload = self.rfile.read(length)
-                outer.requests.append(
-                    {"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()},
-                     "body": json.loads(payload)}
-                )
-                time.sleep(outer.delay)
-                raw = outer.body if isinstance(outer.body, bytes) else json.dumps(outer.body).encode("utf-8")
-                try:
-                    self.send_response(outer.status)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(raw)))
-                    self.end_headers()
-                    self.wfile.write(raw)
-                except OSError:  # the client gave up (timeout test)
-                    pass
-
-            def log_message(self, *args):
-                pass
-
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self._server.server_port}"
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
-
-    def close(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-
-
-@pytest.fixture
-def api(monkeypatch):
-    # A system proxy must not swallow requests to the local server.
-    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
-    monkeypatch.setenv("no_proxy", "127.0.0.1")
-    server = FakeApi()
-    yield server
-    server.close()
 
 
 def _openai_reply(text="Резюме готово", finish="stop"):
@@ -128,6 +73,51 @@ def test_openai_accepts_the_full_method_url_as_endpoint(api):
     api.body = _openai_reply()
     complete(_openai(api, endpoint=f"{api.url}/custom/chat/completions/"), PROMPT)
     assert api.requests[0]["path"] == "/custom/chat/completions"
+
+
+def test_openai_reports_the_model_and_token_usage_and_no_cost_without_prices(api):
+    api.body = {**_openai_reply(), "model": "gpt-x-2026-01-01",
+                "usage": {"prompt_tokens": 1200, "completion_tokens": 300,
+                          "prompt_tokens_details": {"cached_tokens": 1000},
+                          "completion_tokens_details": {"reasoning_tokens": 50}}}
+
+    reply = complete(_openai(api), PROMPT)
+
+    assert reply.model == "gpt-x-2026-01-01"  # what the server says, not the alias that was asked for
+    assert reply.usage == Usage(input_tokens=1200, output_tokens=300, cached_tokens=1000, reasoning_tokens=50)
+    assert reply.cost_usd is None and reply.cost_note == ""  # a price nobody told us is not guessed
+
+
+def test_openai_cost_comes_from_the_prices_set_on_the_provider(api):
+    api.body = {**_openai_reply(), "usage": {"prompt_tokens": 2_000_000, "completion_tokens": 500_000}}
+
+    reply = complete(_openai(api, price_input=0.15, price_output=0.60), PROMPT)
+
+    assert reply.cost_usd == pytest.approx(2 * 0.15 + 0.5 * 0.60)
+    assert "prices set for this provider" in reply.cost_note
+
+
+def test_a_cost_the_provider_reports_wins_over_the_prices(api):
+    """OpenRouter-style servers put the cost into usage."""
+    api.body = {**_openai_reply(), "usage": {"prompt_tokens": 10, "completion_tokens": 10, "cost": 0.00042}}
+
+    reply = complete(_openai(api, price_input=100.0, price_output=100.0), PROMPT)
+
+    assert reply.cost_usd == pytest.approx(0.00042)
+    assert reply.cost_note == "reported by the provider"
+
+
+def test_anthropic_reports_usage_with_cache_tokens_counted_as_input(api, monkeypatch):
+    monkeypatch.setenv("ANT_KEY", "k")
+    api.body = {"content": [{"type": "text", "text": "ok"}], "model": "claude-x-20260101",
+                "usage": {"input_tokens": 100, "cache_read_input_tokens": 400, "cache_creation_input_tokens": 50,
+                          "output_tokens": 20}}
+
+    reply = complete(_anthropic(api, price_input=3.0, price_output=15.0), PROMPT)
+
+    assert reply.model == "claude-x-20260101"
+    assert reply.usage == Usage(input_tokens=550, output_tokens=20, cached_tokens=400)
+    assert reply.cost_usd == pytest.approx((550 * 3.0 + 20 * 15.0) / 1_000_000)
 
 
 def test_openai_flags_a_reply_cut_off_by_the_length_limit(api):
@@ -270,13 +260,41 @@ if mode == "fail-login":
     sys.stdout.write("Not logged in - Please run /login\\n")
     sys.exit(1)
 
-if "exec" in argv:  # codex: the final message goes to the --output-last-message file
+def emit(*events):
+    for event in events:
+        sys.stdout.buffer.write((json.dumps(event, ensure_ascii=False) + "\\n").encode("utf-8"))
+
+
+if mode == "fail-login-json":  # what Claude Code prints with --output-format stream-json when nobody is signed in
+    emit({"type": "system", "subtype": "init", "model": "claude-opus-5[1m]"},
+         {"type": "result", "subtype": "success", "is_error": True, "result": "Not logged in \\u00b7 Please run /login",
+          "total_cost_usd": 0, "usage": {"input_tokens": 0, "output_tokens": 0}})
+    sys.exit(1)
+if mode == "fail-codex-json":  # a model the account cannot use: events on stdout, nothing on stderr
+    nested = '{"type":"error","status":400,"error":{"message":"The model is not supported for this account"}}'
+    emit({"type": "thread.started"}, {"type": "error", "message": nested},
+         {"type": "turn.failed", "error": {"message": nested}})
+    sys.exit(1)
+
+if "exec" in argv:  # codex: the final message goes to the --output-last-message file, events to stdout (--json)
     path = argv[argv.index("--output-last-message") + 1]
     with open(path, "w", encoding="utf-8") as out:
         out.write("  Ответ codex  \\n")
     sys.stderr.write("banner on stderr\\n")
-else:  # claude: the reply is stdout
-    sys.stdout.buffer.write("Ответ claude\\n".encode("utf-8"))
+    emit({"type": "thread.started", "thread_id": "t"}, {"type": "turn.started"},
+         {"type": "item.completed", "item": {"type": "agent_message", "text": "Ответ codex"}},
+         {"type": "turn.completed", "usage": {"input_tokens": 13712, "cached_input_tokens": 1000,
+                                                 "output_tokens": 5, "reasoning_output_tokens": 2}})
+else:  # claude: stream-json events; the reply is in the final "result" one
+    emit({"type": "system", "subtype": "init", "model": "claude-sonnet-5"},
+         {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "utilization": 0.25}},
+         {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning", "resetsAt": 1793293782,
+                                                           "utilization": 0.82, "rateLimitType": "five_hour"}},
+         {"type": "result", "subtype": "success", "is_error": False, "result": "Ответ claude\\n",
+          "stop_reason": "end_turn", "total_cost_usd": 0.0123,
+          "usage": {"input_tokens": 10, "cache_read_input_tokens": 200, "cache_creation_input_tokens": 30,
+                    "output_tokens": 7, "output_tokens_details": {"thinking_tokens": 3}},
+          "modelUsage": {"claude-sonnet-5": {"inputTokens": 10, "outputTokens": 7, "costUSD": 0.0123}}})
 '''
 
 
@@ -325,12 +343,37 @@ def test_claude_gets_the_prompt_on_stdin_with_tools_off_in_an_empty_directory(fa
     assert call["stdin"] == PROMPT  # Cyrillic and newlines intact, not squeezed through argv
     argv = call["argv"]
     assert argv[:2] == ["-p", "--tools"] and argv[2] == ""
-    assert {"--no-session-persistence", "--safe-mode"} <= set(argv)
+    assert {"--no-session-persistence", "--safe-mode", "--verbose"} <= set(argv)
+    assert argv[argv.index("--output-format") + 1] == "stream-json"  # the reply comes back with what it used
     assert argv[argv.index("--model") + 1] == "sonnet"
     assert argv[-2:] == ["--effort", "low"]
     assert PROMPT not in argv
     # Not run from the repo or the job folder: the tool must not load their CLAUDE.md/AGENTS.md.
     assert call["cwd"] != str(tmp_path) and "diarrhizer-llm-" in call["cwd"]
+
+
+def test_claude_reports_model_tokens_estimated_cost_and_the_limit_status(fake_cli):
+    make, _log = fake_cli
+
+    reply = complete(_claude(make), PROMPT)
+
+    assert reply.model == "claude-sonnet-5"  # the model that did the work (modelUsage), not the alias asked for
+    # Cached and cache-writing tokens are input too: 10 plain + 200 read + 30 written.
+    assert reply.usage == Usage(input_tokens=240, output_tokens=7, cached_tokens=200, reasoning_tokens=3)
+    assert reply.cost_usd == pytest.approx(0.0123)
+    assert "estimated" in reply.cost_note and "not billed per token" in reply.cost_note  # a subscription is not a bill
+    (window,) = reply.limits.windows  # the last rate_limit_event wins
+    assert window.status == "allowed_warning"
+    assert window.used_percent == pytest.approx(82)  # utilization 0.82 is a fraction
+    assert window.window_minutes == 300 and window.resets_at == 1793293782
+    assert reply.limits.allowed is True
+
+
+def test_claude_limits_above_one_are_taken_as_a_percentage_and_rejection_means_not_allowed():
+    limits = llm._claude_limits({"status": "rejected", "utilization": 100, "rateLimitType": "seven_day"})
+    (window,) = limits.windows
+    assert window.used_percent == 100 and window.window_minutes == 10080
+    assert limits.allowed is False
 
 
 def test_codex_reply_comes_from_the_output_file_not_the_noisy_streams(fake_cli):
@@ -340,12 +383,27 @@ def test_codex_reply_comes_from_the_output_file_not_the_noisy_streams(fake_cli):
     assert reply.text == "Ответ codex"
     (call,) = log()
     argv = call["argv"]
-    assert argv[:2] == ["exec", "--skip-git-repo-check"]
+    assert argv[:3] == ["exec", "--json", "--skip-git-repo-check"]  # --json: the events carry the token usage
     assert argv[argv.index("--sandbox") + 1] == "read-only"
     assert {"--ignore-user-config", "--ephemeral"} <= set(argv)
     assert argv[argv.index("--model") + 1] == "gpt-5"
     assert argv[-1] == "-"  # prompt from stdin
     assert call["stdin"] == PROMPT
+    assert reply.model == "gpt-5"
+    # Codex counts cached tokens inside input_tokens; it reports no cost.
+    assert reply.usage == Usage(input_tokens=13712, output_tokens=5, cached_tokens=1000, reasoning_tokens=2)
+    assert reply.cost_usd is None and reply.limits is None
+
+
+def test_codex_without_a_reply_file_falls_back_to_the_final_message_event(tmp_path):
+    reply = llm._codex_reply(
+        Provider(name="c", kind=KIND_CODEX_CLI),
+        '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}\n'
+        'not json at all\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"final"}}\n',
+        tmp_path / "missing.txt",
+    )
+    assert reply.text == "final"
 
 
 def test_subscription_clis_do_not_inherit_api_keys_that_would_switch_the_billing(fake_cli, monkeypatch):
@@ -380,6 +438,28 @@ def test_other_failures_are_not_retried(fake_cli, monkeypatch):
     with pytest.raises(LLMError, match="Not logged in"):
         complete(_claude(make), PROMPT)
     assert len(log()) == 1
+
+
+def test_claude_not_signed_in_is_read_from_its_result_event(fake_cli, monkeypatch):
+    make, log = fake_cli
+    monkeypatch.setenv("FAKE_MODE", "fail-login-json")
+    with pytest.raises(LLMError) as excinfo:
+        complete(_claude(make), PROMPT)
+    message = str(excinfo.value)
+    assert "Not logged in" in message and "Please run /login" in message
+    assert '"type"' not in message  # the JSON events themselves are not dumped on the user
+    assert "claude auth login" in message
+    assert len(log()) == 1
+
+
+def test_codex_json_errors_are_reduced_to_the_providers_message(fake_cli, monkeypatch):
+    make, _log = fake_cli
+    monkeypatch.setenv("FAKE_MODE", "fail-codex-json")
+    with pytest.raises(LLMError) as excinfo:
+        complete(_codex(make), PROMPT)
+    message = str(excinfo.value)
+    assert message.count("The model is not supported for this account") == 1  # error + turn.failed say it once
+    assert "thread.started" not in message
 
 
 def test_a_failed_cli_reports_code_output_and_how_to_sign_in(fake_cli, monkeypatch):

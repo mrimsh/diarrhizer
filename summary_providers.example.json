@@ -17,6 +17,8 @@
       "api_key_env": "DIARRHIZER_LLM_KEY_OPENROUTER",
       "temperature": 0.3,
       "max_tokens": 4000,
+      "price_input": 0.15,
+      "price_output": 0.6,
       "timeout_seconds": 600
     },
     "Ollama (local)": {

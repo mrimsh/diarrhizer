@@ -31,6 +31,7 @@ from diarrhizer.summary.providers import KIND_CLAUDE_CLI, KIND_CODEX_CLI, Provid
 from diarrhizer.summary.providers import store_path as providers_path
 from diarrhizer.summary.templates import PromptTemplate, TemplateStore
 from diarrhizer.summary.templates import store_path as templates_path
+from diarrhizer_gui import provider_text
 from diarrhizer_gui.child_tasks import run_summary_task
 from diarrhizer_gui.llm_worker import LlmWorker
 from diarrhizer_gui.screens.monitor_screen import format_elapsed
@@ -61,14 +62,16 @@ def destination(provider: Provider) -> str:
 #   starts an LlmWorker (run_summary_task) and turns into "Отменить" while it runs - cancelling or closing the
 #   dialog kills the child and its tree and stores nothing. A note under the buttons says exactly where the
 #   transcript will be sent. Finished summaries are listed newest first from summary/*.json and rendered as
-#   Markdown; the raw text can be copied or opened as a file. A malformed templates file falls back to the
+#   Markdown; the raw text can be copied or opened as a file. What a request used is shown as far as the
+#   provider reported it - the model that answered, tokens, a cost (with where the figure comes from) and the
+#   plan's limits - both when it finishes and with every stored summary. A malformed templates file falls back to the
 #   built-in templates with a visible error; a malformed or empty providers file disables the button and says
 #   where to fix it. The dialog is modal: a request is a matter of seconds to minutes.
 # @inputs: job_dir with export/result.md, the template/provider stores
 # @outputs: summary/<timestamp>_<template>.md and .json in the job folder
 # @sideEffects: Sends the transcript to the chosen provider; spawns/kills a child process; writes summary files
 # @errors: Provider failures are shown in the dialog, never raised
-# @see: SUMMARY:JOB, GUI:LLM_WORKER, GUI:SUMMARY_SETTINGS, CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS
+# @see: SUMMARY:JOB, GUI:LLM_WORKER, GUI:SUMMARY_SETTINGS, CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS, CONFIG:PROVIDER_INFO
 class SummaryDialog(QDialog):
     def __init__(self, parent, job_dir: Path, job_title: str) -> None:
         super().__init__(parent)
@@ -260,9 +263,10 @@ class SummaryDialog(QDialog):
                 " Внимание: ответ обрезан по лимиту длины — увеличьте «Макс. токенов ответа» "
                 "в настройках провайдера."
             )
+        used = "".join("\n" + line for line in provider_text.run_lines(result))  # model, tokens, cost, limits
         self._end(
             f"Готово за {format_elapsed(result.get('duration_seconds', 0))}. "
-            f"Сохранено: summary/{Path(result['path']).name}.{note}",
+            f"Сохранено: summary/{Path(result['path']).name}.{note}{used}",
             ok=ok,
         )
         self._refresh_summaries(select=result["path"])
@@ -320,13 +324,14 @@ class SummaryDialog(QDialog):
         meta = self._summaries.get(path, {})
         provider = meta.get("provider") or {}
         parts = [f"Шаблон «{meta.get('template', '?')}»", f"провайдер «{provider.get('name', '?')}»"]
-        if provider.get("model"):
+        if provider.get("model") and not meta.get("model"):  # a summary from before the model was recorded
             parts.append(f"модель {provider['model']}")
         if meta.get("duration_seconds") is not None:
             parts.append(f"заняло {format_elapsed(meta['duration_seconds'])}")
         if meta.get("truncated"):
             parts.append("ответ обрезан по лимиту длины")
-        self._meta_label.setText(" · ".join(parts))
+        # What the request used, as far as the provider reported it: model, tokens, cost, limits.
+        self._meta_label.setText("\n".join([" · ".join(parts), *provider_text.run_lines(meta)]))
 
     def _open_file(self) -> None:
         path = self._summary_combo.currentData()

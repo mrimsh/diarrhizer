@@ -182,6 +182,38 @@ def test_provider_rejects_bad_values(overrides):
         _api(**overrides)
 
 
+def test_prices_are_optional_and_turn_token_counts_into_a_cost_estimate():
+    priced = _api(price_input=0.15, price_output=0.60)
+    assert priced.estimate_cost(2_000_000, 500_000) == pytest.approx(2 * 0.15 + 0.5 * 0.60)
+    assert _api().estimate_cost(1000, 1000) is None  # no prices, no guess
+    assert _api(price_input=1.0).estimate_cost(1_000_000, 5_000_000) == pytest.approx(1.0)  # output priced at 0
+    free = _api(price_input=0, price_output=0)  # a local model: a real price of zero, not "unknown"
+    assert free.estimate_cost(10**9, 10**9) == 0.0
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"price_input": -1},
+        {"price_input": "cheap"},
+        {"price_input": True},
+        {"price_output": 1.0},  # an output price without an input price
+        {"price_input": 1.0, "price_output": -0.1},
+    ],
+)
+def test_bad_prices_are_rejected(overrides):
+    with pytest.raises(ValueError, match="price"):
+        _api(**overrides)
+
+
+def test_prices_are_stored_for_api_providers_only():
+    priced = _api(price_input=0.15, price_output=0.60)
+    assert priced.to_dict(include_name=False)["price_input"] == 0.15
+    assert Provider.from_dict(priced.to_dict()) == priced
+    assert "price_input" not in _api().to_dict()  # unset prices are not written
+    assert "price_input" not in Provider(name="c", kind=KIND_CODEX_CLI).to_dict()  # a subscription reports its own
+
+
 def test_provider_reads_its_key_from_the_environment(monkeypatch):
     provider = _api(api_key_env="MY_KEY")
     assert provider.api_key() == ""

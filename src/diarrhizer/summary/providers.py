@@ -55,13 +55,16 @@ def default_key_env(name: str) -> str:
 #   claude), model and extra arguments. API kinds need a model and an endpoint (the Anthropic one defaults
 #   to api.anthropic.com); the key is never stored here - api_key_env names the environment variable it is
 #   read from, which keeps the JSON file free of secrets (an OpenAI-compatible local server may need no key,
-#   so an empty api_key_env sends no Authorization header). ProviderStore keeps the providers and the default
+#   so an empty api_key_env sends no Authorization header). An API provider may carry prices per million
+#   tokens (price_input / price_output) so a request's cost can be estimated; a subscription provider reports
+#   its own figures. The model of a subscription provider is optional (empty = the tool's default); which models
+#   exist is the provider's to say (ADAPTER:LLM_ACCOUNTS). ProviderStore keeps the providers and the default
 #   name in a JSON file; there are no built-ins, an empty store is a normal state the callers explain.
 # @inputs: provider fields (validated on construction), JSON store path (DIARRHIZER_SUMMARY_PROVIDERS_FILE)
 # @outputs: Provider instances, summary_providers.json
 # @sideEffects: ProviderStore.load() reads and save() atomically writes the JSON store; Provider.api_key() reads os.environ
 # @errors: ValueError for invalid fields, unknown names or an unreadable store file
-# @see: ADAPTER:LLM, SUMMARY:JOB, CONFIG:SUMMARY_TEMPLATES, CONFIG:ENV, GUI:SUMMARY_SETTINGS
+# @see: ADAPTER:LLM, ADAPTER:LLM_ACCOUNTS, SUMMARY:JOB, CONFIG:SUMMARY_TEMPLATES, CONFIG:ENV, GUI:SUMMARY_SETTINGS
 @dataclass(frozen=True)
 class Provider:
     """One configured model provider.
@@ -77,6 +80,8 @@ class Provider:
         max_tokens: API kinds: cap on the reply length, None = the service's default
         timeout_seconds: How long to wait for the reply
         extra_args: CLI kinds: arguments appended to the command line
+        price_input: API kinds: USD per million input tokens, to estimate a request's cost (None = no estimate)
+        price_output: API kinds: USD per million output tokens (needs price_input)
     """
 
     name: str
@@ -89,6 +94,8 @@ class Provider:
     max_tokens: int | None = None
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     extra_args: tuple[str, ...] = ()
+    price_input: float | None = None
+    price_output: float | None = None
 
     def __post_init__(self) -> None:
         # JSON hands back lists; a tuple keeps the frozen dataclass hashable.
@@ -125,6 +132,14 @@ class Provider:
             raise ValueError(f"{prefix}: temperature must be a number from 0 to 2, got {self.temperature!r}")
         if self.max_tokens is not None and (not _is_int(self.max_tokens) or self.max_tokens < 1):
             raise ValueError(f"{prefix}: max_tokens must be a positive integer, got {self.max_tokens!r}")
+        for attr in ("price_input", "price_output"):
+            price = getattr(self, attr)
+            if price is not None and (
+                isinstance(price, bool) or not isinstance(price, (int, float)) or price < 0
+            ):
+                raise ValueError(f"{prefix}: {attr} must be a number of USD per million tokens, got {price!r}")
+        if self.price_output is not None and self.price_input is None:
+            raise ValueError(f"{prefix}: price_output needs price_input as well")
 
         if self.kind in CLI_KINDS:
             return
@@ -140,6 +155,12 @@ class Provider:
     @property
     def is_cli(self) -> bool:
         return self.kind in CLI_KINDS
+
+    def estimate_cost(self, input_tokens: int, output_tokens: int) -> float | None:
+        """USD for a request of this size at the prices set for the provider, None without prices."""
+        if self.price_input is None:
+            return None
+        return (input_tokens * self.price_input + output_tokens * (self.price_output or 0.0)) / 1_000_000
 
     @property
     def executable(self) -> str:
@@ -161,6 +182,8 @@ class Provider:
                 "api_key_env": self.api_key_env,
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
+                "price_input": self.price_input,
+                "price_output": self.price_output,
             }
         data.update({key: value for key, value in optional.items() if value not in ("", None, [])})
         data["timeout_seconds"] = self.timeout_seconds

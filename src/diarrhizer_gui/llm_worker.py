@@ -16,21 +16,22 @@ CRASH_HINT = (
 
 
 # [SEMANTIC-BEGIN] GUI:LLM_WORKER
-# @purpose: Run one summary / provider-check task off the GUI process and report its outcome as Qt signals
+# @purpose: Run one summary / provider-check / account task off the GUI process and report its outcome as Qt signals
 # @description: Wraps ChildProcess around one of the child_tasks targets (run_summary_task,
-#   run_provider_check_task). Exactly one of finished/failed/cancelled fires. cancel() kills the child
+#   run_provider_check_task, run_account_task). Exactly one of finished/failed/cancelled fires. cancel() kills the child
 #   and everything it started - including a subscription CLI's own processes - at once; nothing is written
 #   for a cancelled summary, because the reply is stored only after the provider answered. A child that
 #   dies without reporting becomes failed("ProcessCrashed", ...).
 # @inputs: target (a child_tasks function), its picklable arguments
-# @outputs: signals finished(result dict), failed(type, message), cancelled()
+# @outputs: signals finished(result dict), failed(type, message), cancelled(), event(name, payload)
 # @sideEffects: Spawns and may kill a child process that talks to the provider
 # @errors: Reported via failed, never raised
-# @see: GUI:CHILD_PROCESS, GUI:CHILD_TASKS, GUI:SUMMARY_DIALOG, GUI:SUMMARY_SETTINGS
+# @see: GUI:CHILD_PROCESS, GUI:CHILD_TASKS, GUI:SUMMARY_DIALOG, GUI:SUMMARY_SETTINGS, GUI:ACCOUNT_PANEL
 class LlmWorker(QObject):
     finished = Signal(dict)
     failed = Signal(str, str)  # error type name, message
     cancelled = Signal()
+    event = Signal(str, str)  # name, payload: something to show while the task runs (a sign-in address)
 
     def __init__(self, target: Callable, args: tuple, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -52,7 +53,9 @@ class LlmWorker(QObject):
         return self._process.is_running()
 
     def _on_message(self, item) -> None:
-        if item[0] == "finished":
+        if item[0] == "event":
+            self.event.emit(item[1], item[2])
+        elif item[0] == "finished":
             self._result = item[1]
         elif item[0] == "failed":
             self._failure = (item[1], item[2])

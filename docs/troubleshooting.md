@@ -376,3 +376,23 @@ ValueError: Requested float16 compute type, but the target device or backend do 
 | huggingface-hub 1.5+ | May work | Lazy loading changes |
 | pyannote.audio 3.3.2 | **Stable** | Current default |
 | speechbrain 1.0.x | **Stable** | Current default |
+
+---
+
+## Summaries: sign-in, models and limits of ChatGPT / Claude providers
+
+Where the **Саммаризация → Провайдеры** screen shows an error, this is what usually stands behind it.
+
+| What you see | Why | What to do |
+|--------------|-----|------------|
+| `command 'codex' not found` / `command 'claude' not found` | The vendor's tool is not installed or not on `PATH` | Install Codex CLI / Claude Code, or give the full path to the executable in the provider's **Команда** field |
+| **Войти через ChatGPT**: the page opens but the window does not update | Codex waits for the browser on `localhost:1455`; another process (a stuck `codex login`, another Codex window) may hold that port | Close the other Codex process, press **Отменить вход**, try again |
+| **Войти через Claude**: no browser page | Claude Code could not open the browser | Press **Отменить вход**, run `claude auth login` in a terminal (it also lets you paste the code from the page), then **Проверить вход** |
+| `The '<model>' model is not supported when using Codex with a ChatGPT account` | The chosen model is not available for the signed-in plan | Press **Список моделей** and pick one from the list, or choose the tool's default |
+| Signed in "по API-ключу, а не по подписке" | The tool has an API key stored instead of a subscription sign-in, so requests are billed per token | **Выйти**, then sign in with the button |
+| Claude: **Обновить лимиты** takes seconds and uses a little quota | Claude Code reports limits only with a reply, so a one-word request is sent | Expected; Codex's limits are a local query and cost nothing |
+| Limits or cost missing from a summary | The provider did not report them (Codex reports no cost; an API provider reports cost only with prices set or from OpenRouter-style replies) | Nothing is invented; set prices on an API provider to get an estimate |
+
+Signing out in the app signs the tool out for everything that uses it (the tool keeps one stored sign-in).
+The app never sees or stores the tokens: for Claude it only starts Anthropic's own `claude auth login`,
+because Anthropic does not allow other applications to offer a Claude.ai sign-in themselves.

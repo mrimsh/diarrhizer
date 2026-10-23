@@ -13,6 +13,7 @@ from diarrhizer import cli
 from diarrhizer.adapters import llm
 from diarrhizer.adapters.llm import LLMError, LLMReply
 from diarrhizer.summary import service
+from diarrhizer.summary.provider_info import LimitWindow, Limits, Usage
 from diarrhizer.summary.providers import KIND_CODEX_CLI, KIND_OPENAI_API, Provider, ProviderStore
 from diarrhizer.summary.templates import PromptTemplate, TemplateStore
 
@@ -102,6 +103,80 @@ def test_the_reply_is_stored_verbatim_with_what_produced_it(job_dir, model):
     assert result["text"] == "## Итоги\n- решили начать" and result["truncated"] is True
 
 
+def test_what_the_request_used_is_stored_with_the_summary(job_dir, model):
+    limits = Limits(windows=(LimitWindow(label="", used_percent=82.0, window_minutes=300, resets_at=1793293782.0,
+                                         status="allowed_warning"),), allowed=True)
+    model.reply = LLMReply("Итоги", model="claude-sonnet-5", usage=Usage(240, 7, 200, 3), cost_usd=0.0123,
+                           cost_note="estimated by Claude Code", limits=limits)
+
+    result = service.summarize_job(job_dir, TEMPLATE, Provider(name="Claude", kind="claude-cli"))
+
+    meta = json.loads(Path(result["meta_path"]).read_text(encoding="utf-8"))
+    assert meta["model"] == "claude-sonnet-5"
+    assert meta["usage"] == {"input_tokens": 240, "output_tokens": 7, "cached_tokens": 200, "reasoning_tokens": 3}
+    assert meta["cost_usd"] == 0.0123 and meta["cost_note"] == "estimated by Claude Code"
+    assert Limits.from_dict(meta["limits"]) == limits
+    assert result["usage"] == meta["usage"] and result["limits"] == meta["limits"]
+
+
+def test_a_provider_that_reports_nothing_leaves_those_fields_empty(job_dir, model):
+    result = service.summarize_job(job_dir, TEMPLATE, PROVIDER)
+    meta = json.loads(Path(result["meta_path"]).read_text(encoding="utf-8"))
+    assert meta["usage"] is None and meta["cost_usd"] is None and meta["limits"] is None
+    assert meta["model"] == ""  # neither the reply nor the provider names a model
+
+
+def test_codex_limits_are_read_after_the_request_and_a_failure_to_read_them_is_not_fatal(
+    job_dir, model, monkeypatch, real_plan_limits
+):
+    asked = []
+
+    def read_limits(provider):
+        asked.append(provider.name)
+        return Limits(windows=(LimitWindow(used_percent=18.0, window_minutes=10080),), credits="none")
+
+    monkeypatch.setattr(service.llm_accounts, "read_limits", read_limits)
+    result = service.summarize_job(job_dir, TEMPLATE, PROVIDER)  # PROVIDER is a Codex provider
+    assert asked == ["ChatGPT"] and result["limits"]["windows"][0]["used_percent"] == 18.0
+
+    def broken(provider):
+        raise LLMError("app-server did not answer")
+
+    monkeypatch.setattr(service.llm_accounts, "read_limits", broken)
+    result = service.summarize_job(job_dir, TEMPLATE, PROVIDER)
+    assert result["limits"] is None and Path(result["path"]).exists()  # the summary was made regardless
+
+
+def test_limits_that_came_with_the_reply_are_not_asked_for_again(job_dir, model, monkeypatch, real_plan_limits):
+    monkeypatch.setattr(service.llm_accounts, "read_limits", lambda provider: pytest.fail("a second request"))
+    model.reply = LLMReply("x", limits=Limits(windows=(LimitWindow(used_percent=5.0),)))
+    assert service.summarize_job(job_dir, TEMPLATE, PROVIDER)["limits"]["windows"][0]["used_percent"] == 5.0
+    # ... and Claude / API providers are never asked separately: that would be a second model request.
+    model.reply = LLMReply("x")
+    assert service.summarize_job(job_dir, TEMPLATE, Provider(name="Claude", kind="claude-cli"))["limits"] is None
+
+
+def test_describe_usage_says_only_what_was_reported():
+    assert service.describe_usage({}) == []
+    lines = service.describe_usage({
+        "usage": {"input_tokens": 13712, "output_tokens": 5, "cached_tokens": 1000},
+        "cost_usd": 0.0123, "cost_note": "estimated by Claude Code",
+        "limits": {"windows": [{"label": "", "used_percent": 18.0, "window_minutes": 10080, "resets_at": None,
+                                "status": ""}], "credits": "none", "allowed": False, "note": ""},
+    })
+    assert lines == [
+        "Tokens: 13,712 in (1,000 cached), 5 out",
+        "Cost: about $0.0123 (estimated by Claude Code)",
+        "Limit 7 d: 18% used",
+        "Credits: none",
+        "The plan's usage is exhausted",
+    ]
+
+
+def test_format_window_names_the_usual_lengths():
+    assert [service.format_window(m) for m in (300, 10080, 45, 90, None, 0)] == ["5 h", "7 d", "45 min", "90 min", "", ""]
+
+
 def test_summaries_never_overwrite_each_other(job_dir, model, monkeypatch):
     class FrozenNow:
         @staticmethod
@@ -152,12 +227,20 @@ def test_summary_title_survives_missing_metadata():
     assert service.summary_title({"created_at": "garbage", "template": "T"}) == "? · T · ?"
 
 
-def test_check_provider_returns_a_short_reply(model):
-    model.reply = LLMReply("ok")
-    assert service.check_provider(PROVIDER) == "ok"
+def test_check_provider_returns_a_short_reply_and_what_the_request_used(model):
+    model.reply = LLMReply("ok", model="m-1", usage=Usage(input_tokens=9, output_tokens=1), cost_usd=0.5,
+                           cost_note="estimate", limits=Limits(windows=(LimitWindow(used_percent=12.0),)))
+
+    result = service.check_provider(PROVIDER)
+
+    assert result["reply"] == "ok" and result["model"] == "m-1"
+    assert result["usage"]["input_tokens"] == 9 and result["cost_usd"] == 0.5
+    assert result["limits"]["windows"][0]["used_percent"] == 12.0
     assert model.prompts == [service.CHECK_PROMPT]
     model.reply = LLMReply("x" * 500)
-    assert len(service.check_provider(PROVIDER)) == 201
+    assert len(service.check_provider(PROVIDER)["reply"]) == 201
+    # Nothing reported, nothing invented:
+    assert service.check_provider(PROVIDER)["usage"] is None and service.check_provider(PROVIDER)["limits"] is None
 
 
 def test_resolve_job_dir_accepts_the_folder_or_a_file_in_its_export(job_dir, tmp_path):

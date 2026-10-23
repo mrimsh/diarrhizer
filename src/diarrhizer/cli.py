@@ -84,6 +84,8 @@ def _run_summarize(args: argparse.Namespace) -> int:
         return 1
 
     print(f"Summary saved: {result['path']}")
+    for line in service.describe_usage(result):  # what the request used, as far as the provider says
+        print(line)
     if result["truncated"]:
         print("Warning: the provider cut the reply off at its length limit", file=sys.stderr)
     if args.print:

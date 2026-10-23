@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
+from vendor_stub import make_vendor
 
 pytest.importorskip("PySide6", reason="GUI extra not installed")
 
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 from diarrhizer.adapters import llm  # noqa: E402
 from diarrhizer.adapters.llm import LLMError, LLMReply  # noqa: E402
 from diarrhizer.summary import service  # noqa: E402
+from diarrhizer.summary.provider_info import Account, LimitWindow, Limits, ModelOption, Usage  # noqa: E402
 from diarrhizer.summary.providers import (  # noqa: E402
     KIND_ANTHROPIC_API,
     KIND_CLAUDE_CLI,
@@ -33,7 +35,15 @@ from diarrhizer.summary.providers import (  # noqa: E402
 from diarrhizer.summary.templates import BUILTIN_TEMPLATES, PromptTemplate, TemplateStore  # noqa: E402
 from diarrhizer_gui import child_tasks  # noqa: E402
 from diarrhizer_gui.llm_worker import LlmWorker  # noqa: E402
-from diarrhizer_gui.screens import result_screen, summary_dialog, summary_settings_screen  # noqa: E402
+from diarrhizer_gui.screens import (  # noqa: E402
+    account_panel,
+    result_screen,
+    summary_dialog,
+    summary_settings_screen,
+)
+from diarrhizer_gui.screens.model_combo import DEFAULT_LABEL, ModelCombo  # noqa: E402
+
+REAL_OPEN_URL = account_panel.open_url  # before the autouse fixture below replaces it
 
 TRANSCRIPT = "# Transcription\n\n[00:00:01 → 00:00:05] **Иван:** Привет, начнём встречу.\n"
 
@@ -65,6 +75,7 @@ class FakeWorker(QObject):
     finished = Signal(dict)
     failed = Signal(str, str)
     cancelled = Signal()
+    event = Signal(str, str)
     instances: list = []
 
     def __init__(self, target, args, parent=None):
@@ -95,6 +106,28 @@ class FakeWorker(QObject):
         self.target(queue, *self.args)
         kind, *rest = queue.items[-1]
         (self.finished if kind == "finished" else self.failed).emit(*rest)
+
+
+class PanelWorker(FakeWorker):
+    """The account panel's workers, kept apart from the tab's own (FakeWorker.instances)."""
+
+    instances: list = []
+
+    def __init__(self, target, args, parent=None):
+        super().__init__(target, args, parent)
+        FakeWorker.instances.remove(self)  # registered by the base class in the wrong list
+        PanelWorker.instances.append(self)
+
+
+@pytest.fixture(autouse=True)
+def isolated_accounts(monkeypatch):
+    """No test starts a real codex/claude or opens a browser: the account panel gets stand-in workers.
+    Returns the list of addresses the panel "opened"."""
+    PanelWorker.instances = []
+    opened: list = []
+    monkeypatch.setattr(account_panel, "LlmWorker", PanelWorker)
+    monkeypatch.setattr(account_panel, "open_url", lambda url: opened.append(url) or True)
+    return opened
 
 
 @pytest.fixture
@@ -263,10 +296,12 @@ def test_a_cli_provider_form_shows_only_its_own_fields(qapp):
     assert tab._name_field.text() == "Claude"
     assert form.isRowVisible(tab._command_field) and form.isRowVisible(tab._extra_args_field)
     assert not form.isRowVisible(tab._endpoint_field) and not form.isRowVisible(tab._key_row)
-    assert "claude auth login" in tab._kind_hint.text()
+    assert "правилам Anthropic" in tab._kind_hint.text()  # why the sign-in is the tool's own, not the app's
+    assert form.isRowVisible(tab._account_panel)  # a subscription has an account
 
     tab._new(KIND_OPENAI_API)
     assert not form.isRowVisible(tab._command_field)
+    assert not form.isRowVisible(tab._account_panel) and form.isRowVisible(tab._prices_row)
     assert form.isRowVisible(tab._endpoint_field) and form.isRowVisible(tab._key_row)
     assert tab._endpoint_field.text() == "https://api.openai.com/v1"
 
@@ -494,7 +529,8 @@ def test_provider_check_task_sets_the_typed_key_for_the_call(monkeypatch, model)
 
     child_tasks.run_provider_check_task(queue, provider.to_dict(), {"CHECK_KEY": "typed"})
 
-    assert queue.items == [("finished", {"reply": "ok"})]
+    ((kind, result),) = queue.items
+    assert kind == "finished" and result["reply"] == "ok"
     assert seen["key"] == "typed"
 
 
@@ -753,14 +789,16 @@ def test_unsaved_speaker_names_are_offered_for_saving_before_summarizing(
 
 
 FAKE_CLI = '''
-import os, sys, time
+import json, os, sys, time
 sys.stdin.buffer.read()
 marker = os.environ.get("FAKE_MARKER")
 if marker:
     with open(marker, "w") as f:
         f.write(str(os.getpid()))
     time.sleep(120)
-sys.stdout.buffer.write("Ответ из дочернего процесса".encode("utf-8"))
+event = {"type": "result", "subtype": "success", "is_error": False, "result": "Ответ из дочернего процесса",
+         "total_cost_usd": 0.002, "usage": {"input_tokens": 5, "output_tokens": 3}}
+sys.stdout.buffer.write((json.dumps(event, ensure_ascii=False) + chr(10)).encode("utf-8"))
 '''
 
 
@@ -795,7 +833,10 @@ def test_a_provider_check_runs_through_a_real_child_process(qapp, tmp_path):
 
     name, args = _wait_for_any(("finished", worker.finished), ("failed", worker.failed))
 
-    assert (name, args) == ("finished", ({"reply": "Ответ из дочернего процесса"},))
+    assert name == "finished"
+    (result,) = args
+    assert result["reply"] == "Ответ из дочернего процесса"
+    assert result["usage"]["input_tokens"] == 5 and result["cost_usd"] == 0.002
 
 
 def test_a_real_summary_job_in_a_child_process(qapp, tmp_path):
@@ -810,6 +851,7 @@ def test_a_real_summary_job_in_a_child_process(qapp, tmp_path):
     assert name == "finished"
     assert Path(result["path"]).read_text(encoding="utf-8") == "Ответ из дочернего процесса\n"
     assert [s["template"] for s in service.list_summaries(job)] == ["Итоги"]
+    assert result["usage"]["output_tokens"] == 3 and result["cost_usd"] == 0.002
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="checks the Windows process tree kill")
@@ -837,3 +879,513 @@ def test_cancelling_kills_the_cli_started_by_the_child(qapp, tmp_path, monkeypat
         ["tasklist", "/FI", f"PID eq {cli_pid}", "/NH"], capture_output=True, text=True
     ).stdout
     assert str(cli_pid) not in listing, "the CLI outlived the cancelled request"
+
+
+# --- the model list -------------------------------------------------------------------------------------
+
+
+def test_the_model_list_shows_names_returns_ids_and_keeps_a_typed_id(qapp):
+    combo = ModelCombo()
+    assert combo.count() == 1 and combo.text() == ""  # only "the provider's default" until a list arrives
+
+    combo.set_models(
+        [ModelOption(id="gpt-6-astra", name="GPT-6-Astra", description="Frontier"), ModelOption(id="gpt-6-sol")],
+        allow_default=True,
+    )
+    assert [combo.itemText(i) for i in range(combo.count())] == [
+        DEFAULT_LABEL, "GPT-6-Astra (gpt-6-astra)", "gpt-6-sol"
+    ]
+    combo.setCurrentIndex(1)
+    assert combo.text() == "gpt-6-astra"  # the id, not the label
+    assert combo.option().description == "Frontier"
+
+    combo.setText("my-private-model")  # a provider's list is a convenience, not a gate
+    assert combo.text() == "my-private-model" and combo.option() is None
+    combo.set_models([ModelOption(id="gpt-7")], allow_default=True)
+    assert combo.text() == "my-private-model"  # a new list does not eat what the user typed
+
+    combo.setText("")
+    assert combo.text() == "" and combo.currentText() == DEFAULT_LABEL
+
+
+def test_api_providers_have_no_default_entry_and_a_provider_default_keeps_its_own_name(qapp):
+    combo = ModelCombo()
+    combo.set_models([ModelOption(id="gpt-4o-mini"), ModelOption(id="", name="ignored")], allow_default=False)
+    assert combo.count() == 1 and combo.text() == "" and combo.currentText() == ""  # a model must be chosen
+
+    combo.set_models(
+        [ModelOption(id="", name="Default (recommended)", default=True), ModelOption(id="sonnet", name="Sonnet")],
+        allow_default=True,
+    )
+    assert combo.itemText(0) == f"{DEFAULT_LABEL} — Default (recommended)" and combo.count() == 2  # none added twice
+
+
+def test_the_default_entry_says_which_model_the_provider_currently_defaults_to(qapp):
+    combo = ModelCombo()
+    combo.set_models(
+        [ModelOption(id="gpt-6-astra", name="GPT-6-Astra", default=True), ModelOption(id="gpt-6-sol", name="GPT-6-Sol")],
+        allow_default=True,
+    )
+
+    assert combo.itemText(1) == "GPT-6-Astra (gpt-6-astra) — по умолчанию"
+    assert combo.option().description == "Сейчас по умолчанию: GPT-6-Astra"  # the "(по умолчанию)" entry is selected
+    combo.setText("gpt-6-astra")
+    assert combo.text() == "gpt-6-astra"  # the marker is in the label only; the value is the plain id
+
+    combo.set_models([ModelOption(id="gpt-6-sol")], allow_default=True)  # a list that names no default
+    assert combo.itemData(0, Qt.ItemDataRole.ToolTipRole) == ""
+
+
+# --- the account panel -------------------------------------------------------------------------------------
+
+SIGNED_IN = {"signed_in": True, "email": "me@example.com", "plan": "plus", "method": "ChatGPT", "organization": ""}
+SIGNED_OUT = {"signed_in": False, "email": "", "plan": "", "method": "", "organization": ""}
+LIMITS = {
+    "windows": [
+        {"label": "", "used_percent": 18.0, "window_minutes": 10080, "resets_at": 1793293782.0, "status": ""},
+        {"label": "", "used_percent": 95.0, "window_minutes": 300, "resets_at": 1793200000.0, "status": ""},
+    ],
+    "credits": "none", "allowed": False, "note": "",
+}
+
+
+def _panel(kind=KIND_CODEX_CLI):
+    # The provider the panel acts on follows its kind, as the tab's form does.
+    panel = account_panel.AccountPanel(lambda: Provider(name="P", kind=panel._kind))
+    panel.set_kind(kind)
+    return panel
+
+
+def _last() -> PanelWorker:
+    return PanelWorker.instances[-1]
+
+
+def _signed_out_panel(kind=KIND_CODEX_CLI):
+    panel = _panel(kind)
+    _last().finished.emit({"account": SIGNED_OUT})
+    return panel
+
+
+def test_the_panel_checks_the_sign_in_as_soon_as_a_provider_is_shown(qapp):
+    panel = _panel()
+
+    (worker,) = PanelWorker.instances
+    action, provider, env = worker.args
+    assert action == "status" and provider["kind"] == "codex-cli" and env == {}
+    assert worker.target is child_tasks.run_account_task and worker.started
+    assert "Проверка входа" in panel._status.text() and not panel._button.isEnabled()
+
+    worker.finished.emit({"account": SIGNED_OUT})
+    assert panel._status.text() == "Вход не выполнен"
+    assert panel._button.text() == "Войти через ChatGPT" and panel._button.isEnabled()
+    assert not panel._limits_button.isEnabled()  # nothing to ask about the plan of nobody
+
+
+def test_limits_are_only_offered_to_somebody_who_is_signed_in(qapp):
+    panel = _signed_out_panel()
+    panel.show()
+    assert panel._limits_title.isHidden() and panel._limits_button.isHidden() and panel._limits_note.isHidden()
+
+    panel._button.click()
+    _last().finished.emit({"account": SIGNED_IN})
+    _last().finished.emit({"limits": LIMITS})
+    assert not panel._limits_title.isHidden() and not panel._limits_button.isHidden()
+    assert not panel._limits_note.isHidden()
+
+
+def test_one_button_signs_in_hands_the_address_to_the_browser_and_shows_the_account(qapp, isolated_accounts):
+    panel = _signed_out_panel()
+    changes = []
+    panel.signed_in_changed.connect(changes.append)
+
+    panel._button.click()
+    login = _last()
+    assert login.args[0] == "login" and login.started
+    assert panel._button.text() == "Отменить вход" and panel._button.isEnabled()  # the same button, now cancel
+
+    login.event.emit("url", "https://auth.example/authorize?state=1&x=2")
+    assert isolated_accounts == ["https://auth.example/authorize?state=1&x=2"]
+    assert "открыта в браузере" in panel._hint.text() and "OpenAI" in panel._hint.text()
+    assert "&amp;x=2" in panel._hint.text()  # the fallback link is escaped for the label's rich text
+
+    login.finished.emit({"account": SIGNED_IN})
+    assert changes == [True] and panel.signed_in()
+    assert panel._button.text() == "Выйти"
+    assert "me@example.com" in panel._status.text() and "тариф Plus" in panel._status.text()
+    assert panel._hint.text() == ""
+    assert _last().args[0] == "limits"  # Codex answers a limits query locally, so it is asked at once
+
+
+def test_claude_sign_in_only_waits_for_the_browser_the_tool_opened(qapp, isolated_accounts):
+    panel = _signed_out_panel(KIND_CLAUDE_CLI)
+    assert panel._button.text() == "Войти через Claude"
+
+    panel._button.click()
+    _last().event.emit("waiting", "")
+
+    assert isolated_accounts == []  # Claude Code opens its own page; the app does not second-guess it
+    assert "Anthropic" in panel._hint.text() and "Завершите вход" in panel._hint.text()
+
+
+def test_a_sign_in_in_progress_can_be_cancelled(qapp):
+    panel = _signed_out_panel()
+    panel._button.click()
+    login = _last()
+
+    panel._button.click()  # "Отменить вход"
+
+    assert login.cancel_called
+    assert panel._status.text() == "Вход отменён."
+    assert panel._button.text() == "Войти через ChatGPT" and panel._button.isEnabled() and not panel.signed_in()
+
+
+def test_a_failed_sign_in_says_why(qapp):
+    panel = _signed_out_panel()
+    panel._button.click()
+    _last().failed.emit("LLMError", "Provider 'P': sign-in failed: access denied")
+    assert panel._status.text().startswith("Вход не выполнен: ") and "access denied" in panel._status.text()
+    assert not panel.signed_in() and panel._button.text() == "Войти через ChatGPT"
+
+
+def test_signing_out_asks_first(qapp, monkeypatch):
+    panel = _signed_out_panel()
+    panel._button.click()
+    _last().finished.emit({"account": SIGNED_IN})
+    assert not panel._button.isEnabled()  # busy with the automatic limits query: nothing to click yet
+    _last().finished.emit({"limits": LIMITS})
+    PanelWorker.instances.clear()
+    changes = []
+    panel.signed_in_changed.connect(changes.append)
+
+    _yes(monkeypatch, QMessageBox.StandardButton.No)
+    panel._button.click()
+    assert PanelWorker.instances == [] and panel.signed_in()
+
+    _yes(monkeypatch)
+    panel._button.click()
+    assert _last().args[0] == "logout"
+    _last().finished.emit({"account": SIGNED_OUT})
+    assert changes == [False] and not panel.signed_in() and panel._status.text() == "Вход не выполнен"
+    assert panel._limits_grid.count() == 0  # the plan of nobody has no limits
+
+
+def test_limits_are_shown_as_bars_with_reset_times_credits_and_a_warning(qapp):
+    panel = _signed_out_panel()
+    panel._button.click()
+    _last().finished.emit({"account": SIGNED_IN})
+    limits = _last()
+    assert limits.args[0] == "limits"
+
+    limits.finished.emit({"limits": LIMITS})
+
+    assert panel._limits_grid.count() == 6  # a name, a bar and a reset time for each of the two windows
+    assert panel._limits_grid.itemAtPosition(0, 0).widget().text() == "7 дн."
+    bar = panel._limits_grid.itemAtPosition(0, 1).widget()
+    assert bar.value() == 18 and bar.format() == "%p%"
+    assert "сброс" in panel._limits_grid.itemAtPosition(0, 2).widget().text()
+    assert panel._limits_grid.itemAtPosition(1, 0).widget().text() == "5 ч"
+    assert panel._limits_grid.itemAtPosition(1, 1).widget().value() == 95
+    assert "Кредитов нет" in panel._limits_note.text() and "Лимит тарифа исчерпан" in panel._limits_note.text()
+
+
+def test_claude_limits_need_a_request_and_the_panel_says_so(qapp):
+    panel = _signed_out_panel(KIND_CLAUDE_CLI)
+    panel._button.click()
+    _last().finished.emit({"account": {**SIGNED_IN, "method": "claude.ai", "plan": "max"}})
+
+    assert len(PanelWorker.instances) == 2  # status, login - and no automatic limits query: it would be a request
+    assert "короткий запрос" in panel._limits_note.text()
+    assert panel._limits_button.isEnabled()
+
+    panel._limits_button.click()
+    asked = _last()
+    assert asked.args[0] == "limits" and asked.args[1]["kind"] == "claude-cli"
+    asked.finished.emit({"limits": {"windows": [{"label": "five_hour", "used_percent": 82.0, "window_minutes": 300,
+                                                 "resets_at": None, "status": "allowed_warning"}],
+                                    "credits": "", "allowed": True, "note": ""}})
+    assert panel._limits_grid.itemAtPosition(0, 0).widget().text() == "5 ч"  # not the raw "five_hour"
+    assert panel._limits_grid.itemAtPosition(0, 1).widget().value() == 82
+
+
+def test_a_sign_in_by_api_key_is_flagged_because_it_is_not_the_subscription(qapp):
+    panel = _signed_out_panel()
+    panel._button.click()
+    _last().finished.emit({"account": {**SIGNED_IN, "method": "API key", "email": ""}})
+    assert "по API-ключу" in panel._status.text() and "по токенам" in panel._status.text()
+
+
+def test_switching_the_provider_abandons_a_running_action_and_its_late_answer(qapp):
+    panel = _signed_out_panel()
+    panel._button.click()
+    login = _last()
+
+    panel.set_kind(KIND_CLAUDE_CLI)
+
+    assert login.cancel_called  # the tool of the provider no longer shown is killed
+    new_check = _last()
+    assert new_check is not login and new_check.args[1]["kind"] == "claude-cli"
+    login.finished.emit({"account": SIGNED_IN})  # too late: it must not become the new provider's account
+    assert not panel.signed_in() and panel._status.text() == "Проверка входа…"
+
+
+def test_only_https_addresses_are_ever_opened(qapp):
+    assert REAL_OPEN_URL("http://insecure.example/login") is False
+    assert REAL_OPEN_URL("file:///C:/Windows/notepad.exe") is False
+    assert REAL_OPEN_URL("javascript:alert(1)") is False
+
+
+# --- the providers tab with accounts, models and prices ------------------------------------------------------------
+
+
+def test_choosing_a_subscription_provider_checks_its_sign_in_once(qapp, summary_stores):
+    _store_providers(Provider(name="ChatGPT", kind=KIND_CODEX_CLI), Provider(name="Claude", kind=KIND_CLAUDE_CLI))
+    tab = summary_settings_screen.ProvidersTab()
+
+    (first,) = PanelWorker.instances
+    assert first.args[0] == "status" and first.args[1]["kind"] == "codex-cli"
+    assert tab._form.isRowVisible(tab._account_panel)
+
+    tab.reload(select="ChatGPT")  # the same provider again: nothing to re-check
+    assert len(PanelWorker.instances) == 1
+
+    tab._list.setCurrentRow(1)
+    assert len(PanelWorker.instances) == 2 and PanelWorker.instances[1].args[1]["kind"] == "claude-cli"
+    assert first.cancel_called  # what was asked about ChatGPT is dropped
+
+    tab._new(KIND_OPENAI_API)  # an API provider has a key, not an account
+    assert len(PanelWorker.instances) == 2 and not tab._form.isRowVisible(tab._account_panel)
+
+
+def test_models_are_fetched_from_the_provider_once_signed_in_and_remembered(qapp, summary_stores, fake_worker):
+    _store_providers(Provider(name="ChatGPT", kind=KIND_CODEX_CLI))
+    tab = summary_settings_screen.ProvidersTab()
+
+    tab._account_panel.signed_in_changed.emit(True)
+
+    (worker,) = fake_worker.instances
+    assert worker.args[0] == "models" and worker.args[1]["kind"] == "codex-cli"
+    assert tab._models_button.text() == "Отмена"
+    worker.finished.emit({"models": [
+        ModelOption(id="gpt-6-astra", name="GPT-6-Astra", description="Frontier", default=True).to_dict(),
+        ModelOption(id="gpt-6-sol", name="GPT-6-Sol").to_dict(),
+    ]})
+    assert "Моделей у провайдера: 2" in tab._status.text() and tab._models_button.text() == "Список моделей"
+    assert tab._model_field.count() == 3  # the provider's default and its two models
+
+    tab._model_field.setCurrentIndex(1)
+    assert tab._model_info.text() == "Frontier"
+    tab._save_button.click()
+    assert ProviderStore.load().get("ChatGPT").model == "gpt-6-astra"  # the id is stored, not the label
+    assert tab._model_field.text() == "gpt-6-astra"
+
+    tab._account_panel.signed_in_changed.emit(True)  # known now: no second fetch
+    assert len(fake_worker.instances) == 1
+
+
+def test_a_failed_model_fetch_is_reported_and_can_be_cancelled(qapp, summary_stores, fake_worker):
+    _store_providers(Provider(name="ChatGPT", kind=KIND_CODEX_CLI))
+    tab = summary_settings_screen.ProvidersTab()
+
+    tab._models_button.click()
+    fake_worker.instances[0].failed.emit("LLMError", "Provider 'ChatGPT': codex did not answer model/list")
+    assert "model/list" in tab._status.text() and tab._model_field.count() == 1
+
+    tab._models_button.click()
+    tab._models_button.click()  # "Отмена"
+    assert fake_worker.instances[1].cancel_called and "отменена" in tab._status.text()
+
+
+def test_api_models_are_listed_with_the_endpoint_and_the_typed_key_without_saving_anything(
+    qapp, summary_stores, fake_worker
+):
+    tab = summary_settings_screen.ProvidersTab()
+    tab._new(KIND_OPENAI_API)
+    tab._key_field.setText("sk-typed")
+
+    tab._models_button.click()
+
+    (worker,) = fake_worker.instances
+    action, provider, env = worker.args
+    assert action == "models" and provider["endpoint"] == "https://api.openai.com/v1"
+    assert provider["model"] == "-"  # a placeholder: listing needs no model, validation does
+    assert provider["api_key_env"] == "DIARRHIZER_LLM_KEY_OPENAI_API"
+    assert env == {"DIARRHIZER_LLM_KEY_OPENAI_API": "sk-typed"} and "sk-typed" not in json.dumps(provider)
+    assert not summary_stores[1].exists()
+
+    worker.finished.emit({"models": [ModelOption(id="gpt-4o-mini").to_dict()]})
+    assert tab._model_field.count() == 1 and tab._model_field.itemText(0) == "gpt-4o-mini"  # no "default" for an API
+
+    tab._endpoint_field.setText("")
+    tab._models_button.click()
+    assert "endpoint" in tab._status.text() and len(fake_worker.instances) == 1  # nothing to ask without one
+
+
+def test_prices_are_saved_with_an_api_provider_and_come_back(qapp, summary_stores):
+    tab = summary_settings_screen.ProvidersTab()
+    _preset(tab, KIND_OPENAI_API)
+    tab._name_field.setText("gw")
+    tab._model_field.setText("gpt-4o-mini")
+    tab._price_in_field.setText("0,15")
+    tab._price_out_field.setText("0.60")
+    tab._save_button.click()
+
+    provider = ProviderStore.load().get("gw")
+    assert (provider.price_input, provider.price_output) == (0.15, 0.6)
+    tab.reload(select="gw")
+    assert tab._price_in_field.text() == "0.15" and tab._price_out_field.text() == "0.6"
+    assert tab._form.isRowVisible(tab._prices_row)
+
+    tab._price_in_field.setText("cheap")
+    tab._save_button.click()
+    assert "Цена за вход" in tab._status.text()
+
+
+def test_the_check_reports_the_model_tokens_cost_and_limits(qapp, summary_stores, fake_worker):
+    tab = summary_settings_screen.ProvidersTab()
+    _preset(tab, KIND_CODEX_CLI)
+    tab._test_button.click()
+
+    fake_worker.instances[0].finished.emit({
+        "reply": "ok", "model": "gpt-6-astra",
+        "usage": {"input_tokens": 13712, "output_tokens": 5, "cached_tokens": 1000, "reasoning_tokens": 0},
+        "cost_usd": 0.0123, "cost_note": llm.CLAUDE_COST_NOTE, "limits": LIMITS,
+    })
+
+    text = tab._status.text()
+    assert "Провайдер отвечает. Ответ: ok" in text
+    assert "модель gpt-6-astra" in text
+    assert "токены: вход 13 712 (из кэша 1 000), выход 5" in text
+    assert "стоимость ≈ $0.0123 (оценка Claude Code по тарифам API; подписка по токенам не списывается)" in text
+    assert "Лимит 7 дн.: использовано 18%" in text and "Лимит тарифа исчерпан" in text
+
+
+# --- the summary dialog shows what the request used --------------------------------------------------------------------
+
+
+def test_the_dialog_shows_the_model_tokens_and_limits_of_a_finished_request(
+    qapp, tmp_path, configured, fake_worker, model
+):
+    dialog = summary_dialog.SummaryDialog(None, _job_with_protocol(tmp_path), "meeting.mp4")
+    model.reply = LLMReply(
+        "Итоги", model="gpt-6-astra", usage=Usage(13712, 400, 1000, 0),
+        limits=Limits(windows=(LimitWindow(used_percent=18.0, window_minutes=10080),)),
+    )
+
+    dialog._create_button.click()
+    fake_worker.instances[0].run_like_the_child()
+
+    status = dialog._status.text()
+    assert "модель gpt-6-astra" in status
+    assert "токены: вход 13 712 (из кэша 1 000), выход 400" in status
+    assert "Лимит 7 дн.: использовано 18%" in status
+    assert "стоимость" not in status  # Codex reports none, and none is invented
+    meta = dialog._meta_label.text()  # ... and the stored summary keeps saying so
+    assert "токены: вход 13 712" in meta and "Лимит 7 дн." in meta
+
+
+def test_the_dialog_shows_an_estimated_cost_with_where_it_comes_from(qapp, tmp_path, configured, fake_worker, model):
+    dialog = summary_dialog.SummaryDialog(None, _job_with_protocol(tmp_path), "meeting.mp4")
+    model.reply = LLMReply("Итоги", usage=Usage(240, 7), cost_usd=0.0123, cost_note=llm.CLAUDE_COST_NOTE)
+
+    dialog._create_button.click()
+    fake_worker.instances[0].run_like_the_child()
+
+    assert "стоимость ≈ $0.0123 (оценка Claude Code по тарифам API" in dialog._status.text()
+
+
+# --- the account task ----------------------------------------------------------------------------------------------------
+
+
+def test_the_account_task_reports_every_action_as_plain_dicts(monkeypatch):
+    from diarrhizer.adapters import llm_accounts
+
+    account = Account(signed_in=True, email="me@example.com", plan="plus", method="ChatGPT")
+    monkeypatch.setattr(llm_accounts, "account_status", lambda p: account)
+    monkeypatch.setattr(llm_accounts, "logout", lambda p: Account(signed_in=False))
+    monkeypatch.setattr(llm_accounts, "list_models", lambda p: [ModelOption(id="m", name="M")])
+    monkeypatch.setattr(llm_accounts, "read_limits", lambda p: Limits(windows=(LimitWindow(used_percent=5.0),)))
+    provider = Provider(name="ChatGPT", kind=KIND_CODEX_CLI).to_dict()
+
+    results = {}
+    for action in ("status", "logout", "models", "limits"):
+        queue = _Queue()
+        child_tasks.run_account_task(queue, action, provider, {})
+        ((kind, result),) = queue.items
+        assert kind == "finished"
+        results[action] = result
+
+    assert results["status"] == {"account": account.to_dict()}
+    assert results["logout"]["account"]["signed_in"] is False
+    assert results["models"] == {"models": [{"id": "m", "name": "M", "description": "", "default": False, "resolved": ""}]}
+    assert results["limits"]["limits"]["windows"][0]["used_percent"] == 5.0
+
+
+def test_the_account_task_passes_the_sign_in_events_to_the_parent(monkeypatch):
+    from diarrhizer.adapters import llm_accounts
+
+    def login(provider, on_event=None, should_cancel=None):
+        on_event("url", "https://auth.example/authorize")
+        return Account(signed_in=True)
+
+    monkeypatch.setattr(llm_accounts, "login", login)
+    queue = _Queue()
+
+    child_tasks.run_account_task(queue, "login", Provider(name="c", kind=KIND_CODEX_CLI).to_dict(), {})
+
+    assert queue.items == [
+        ("event", "url", "https://auth.example/authorize"),
+        ("finished", {"account": Account(signed_in=True).to_dict()}),
+    ]
+
+
+def test_the_account_task_reports_failures_and_unknown_actions_instead_of_raising(monkeypatch):
+    from diarrhizer.adapters import llm_accounts
+
+    def broken(provider):
+        raise LLMError("Provider 'c': codex not found")
+
+    monkeypatch.setattr(llm_accounts, "account_status", broken)
+    provider = Provider(name="c", kind=KIND_CODEX_CLI).to_dict()
+
+    queue = _Queue()
+    child_tasks.run_account_task(queue, "status", provider, {})
+    assert queue.items == [("failed", "LLMError", "Provider 'c': codex not found")]
+
+    queue = _Queue()
+    child_tasks.run_account_task(queue, "teleport", provider, {})
+    assert queue.items[0][:2] == ("failed", "ValueError")
+
+
+def test_the_account_task_adds_the_typed_key_to_the_environment_of_the_call(monkeypatch):
+    from diarrhizer.adapters import llm_accounts
+
+    monkeypatch.delenv("TYPED_KEY", raising=False)
+    seen = {}
+    monkeypatch.setattr(llm_accounts, "list_models", lambda p: seen.update(key=p.api_key()) or [])
+    provider = Provider(name="gw", kind=KIND_OPENAI_API, endpoint="http://x/v1", model="-", api_key_env="TYPED_KEY")
+
+    child_tasks.run_account_task(_Queue(), "models", provider.to_dict(), {"TYPED_KEY": "sk-typed"})
+
+    assert seen["key"] == "sk-typed"
+
+
+def test_account_actions_run_in_a_real_child_process_and_report_events_and_results(qapp, tmp_path, monkeypatch):
+    vendor = make_vendor(tmp_path, monkeypatch)
+    claude = Provider(name="Claude", kind=KIND_CLAUDE_CLI, command=vendor.make("claude"), timeout_seconds=30)
+    worker = LlmWorker(child_tasks.run_account_task, ("login", claude.to_dict(), {}))
+    events = []
+    worker.event.connect(lambda name, payload: events.append((name, payload)))
+    worker.start()
+
+    name, (result,) = _wait_for_any(("finished", worker.finished), ("failed", worker.failed))
+
+    assert name == "finished", result
+    assert events == [("waiting", "")]  # an event crossed the process boundary before the result
+    assert result["account"]["signed_in"] and result["account"]["plan"] == "max"
+
+    codex = Provider(name="ChatGPT", kind=KIND_CODEX_CLI, command=vendor.make("codex"), timeout_seconds=30)
+    worker = LlmWorker(child_tasks.run_account_task, ("models", codex.to_dict(), {}))
+    worker.start()
+    name, (result,) = _wait_for_any(("finished", worker.finished), ("failed", worker.failed))
+    assert name == "finished", result
+    assert [model["id"] for model in result["models"]] == ["gpt-6-astra", "gpt-6-sol"]

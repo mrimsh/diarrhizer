@@ -466,23 +466,48 @@ export/result.md ──► SUMMARY:JOB ──► ADAPTER:LLM ──► provider 
   CLIs, i.e. the user's ChatGPT / Claude subscription), `openai-api` (any OpenAI-compatible
   chat/completions endpoint) and `anthropic-api`. Stored in `summary_providers.json`, which never contains a
   secret: an API provider names an environment variable (`api_key_env`); the GUI keeps the key in the
-  repo-root `.env`, like the HF token.
-- **Adapter** (`adapters/llm.py`, `ADAPTER:LLM`): the only place that talks to a model. CLIs get the prompt on
-  stdin (no argv length or quoting limits) and run in an empty temporary folder, with the API-key variables
-  that would switch the billing removed and with flags that skip the user's own tool setup (retried without
-  them if the installed version rejects a flag); a timeout kills the whole process tree. APIs are one
-  non-streaming `urllib` POST; the key is read at call time and never put into an error message. No SDK
-  dependency.
+  repo-root `.env`, like the HF token. An API provider may carry prices per million tokens (cost estimate).
+- **What a provider reports** (`summary/provider_info.py`, `CONFIG:PROVIDER_INFO`): `Account`, `ModelOption`,
+  `Usage`, `Limits`/`LimitWindow` - plain dataclasses with `to_dict()`/`from_dict()` (they cross the GUI's
+  process queue and are stored in a summary's `.json`). A field the provider did not report stays empty; nothing
+  is defaulted on its behalf.
+- **Request adapter** (`adapters/llm.py`, `ADAPTER:LLM`): sends one prompt and returns an `LLMReply` with the
+  text and what the request used. CLIs get the prompt on stdin (no argv length or quoting limits) and run in an
+  empty temporary folder, with the API-key variables that would switch the billing removed and with flags that
+  skip the user's own tool setup (retried without them if the installed version rejects a flag); a timeout kills
+  the whole process tree. Codex runs with `--json` (tokens from `turn.completed`), Claude with
+  `--output-format stream-json` (the result event: reply, tokens, an estimated `total_cost_usd`; the last
+  `rate_limit_event`: status, utilization, reset). APIs are one non-streaming `urllib` POST; usage comes from the
+  reply, the cost from the provider (OpenRouter) or the provider's prices. The key is read at call time and
+  never put into an error message. No SDK dependency.
+- **Account adapter** (`adapters/llm_accounts.py`, `ADAPTER:LLM_ACCOUNTS`): signing in and out, the model list
+  and the plan's limits of a subscription provider - through the vendors' own interfaces, never through tokens
+  of ours. OpenAI documents `codex app-server` (JSON-RPC lines on stdio) as the way to embed Codex with ChatGPT
+  sign-in: `account/read`, `account/login/start` (returns OpenAI's sign-in address; completion arrives as a
+  notification), `account/login/cancel`, `account/logout`, `model/list`, `account/rateLimits/read`. Anthropic
+  does not allow other applications to offer a Claude.ai sign-in or to collect, store or relay its credentials
+  (*"sign-in to a Claude account must complete through Anthropic's own flow"*), so for Claude the adapter only
+  starts the unmodified `claude auth login --claudeai` (it opens the browser itself), reads `claude auth status
+  --json`, and gets the model list from the stream-json control protocol's `initialize` request (answered
+  without a model request). Claude has no limits query: `read_limits` sends a one-word request and returns the
+  status that came with the reply. API providers: `GET <endpoint>/models`.
 - **Service** (`summary/service.py`, `SUMMARY:JOB`): reads `export/result.md`, builds the prompt, asks the
   provider, and stores the reply atomically only after it arrived (a failed or cancelled request leaves
-  nothing behind). Earlier summaries are never overwritten.
+  nothing behind). Earlier summaries are never overwritten. The summary's `.json` also records the model that
+  answered, the usage, the cost (with a note on where the figure comes from - an estimate is not a bill) and the
+  limits; for Codex the limits are read right after the request (best effort, a failure is only logged).
 - **Not done on purpose:** splitting a transcript that exceeds a model's context window (the provider's
   error is passed on as is), streaming, and chat-style follow-ups.
 
 GUI: the **Саммаризация** screen (`screens/summary_settings_screen.py`, `GUI:SUMMARY_SETTINGS`) edits both
-stores; the Result screen's **Саммаризация…** opens `screens/summary_dialog.py` (`GUI:SUMMARY_DIALOG`). The
-model call runs in a child process (`llm_worker.py` + `child_tasks.run_summary_task`), so it can be
-cancelled together with whatever the CLI started.
+stores. A subscription provider there has an account box (`screens/account_panel.py`, `GUI:ACCOUNT_PANEL`):
+the signed-in account and one button that signs in, cancels a sign-in or signs out, plus the plan's limits;
+the model field is a list the provider fills (`screens/model_combo.py`) that still accepts a typed id. The
+Result screen's **Саммаризация…** opens `screens/summary_dialog.py` (`GUI:SUMMARY_DIALOG`), which shows what
+each request used. Everything that talks to a provider - a summary, a check, a sign-in, a model query - runs in
+a child process (`llm_worker.py` + `child_tasks.run_summary_task` / `run_provider_check_task` /
+`run_account_task`; a sign-in reports the address to open as an event), so it can be cancelled together with
+whatever the CLI started. The Russian wording of usage, cost and limits is `provider_text.py`.
 
 ---
 
@@ -523,8 +548,9 @@ How the GUI runs things (`src/diarrhizer_gui/`):
   (`job_queue.py`); the Monitor screen ("Выполнение") is a sidebar item showing the batch.
 - **In-process work** is limited to cheap, pure steps: scanning job folders and re-exporting with
   new speaker names (`ExportStage` only, milliseconds).
-- **Model calls** (a summary, a provider check) also run in a child process (`llm_worker.py`): a request
-  takes seconds to minutes, and cancelling it must kill the subscription CLI's own processes too.
+- **Model calls** (a summary, a provider check) and provider **account actions** (sign-in, models, limits) also
+  run in a child process (`llm_worker.py`): a request takes seconds to minutes, a sign-in waits for the user,
+  and cancelling must kill the subscription CLI's own processes too (which frees its local sign-in port).
 
 ---
 
@@ -552,6 +578,7 @@ src/diarrhizer/
 ├── summary/                # Summaries of a finished job (stdlib only)
 │   ├── templates.py        # Prompt templates + their JSON store
 │   ├── providers.py        # Model providers + their JSON store
+│   ├── provider_info.py    # What a provider reports: account, models, usage, limits
 │   ├── store_file.py       # Reading the two JSON stores
 │   └── service.py          # result.md + template + provider -> summary/ files
 ├── pipeline/
@@ -564,7 +591,8 @@ src/diarrhizer/
 │       └── export.py       # Export to MD/TXT/SRT/JSON
 ├── adapters/               # External library wrappers
 │   ├── ffmpeg.py
-│   ├── llm.py              # Summary providers: codex/claude CLIs, OpenAI/Anthropic HTTP APIs
+│   ├── llm.py              # One request to a summary provider: codex/claude CLIs, OpenAI/Anthropic HTTP APIs
+│   ├── llm_accounts.py     # Sign-in, account, model list and limits of a provider (vendors' own interfaces)
 │   └── whisperx.py
 ├── media.py                # Media extensions, folder expansion for batch input
 └── export/                 # Export formatters
@@ -580,9 +608,11 @@ src/diarrhizer_gui/
 ├── job_queue.py            # Queue bookkeeping (pure Python)
 ├── pipeline_worker.py      # One job in a child process -> Qt signals
 ├── child_process.py        # Spawned process watched by a QTimer
-├── llm_worker.py           # One model call (summary / provider check) in a child process -> Qt signals
-├── child_tasks.py          # Child entry points (pipeline, doctor, summary, provider check) - Qt-free
+├── llm_worker.py           # One model call / account action in a child process -> Qt signals
+├── child_tasks.py          # Child entry points (pipeline, doctor, summary, provider check, account) - Qt-free
+├── provider_text.py        # Russian wording of accounts, usage, cost and limits
 ├── environment.py          # Background doctor checks shared by the screens
 ├── job_scan.py             # History scan, resume / restart-stage / re-diarize plans
-└── screens/                # New Job, Monitor, History (+ restart_dialog), Result, Models, Doctor, Settings
+└── screens/                # New Job, Monitor, History (+ restart_dialog), Result, Models, Doctor, Settings,
+                            # Summarization (+ account_panel, model_combo, summary_dialog)
 ```

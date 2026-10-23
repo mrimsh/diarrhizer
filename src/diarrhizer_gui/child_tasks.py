@@ -11,6 +11,7 @@ through it with small picklable tuples:
     ("finished", result_dict)          - run_pipeline() / a summary / a provider check returned
     ("failed", error_type, message)    - run_pipeline() / a summary / a provider check raised
     ("checks", [(name, passed, msg)])  - doctor results
+    ("event", name, payload)           - something to show while a task runs (a sign-in address)
 """
 
 import logging
@@ -70,12 +71,14 @@ class _QueueLogHandler(logging.Handler):
 #   imports torch/whisperx itself and a re-check sees packages installed since the GUI started.
 #   run_summary_task() / run_provider_check_task() run summary.service.summarize_job() / check_provider()
 #   with a template and provider passed as dicts; being a process, the model call can be cancelled.
+#   run_account_task() runs one account action of a subscription provider (status, sign in, sign out, model
+#   list, limits - ADAPTER:LLM_ACCOUNTS); a sign-in reports the address to open as an ("event", ...) message.
 # @inputs: queue, mode + run_pipeline() kwargs (picklable) | queue | job_dir + template/provider dicts | provider dict + env
 # @outputs: tuples on the queue (see module docstring)
 # @sideEffects: Everything run_pipeline does (files, GPU, model downloads); doctor's imports and probes;
 #   a summary sends the transcript to the provider and writes the job's summary/ folder
 # @errors: None raised - reported over the queue
-# @see: GUI:CHILD_PROCESS, GUI:PIPELINE_WORKER, GUI:LLM_WORKER, PIPELINE:RUNNER, DIAGNOSTICS:DOCTOR, SUMMARY:JOB
+# @see: GUI:CHILD_PROCESS, GUI:PIPELINE_WORKER, GUI:LLM_WORKER, PIPELINE:RUNNER, DIAGNOSTICS:DOCTOR, SUMMARY:JOB, ADAPTER:LLM_ACCOUNTS
 def run_pipeline_task(queue, mode: str, kwargs: dict) -> None:
     _ensure_std_streams()
     from diarrhizer.pipeline.runner import run_pipeline
@@ -132,12 +135,51 @@ def run_provider_check_task(queue, provider: dict, env: dict) -> None:
     from diarrhizer.summary.providers import Provider
 
     try:
-        reply = service.check_provider(Provider.from_dict(provider))
+        result = service.check_provider(Provider.from_dict(provider))
     except (RuntimeError, ValueError) as exc:
         queue.put(("failed", type(exc).__name__, str(exc)))
         return
     except Exception as exc:
         queue.put(("failed", type(exc).__name__, f"{type(exc).__name__}: {exc}"))
         return
-    queue.put(("finished", {"reply": reply}))
+    queue.put(("finished", result))
+
+
+# The account actions a provider's panel offers. All of them talk to the vendor's tool (or its API) and a
+# sign-in waits for the user, so they run in a child process too: cancelling kills the tool, which also frees
+# the local port its sign-in listens on. Results are plain dicts (to_dict() shapes) for the queue.
+ACCOUNT_ACTIONS = ("status", "login", "logout", "models", "limits")
+
+
+def run_account_task(queue, action: str, provider: dict, env: dict) -> None:
+    """One of ACCOUNT_ACTIONS for a provider (a to_dict() of it); `env` is added to the environment first
+    (an API key typed on screen but not saved yet). A sign-in also reports ("event", "url" | "waiting", text)."""
+    _ensure_std_streams()
+    os.environ.update(env)
+    from diarrhizer.adapters import llm_accounts
+    from diarrhizer.summary.providers import Provider
+
+    try:
+        target = Provider.from_dict(provider)
+        if action == "status":
+            result = {"account": llm_accounts.account_status(target).to_dict()}
+        elif action == "login":
+            result = {"account": llm_accounts.login(
+                target, on_event=lambda name, payload: queue.put(("event", name, payload))
+            ).to_dict()}
+        elif action == "logout":
+            result = {"account": llm_accounts.logout(target).to_dict()}
+        elif action == "models":
+            result = {"models": [model.to_dict() for model in llm_accounts.list_models(target)]}
+        elif action == "limits":
+            result = {"limits": llm_accounts.read_limits(target).to_dict()}
+        else:
+            raise ValueError(f"Unknown account action: {action!r}")
+    except (RuntimeError, ValueError) as exc:  # RuntimeError covers adapters.llm.LLMError
+        queue.put(("failed", type(exc).__name__, str(exc)))
+        return
+    except Exception as exc:
+        queue.put(("failed", type(exc).__name__, f"{type(exc).__name__}: {exc}"))
+        return
+    queue.put(("finished", result))
 # [SEMANTIC-END] GUI:CHILD_TASKS

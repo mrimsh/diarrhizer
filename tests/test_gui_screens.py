@@ -4,6 +4,7 @@ Every screen's QSettings is redirected to a temp INI file (ini_settings),
 so nothing here touches the real settings store.
 """
 
+import gc
 import json
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 
 pytest.importorskip("PySide6", reason="GUI extra not installed")
 
+from PySide6.QtCore import QCoreApplication, QEvent  # noqa: E402
 from PySide6.QtWidgets import QDialog, QMessageBox, QPushButton  # noqa: E402
 
 from diarrhizer.audio_formats import ENV_AUDIO_FORMATS_FILE  # noqa: E402
@@ -555,6 +557,15 @@ def test_leaving_the_result_screen_releases_the_audio_file(qapp, tmp_path):
     _pump(300)
     wav_path.unlink()  # would raise PermissionError while the player held it
     assert not wav_path.exists()
+
+    # Take the player down here, on this thread, now. Left to the garbage collector it was destroyed at
+    # some arbitrary later moment - possibly inside another thread of another test - and QtMultimedia's
+    # FFmpeg threads then aborted the whole test run ("Fatal Python error: Aborted", exit code 3).
+    screen.deleteLater()
+    del screen
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    gc.collect()
+    _pump(300)
 
 
 def test_result_screen_ignores_unchanged_ids_saved_by_older_versions(qapp, tmp_path):

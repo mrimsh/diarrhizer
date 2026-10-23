@@ -33,7 +33,7 @@ The goal is a clean, extensible core (CLI now, GUI later) without unnecessary co
 - `src/diarrhizer/cli.py` — CLI entry points (public API surface)
 - `src/diarrhizer/pipeline/runner.py` — pipeline orchestration (stage runner)
 - `src/diarrhizer/pipeline/stages/*` — individual stages (convert/transcribe/diarize/merge/export)
-- `src/diarrhizer/adapters/*` — wrappers around FFmpeg / WhisperX / diarization / language models (`llm.py`)
+- `src/diarrhizer/adapters/*` — wrappers around FFmpeg / WhisperX / diarization / language models (`llm.py`: one request; `llm_accounts.py`: sign-in, models and limits of a subscription provider - through the vendors' own tools, never with tokens of ours)
 - `src/diarrhizer/summary/*` — summaries of a finished job: prompt templates, providers, the service (an on-demand add-on, not a pipeline stage)
 - `src/diarrhizer/diagnostics/doctor.py` — environment checks (Windows is sensitive)
 - `docs/architecture.md` — pipeline and artifacts overview
