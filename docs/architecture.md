@@ -446,6 +446,27 @@ python -m diarrhizer summarize --list
 Exit code 1 for a missing job/result or note file, an unknown template, provider or wildcard, or a provider
 failure (2 for `--note` together with `--note-file`). See [Summaries](#summaries) below.
 
+### `chat`
+
+```powershell
+python -m diarrhizer chat "<job folder>" "<question>" [--conversation ID | --last] [--print]
+python -m diarrhizer chat "<job folder>" --list | --export PATH --last | --delete ID
+```
+
+| Argument | Description |
+|----------|-------------|
+| `job` | Job folder or its `export/result.md` |
+| `question` | The question; a new dialogue may start without one (the template's instruction is carried out) |
+| `--conversation ID` / `--last` | Continue that dialogue / the most recently used one (neither: start a new one) |
+| `--template`, `--note`, `--note-file`, `--title` | New dialogue only; the note is fixed for the dialogue |
+| `--provider`, `--model` | The provider for this turn (default: the dialogue's last one) / its model |
+| `--no-session` | Do not keep a Codex CLI session; send the whole dialogue each turn |
+| `--print` | Also print the answer |
+| `--list`, `--export PATH` (`-` = stdout), `--delete ID` | List / write as Markdown (after the question if one is asked) / remove |
+
+Exit code 1 for a missing job/result/dialogue, an unknown template, provider or wildcard, a missing question or a
+provider failure. See [Summaries](#summaries) below.
+
 ---
 
 ## Summaries
@@ -545,6 +566,21 @@ export/result.md ──► SUMMARY:JOB ──► ADAPTER:LLM ──► provider 
   nothing behind). Earlier summaries are never overwritten. The summary's `.json` also records the model that
   answered, the usage, the cost (with a note on where the figure comes from - an estimate is not a bill) and the
   limits; for Codex the limits are read right after the request (best effort, a failure is only logged).
+- **Dialogue** (`summary/chat.py`, `SUMMARY:CHAT`; `wildcards.render_prompt_blocks`, `SUMMARY:WILDCARD_BLOCKS`):
+  a summary generalised to many questions. `chat/<id>.json` in the job folder (beside `summary/`, atomic writes,
+  any number per job) holds the title, template name, provider, the note (fixed at creation), the **prefix** and
+  the turns. The prefix is one system message built at creation - the template's prompt with its wildcards filled
+  in, cut at the transcript into blocks, the transcript block flagged as the cache breakpoint - and stored, never
+  rebuilt: every turn sends *prefix, earlier turns, new question* through `complete_chat`, so the prefix is
+  byte-for-byte the same on every turn of the dialogue (tested), even if the template or `result.md` changes
+  later. All wildcards are resolved once at creation (nothing in the prefix changes between turns); a non-empty
+  `{{note}}` ahead of the transcript is allowed but warned about: the cache then works only within this dialogue.
+  A turn is `question, answer, asked_at`, the provider (name, kind, model - it may change from turn to turn), the
+  model that answered, `usage` (with the cache parts), `cost_usd`, and the `context_mode` / `context_chars` /
+  `cache_available` of the reply (CLI session or whole history). A Codex session is kept and resumed only while it
+  has seen every turn (`session_turns`); after another provider answered, the history goes whole into a new one.
+  A failed request adds no turn. Export to Markdown: `export_markdown` / `export_conversation`. `summarize_job`
+  is untouched; the first turn of a dialogue with an empty question is the "summary".
 - **Not done on purpose:** splitting a transcript that exceeds a model's context window (the provider's
   error is passed on as is), streaming, and chat-style follow-ups.
 

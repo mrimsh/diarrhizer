@@ -491,6 +491,27 @@ python -m diarrhizer summarize ".\out\meeting_20260101_120000" --note-file ".\no
 PowerShell's `>` writes it) give the text for `{{note}}`. After the summary is saved the command prints what
 the request used (tokens, cost, limits) when the provider reported it.
 
+**Dialogues.** A summary is one question; `chat` asks as many as you like about the same transcript, and keeps
+the dialogue in the job's `chat/` folder (any number per job, one JSON file each):
+
+```powershell
+python -m diarrhizer chat ".\out\meeting_20260101_120000" "Кто за что отвечает?" --print   # a new dialogue
+python -m diarrhizer chat ".\out\meeting_20260101_120000" "А сроки?" --last --print         # its next question
+python -m diarrhizer chat ".\out\meeting_20260101_120000" --list
+python -m diarrhizer chat ".\out\meeting_20260101_120000" --last --export ".\dialogue.md"
+```
+
+A new dialogue takes `--template`, `--provider`, `--note` / `--note-file` (the note is fixed for the whole
+dialogue) and `--title`; with no question it carries out the template's instruction. `--conversation <id>` or
+`--last` continues one; `--provider` / `--model` may change the provider for a turn (each turn records its own),
+`--delete <id>` removes one. After every turn the command prints what it used - tokens with the cache parts, cost,
+and whether the context went as a CLI session or as the whole history. The context of a dialogue (the template's
+instruction with the transcript in it) is built once and stored; every turn sends it unchanged, then the turns so
+far, so the provider's prompt cache can serve it. A `{{note}}` that stands before `{{transcript}}` works but is
+warned about: dialogues with different notes then cannot share a cache. For a ChatGPT (Codex) provider the CLI
+session is kept and resumed (`--no-session` sends the whole dialogue every time) - see
+[docs/cli-sessions.md](docs/cli-sessions.md). `summarize` is unchanged.
+
 Things to know:
 
 * The transcript text leaves your machine (to OpenAI, Anthropic or the endpoint you configured) — the

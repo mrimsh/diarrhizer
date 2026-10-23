@@ -295,3 +295,45 @@ def render_prompt(template_prompt: str, ctx: PromptContext, template_name: str =
         parts.append(_transcript(ctx))
     return RenderedPrompt("\n\n".join(part for part in parts if part) + "\n", used, warnings)
 # [SEMANTIC-END] SUMMARY:WILDCARDS
+
+
+@dataclass(frozen=True)
+class PromptBlock:
+    text: str
+    transcript: bool = False  # this block is the fenced transcript
+
+
+@dataclass
+class RenderedBlocks:
+    blocks: list[PromptBlock]
+    wildcards_used: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+_PLACE_OF_TRANSCRIPT = "\x00"  # stands in for the transcript while the prompt is rendered, then is cut out
+
+
+# [SEMANTIC-BEGIN] SUMMARY:WILDCARD_BLOCKS
+# @purpose: The rendered prompt as blocks, the transcript being a block of its own
+# @description: The same rendering as render_prompt (same rules, same warnings), cut at the transcript: the text
+#   before it, the fenced transcript, the text after it (a template that places {{transcript}} several times
+#   gives several transcript blocks). A dialogue sends the blocks as one system message and marks the transcript
+#   block as a cache breakpoint; run together they are the render_prompt text, without its final newline.
+# @inputs: template prompt, PromptContext, template name
+# @outputs: RenderedBlocks(blocks, wildcards_used, warnings)
+# @sideEffects: Reads job files (read-only), through PromptContext
+# @errors: UnknownWildcardError (a ValueError)
+# @see: SUMMARY:WILDCARDS, SUMMARY:CHAT
+def render_prompt_blocks(template_prompt: str, ctx: PromptContext, template_name: str = "") -> RenderedBlocks:
+    probe = PromptContext(_PLACE_OF_TRANSCRIPT, ctx.note, ctx.job_dir)
+    rendered = render_prompt(template_prompt, probe, template_name)
+    fenced = _transcript(probe)
+    pieces = rendered.text.rstrip("\n").split(fenced)
+    blocks: list[PromptBlock] = []
+    for i, piece in enumerate(pieces):
+        if piece:
+            blocks.append(PromptBlock(piece))
+        if i < len(pieces) - 1:
+            blocks.append(PromptBlock(_transcript(ctx), transcript=True))
+    return RenderedBlocks(blocks, rendered.wildcards_used, rendered.warnings)
+# [SEMANTIC-END] SUMMARY:WILDCARD_BLOCKS

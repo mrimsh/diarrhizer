@@ -111,9 +111,99 @@ def _run_summarize(args: argparse.Namespace) -> int:
 # [SEMANTIC-END] CLI:SUMMARIZE
 
 
+# [SEMANTIC-BEGIN] CLI:CHAT
+# @purpose: Ask a model questions about a finished job's transcript, in a dialogue that is kept with the job
+# @description: `chat <job> "<question>"` starts a new dialogue (the template - default or --template - gives the
+#   instruction, --note/--note-file the note, fixed for the whole dialogue) and asks its first question, or, with
+#   --conversation <id> / --last, asks the next question of an existing one (--provider / --model may differ from
+#   the earlier turns'). The answer is stored in the job's chat/ folder; --print also prints it, and what the turn
+#   used (tokens with the cache parts, cost, session or whole history sent) is always printed. --list shows the
+#   job's dialogues, --export <path|-> writes one as Markdown, --delete <id> removes one. summarize is unchanged.
+# @inputs: args.job, args.question, args.conversation, args.last, args.template, args.provider, args.model, args.note,
+#   args.note_file, args.title, args.no_session, args.print, args.list, args.export, args.delete
+# @outputs: chat/<id>.json (and .md on export) in the job folder; the dialogue id and statistics on stdout
+# @sideEffects: Sends the transcript and the dialogue to the provider; writes files
+# @errors: Exits with code 1 on a missing job/result/dialogue, unknown template, provider or wildcard, a missing question, or a provider failure
+# @see: SUMMARY:CHAT, CLI:SUMMARIZE, ADAPTER:LLM
+def _run_chat(args: argparse.Namespace) -> int:
+    import dataclasses
+
+    from diarrhizer.adapters.llm import LLMError
+    from diarrhizer.summary import chat, service
+    from diarrhizer.summary.providers import ProviderStore
+    from diarrhizer.summary.templates import TemplateStore
+
+    try:
+        job_dir = service.resolve_job_dir(args.job)
+        if args.list:
+            conversations = chat.list_conversations(job_dir)
+            for c in conversations:
+                print(f"{c.id}  {c.updated_at}  {len(c.turns)} turn(s)  {c.template}  {c.title}")
+            if not conversations:
+                print("No dialogues for this job yet.")
+            return 0
+        if args.delete:
+            chat.delete_conversation(job_dir, args.delete)
+            print(f"Deleted dialogue {args.delete}")
+            return 0
+
+        conversation = None
+        if args.conversation:
+            conversation = chat.load_conversation(job_dir, args.conversation)
+        elif args.last:
+            found = chat.list_conversations(job_dir)
+            if not found:
+                raise ValueError("This job has no dialogues yet")
+            conversation = found[0]
+        question = (args.question or "").strip()
+
+        if args.export and not question:
+            if conversation is None:
+                raise ValueError("--export needs --conversation <id> or --last")
+            if args.export == "-":
+                sys.stdout.buffer.write(chat.export_markdown(conversation).encode("utf-8"))
+            else:
+                print(f"Exported: {chat.export_conversation(job_dir, conversation.id, args.export)}")
+            return 0
+        if conversation is not None and not question:
+            raise ValueError("Pass the question to ask")
+
+        providers = ProviderStore.load()
+        if conversation is None:
+            template = TemplateStore.load().resolve(args.template)
+            provider = providers.resolve(args.provider)
+            note = service.read_note_file(args.note_file) if args.note_file else (args.note or "")
+            conversation = chat.create_conversation(job_dir, template, provider, note=note, title=args.title or "")
+            print(f"New dialogue {conversation.id} (template '{template.name}')")
+        else:
+            provider = providers.resolve(args.provider or conversation.provider.get("name"))
+        if args.model:
+            provider = dataclasses.replace(provider, model=args.model)
+        print(f"Asking '{provider.name}'...")
+        turn = chat.ask(job_dir, conversation.id, question, provider, keep_cli_session=not args.no_session)
+    except (FileNotFoundError, ValueError, LLMError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Dialogue {conversation.id}, turn {len(conversation.turns) + 1}")
+    for line in chat.turn_stats(turn):
+        print(line)
+    if turn.truncated:
+        print("Warning: the provider cut the reply off at its length limit", file=sys.stderr)
+    if args.print:
+        sys.stdout.buffer.write(("\n" + turn.answer + "\n").encode("utf-8"))
+    if args.export:
+        if args.export == "-":
+            sys.stdout.buffer.write(chat.export_markdown(chat.load_conversation(job_dir, conversation.id)).encode("utf-8"))
+        else:
+            print(f"Exported: {chat.export_conversation(job_dir, conversation.id, args.export)}")
+    return 0
+# [SEMANTIC-END] CLI:CHAT
+
+
 # [SEMANTIC-BEGIN] CLI:ENTRY
 # @purpose: CLI entry point for Diarrhizer commands
-# @description: Provides doctor, run and summarize commands for diagnostics, processing and summaries
+# @description: Provides doctor, run, summarize and chat commands for diagnostics, processing, summaries and dialogues
 # @sideEffects: Loads project .env, parses args, runs diagnostics or pipeline, configures a StreamHandler
 #   (stdout, "%(message)s") on the "diarrhizer" package logger so stage/pipeline
 #   progress logged via logging (see PIPELINE:RUNNER) prints like the old print()s did
@@ -375,12 +465,46 @@ def main() -> int:
         help="List the {{wildcards}} a prompt template may contain, with descriptions, and exit"
     )
 
+    # Chat command
+    chat_parser = subparsers.add_parser(
+        "chat",
+        help="Ask a language model questions about a finished job's transcript, in a dialogue kept with the job"
+    )
+    chat_parser.add_argument("job", help="Job folder (e.g. out/meeting_20260101_120000) or its export/result.md")
+    chat_parser.add_argument(
+        "question", nargs="?", default=None,
+        help="The question. A new dialogue may start without one: the template's instruction is carried out"
+    )
+    chat_which = chat_parser.add_mutually_exclusive_group()
+    chat_which.add_argument("--conversation", default=None, metavar="ID",
+                            help="Continue this dialogue (ids: --list); without it a new one is started")
+    chat_which.add_argument("--last", action="store_true", help="Continue the job's most recently used dialogue")
+    chat_parser.add_argument("--template", default=None,
+                             help="New dialogue: the prompt template that gives the instruction (default as for summarize)")
+    chat_parser.add_argument("--provider", default=None,
+                             help="Provider name (default: the dialogue's last one, for a new dialogue the default)")
+    chat_parser.add_argument("--model", default=None, help="Use this model for this turn instead of the provider's own")
+    chat_note = chat_parser.add_mutually_exclusive_group()
+    chat_note.add_argument("--note", default=None, metavar="TEXT",
+                           help="New dialogue: the text for {{note}}, fixed for the whole dialogue")
+    chat_note.add_argument("--note-file", default=None, metavar="PATH", help="The same, read from a text file")
+    chat_parser.add_argument("--title", default=None, help="New dialogue: its title (default: the first question)")
+    chat_parser.add_argument("--no-session", action="store_true",
+                             help="Do not keep a Codex CLI session: send the whole dialogue every turn")
+    chat_parser.add_argument("--print", action="store_true", help="Also print the answer (it is always stored)")
+    chat_parser.add_argument("--list", action="store_true", help="List the job's dialogues and exit")
+    chat_parser.add_argument("--export", default=None, metavar="PATH",
+                             help="Write the dialogue as Markdown to PATH ('-' = stdout), after the question if one is asked")
+    chat_parser.add_argument("--delete", default=None, metavar="ID", help="Delete a dialogue and exit")
+
     args = parser.parse_args()
 
     if args.command == "doctor":
         return 0 if run_doctor_checks() else 1
     elif args.command == "summarize":
         return _run_summarize(args)
+    elif args.command == "chat":
+        return _run_chat(args)
     elif args.command == "run":
         # [SEMANTIC-BEGIN] CLI:RUN
         # @purpose: Run the processing pipeline for one or several media files
