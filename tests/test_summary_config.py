@@ -214,6 +214,14 @@ def test_prices_are_stored_for_api_providers_only():
     assert "price_input" not in Provider(name="c", kind=KIND_CODEX_CLI).to_dict()  # a subscription reports its own
 
 
+def test_the_quotes_of_explorers_copy_as_path_are_not_part_of_the_command():
+    pasted = Provider(name="c", kind=KIND_CODEX_CLI, command='  "C:\\Program Files\\OpenAI\\codex.exe" ')
+    assert pasted.command == "C:\\Program Files\\OpenAI\\codex.exe"
+    assert pasted.executable == "C:\\Program Files\\OpenAI\\codex.exe"
+    assert pasted.to_dict()["command"] == "C:\\Program Files\\OpenAI\\codex.exe"  # stored without them
+    assert Provider(name="c", kind=KIND_CODEX_CLI, command='""').executable == "codex"  # nothing left: the default
+
+
 def test_provider_reads_its_key_from_the_environment(monkeypatch):
     provider = _api(api_key_env="MY_KEY")
     assert provider.api_key() == ""

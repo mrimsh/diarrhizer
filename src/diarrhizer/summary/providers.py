@@ -59,7 +59,8 @@ def default_key_env(name: str) -> str:
 #   tokens (price_input / price_output) so a request's cost can be estimated; a subscription provider reports
 #   its own figures. The model of a subscription provider is optional (empty = the tool's default); which models
 #   exist is the provider's to say (ADAPTER:LLM_ACCOUNTS). ProviderStore keeps the providers and the default
-#   name in a JSON file; there are no built-ins, an empty store is a normal state the callers explain.
+#   name in a JSON file; there are no built-ins, an empty store is a normal state the callers explain. A CLI
+#   provider's command is a name looked up on PATH or the full path of the program (quotes around it are dropped).
 # @inputs: provider fields (validated on construction), JSON store path (DIARRHIZER_SUMMARY_PROVIDERS_FILE)
 # @outputs: Provider instances, summary_providers.json
 # @sideEffects: ProviderStore.load() reads and save() atomically writes the JSON store; Provider.api_key() reads os.environ
@@ -105,6 +106,8 @@ class Provider:
             if not isinstance(value, str):
                 raise ValueError(f"Provider '{self.name}': {attr} must be text, got {value!r}")
             object.__setattr__(self, attr, value.strip())
+        # Explorer's "Copy as path" wraps the path in quotes; they are not part of the file name.
+        object.__setattr__(self, "command", self.command.strip('"').strip())
         self._validate()
 
     def _validate(self) -> None:

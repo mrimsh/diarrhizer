@@ -119,7 +119,9 @@ class LLMReply:
 #   anthropic-api are single non-streaming HTTPS POSTs: the endpoint may be a base URL or the full method URL,
 #   the key is read from the provider's api_key_env at call time and never appears in an error message; usage
 #   comes from the reply and cost from the provider (OpenRouter) or from the prices set on the Provider.
-#   Errors are always LLMError with an actionable text.
+#   Errors are always LLMError with an actionable text; a tool that cannot be started says which of the three it is
+#   (a bare name that is not on PATH, a path with no file behind it, a folder) and names the section of
+#   docs/troubleshooting.md that explains how to find the executable and tell the app where it is.
 # @inputs: provider (CONFIG:SUMMARY_PROVIDERS), prompt text (already containing the transcript)
 # @outputs: LLMReply(text, truncated, model, usage, cost_usd, cost_note, limits)
 # @sideEffects: Starts the vendor CLI (which talks to its service) or sends the prompt over the network;
@@ -284,12 +286,23 @@ def find_executable(provider: Provider) -> str:
     """Full path of the provider's CLI; LLMError if it is not installed."""
     command = provider.executable
     found = shutil.which(command)
-    if not found:
+    if found:
+        return found
+    where = "See docs/troubleshooting.md, section \"command 'codex' not found although Codex is installed\"."
+    if os.path.isdir(command):
         raise LLMError(
-            f"Provider '{provider.name}': command '{command}' not found. Install it, "
-            "or give the full path to the executable in the provider's settings."
+            f"Provider '{provider.name}': '{command}' is a folder, not a program - give the path of the "
+            f"executable inside it (for example codex.exe or codex.cmd). {where}"
         )
-    return found
+    if "\\" in command or "/" in command:
+        raise LLMError(
+            f"Provider '{provider.name}': command '{command}' not found - there is no such file. "
+            f"Check the path in the provider's command field. {where}"
+        )
+    raise LLMError(
+        f"Provider '{provider.name}': command '{command}' not found - it is not on PATH. Install it, put its "
+        f"folder on PATH, or give the full path to the executable in the provider's command field. {where}"
+    )
 
 
 def subscription_env(provider: Provider) -> dict:

@@ -385,7 +385,7 @@ Where the **Саммаризация → Провайдеры** screen shows an 
 
 | What you see | Why | What to do |
 |--------------|-----|------------|
-| `command 'codex' not found` / `command 'claude' not found` | The vendor's tool is not installed or not on `PATH` | Install Codex CLI / Claude Code, or give the full path to the executable in the provider's **Команда** field |
+| `command 'codex' not found` / `command 'claude' not found` | The vendor's tool is not installed or not on `PATH` | See [the next section](#command-codex-not-found-although-codex-is-installed): find the file and either give its full path in the provider's **Команда** field or put its folder on `PATH` |
 | **Войти через ChatGPT**: the page opens but the window does not update | Codex waits for the browser on `localhost:1455`; another process (a stuck `codex login`, another Codex window) may hold that port | Close the other Codex process, press **Отменить вход**, try again |
 | **Войти через Claude**: no browser page | Claude Code could not open the browser | Press **Отменить вход**, run `claude auth login` in a terminal (it also lets you paste the code from the page), then **Проверить вход** |
 | `The '<model>' model is not supported when using Codex with a ChatGPT account` | The chosen model is not available for the signed-in plan | Press **Список моделей** and pick one from the list, or choose the tool's default |
@@ -396,3 +396,102 @@ Where the **Саммаризация → Провайдеры** screen shows an 
 Signing out in the app signs the tool out for everything that uses it (the tool keeps one stored sign-in).
 The app never sees or stores the tokens: for Claude it only starts Anthropic's own `claude auth login`,
 because Anthropic does not allow other applications to offer a Claude.ai sign-in themselves.
+
+---
+
+## `command 'codex' not found` although Codex is installed
+
+**Symptom** (the account box of a provider on **Саммаризация → Провайдеры**, or a failed summary):
+
+```
+Вход не выполнен: Provider 'ChatGPT': command 'codex' not found - it is not on PATH. ...
+```
+
+Everything below is the same for Claude: read `claude` instead of `codex`, **Войти через Claude** instead of
+**Войти через ChatGPT**.
+
+**Cause.** Diarrhizer starts Codex by name, as a terminal would, and finds it only through `PATH`. Installing
+the program does not always put it there:
+
+- the Codex **desktop app** (and editor extensions) keep their own `codex.exe` in a folder that is not on `PATH`;
+- an **npm** install puts `codex.cmd` into npm's global folder, which is on `PATH` only if it was added;
+- a terminal (or a Diarrhizer window) opened **before** the installation or before `PATH` was changed still
+  has the old `PATH` - a running program never sees a later change;
+- in PowerShell `codex` may work only as a *function or alias* from your profile; other programs cannot
+  see those;
+- Codex installed inside **WSL** (Linux) is not a Windows program: Diarrhizer cannot start it by name.
+
+**Fix.**
+
+**1. Is it really missing?** In a *new* PowerShell window:
+
+```powershell
+Get-Command codex -All | Format-Table CommandType, Source
+```
+
+- A row of type `Application` (`codex.exe` or `codex.cmd`): Codex *is* on `PATH` - the Diarrhizer window just
+  predates it. Close Diarrhizer and start it again.
+- Only `Function` / `Alias` rows, or nothing: other programs cannot start it. Go on.
+
+**2. Find the real file.** Where it usually lives on Windows:
+
+| Installed as | The file |
+|--------------|----------|
+| npm (`npm install -g @openai/codex`) | `%APPDATA%\npm\codex.cmd` (`npm config get prefix` prints the folder) |
+| Codex desktop app | `%LOCALAPPDATA%\OpenAI\Codex\bin\<folder-name>\codex.exe` - the folder name changes with app updates |
+| Claude Code, native installer | `%USERPROFILE%\.local\bin\claude.exe` |
+| Claude Code, npm | `%APPDATA%\npm\claude.cmd` |
+
+Or let PowerShell look through those places (a second or two):
+
+```powershell
+$places = "$env:APPDATA\npm", "$env:LOCALAPPDATA\OpenAI\Codex\bin", "$env:LOCALAPPDATA\Programs", "$env:USERPROFILE\.local\bin"
+Get-ChildItem $places -Recurse -Depth 5 -Include codex.exe, codex.cmd, claude.exe, claude.cmd -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+```
+
+If several files turn up, prefer `codex.cmd` of npm or the `codex.exe` of the app, not the `codex.exe` buried deep
+inside `node_modules` (it works, but its folder changes with every npm update). Do **not** take the copies under
+`%USERPROFILE%\.codex\` - those are the tool's internal helpers. Nothing found? It may be installed elsewhere:
+search the folder you chose at installation (`Get-ChildItem "D:\Tools" -Recurse -Include codex.exe`) - a search
+of the whole `%LOCALAPPDATA%` takes many minutes. Check the file you picked:
+
+```powershell
+& "C:\full\path\to\codex.exe" --version
+```
+
+It must print a version. If the file cannot be found anywhere, the command-line tool is not installed (some
+apps do not include it): install it (`npm install -g @openai/codex`, needs Node.js) and repeat step 1.
+
+**3. Tell Diarrhizer where it is** - either way works:
+
+- **A. The full path in the provider (simplest).** **Саммаризация → Провайдеры** → the provider → field
+  **Команда** → paste the full path → **Сохранить** → **Проверить вход** in the account box. Spaces in the path
+  are fine, and so are the quotes that Explorer's "Copy as path" adds. Downside: the Codex desktop app's folder
+  name changes with updates - after an update the path goes stale, repeat the step (or use B).
+- **B. Put the folder on `PATH`** (every program then finds it; leave **Команда** empty). Only your own `PATH`
+  changes, no administrator rights are needed. Press `Win+R`, run
+
+  ```
+  rundll32 sysdm.cpl,EditEnvironmentVariables
+  ```
+
+  In the **upper** list (variables of your account) select `Path` → **Изменить** → **Создать** → paste the
+  folder that holds `codex.exe` / `codex.cmd` (the folder, not the file) → **OK** in every window.
+
+  Then **close every terminal and Diarrhizer and start them again**, and check in a new terminal that
+  `codex --version` works.
+
+  If you prefer PowerShell, this appends the folder to your `PATH`:
+
+  ```powershell
+  $dir = "C:\full\path\to\the\folder"
+  $old = [Environment]::GetEnvironmentVariable("Path", "User")
+  [Environment]::SetEnvironmentVariable("Path", "$old;$dir", "User")
+  ```
+
+  It works, but it writes your `PATH` back as plain text: entries such as `%USERPROFILE%\bin` are replaced by
+  the paths they stand for (the dialog above keeps them). Do not use `setx PATH ...`: it cuts the value at 1024
+  characters and merges the machine-wide and your own lists.
+
+If the account box then says **Вход не выполнен** (without "not found"), the tool is found - press the sign-in
+button. A message that `'...' is a folder, not a program` means the path points at the folder: add the file name.

@@ -413,6 +413,9 @@ templates (short summary, meeting minutes, call review) are read-only; yours liv
 * An API key never goes into `summary_providers.json`: the provider names an environment variable
   (`api_key_env`) and the key lives in `.env` (git-ignored) — the GUI writes it there for you, like the
   Hugging Face token.
+* If the app says `command 'codex' not found` (or `'claude'`) although the tool is installed, it is not on
+  `PATH`: [docs/troubleshooting.md](docs/troubleshooting.md) explains how to find it and either give its full
+  path in the provider's **Команда** field or put its folder on `PATH`.
 * Providers are stored in `summary_providers.json` — see `summary_providers.example.json`.
   `DIARRHIZER_SUMMARY_PROVIDERS_FILE` / `DIARRHIZER_SUMMARY_TEMPLATES_FILE` move the two files.
 

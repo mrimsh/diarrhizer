@@ -497,6 +497,52 @@ def test_a_missing_command_is_explained(tmp_path):
         complete(provider, PROMPT)
 
 
+def test_a_command_that_is_not_on_path_says_so_and_points_at_the_instruction():
+    provider = Provider(name="ChatGPT", kind=KIND_CODEX_CLI, command="definitely-not-installed-codex")
+    with pytest.raises(LLMError) as excinfo:
+        llm.find_executable(provider)
+    message = str(excinfo.value)
+    assert "command 'definitely-not-installed-codex' not found" in message and "not on PATH" in message
+    assert "full path" in message and "docs/troubleshooting.md" in message
+
+
+def test_a_path_with_no_file_behind_it_is_reported_as_such(tmp_path):
+    missing = tmp_path / "OpenAI" / "codex.exe"
+    with pytest.raises(LLMError) as excinfo:
+        llm.find_executable(Provider(name="ChatGPT", kind=KIND_CODEX_CLI, command=str(missing)))
+    assert "not found - there is no such file" in str(excinfo.value)
+    assert "not on PATH" not in str(excinfo.value)  # it is a path: PATH has nothing to do with it
+
+
+def test_a_folder_instead_of_a_program_is_explained(tmp_path):
+    with pytest.raises(LLMError) as excinfo:
+        llm.find_executable(Provider(name="ChatGPT", kind=KIND_CODEX_CLI, command=str(tmp_path)))
+    assert "is a folder, not a program" in str(excinfo.value) and "codex.exe or codex.cmd" in str(excinfo.value)
+
+
+def test_a_command_pasted_with_the_quotes_of_copy_as_path_still_runs(fake_cli):
+    make, log = fake_cli
+    quoted = f'"{make("claude")}"'
+
+    reply = complete(_claude(make, command=quoted), PROMPT)
+
+    assert reply.text == "Ответ claude" and len(log()) == 1
+
+
+def test_the_instruction_the_error_points_at_is_in_the_docs():
+    """The message names a section of docs/troubleshooting.md; if the section is renamed, this fails."""
+    from diarrhizer.env_file import REPO_ROOT
+
+    with pytest.raises(LLMError) as excinfo:
+        llm.find_executable(Provider(name="ChatGPT", kind=KIND_CODEX_CLI, command="definitely-not-installed-codex"))
+    section = "command 'codex' not found although Codex is installed"
+    assert section in str(excinfo.value)
+    docs = (REPO_ROOT / "docs" / "troubleshooting.md").read_text(encoding="utf-8")
+    headings = [line[3:].replace("`", "") for line in docs.splitlines() if line.startswith("## ")]  # as a reader sees them
+    assert section in headings
+    assert "rundll32 sysdm.cpl,EditEnvironmentVariables" in docs and "Get-Command codex -All" in docs
+
+
 def test_a_cli_that_never_answers_is_killed_at_the_timeout(fake_cli, monkeypatch):
     make, _log = fake_cli
     monkeypatch.setenv("FAKE_MODE", "sleep")

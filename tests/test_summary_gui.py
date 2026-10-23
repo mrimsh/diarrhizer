@@ -1389,3 +1389,25 @@ def test_account_actions_run_in_a_real_child_process_and_report_events_and_resul
     name, (result,) = _wait_for_any(("finished", worker.finished), ("failed", worker.failed))
     assert name == "finished", result
     assert [model["id"] for model in result["models"]] == ["gpt-6-astra", "gpt-6-sol"]
+
+
+# --- a tool that is installed but not found -------------------------------------------------------------------
+
+
+def test_the_hint_of_a_subscription_provider_says_what_to_do_when_its_tool_is_not_found(qapp, summary_stores):
+    tab = summary_settings_screen.ProvidersTab()
+    for kind in (KIND_CODEX_CLI, KIND_CLAUDE_CLI):
+        tab._new(kind)
+        hint = tab._kind_hint.text()
+        assert "полный путь" in hint and "«Команда»" in hint and "docs/troubleshooting.md" in hint
+
+
+def test_a_command_pasted_with_quotes_is_saved_without_them(qapp, summary_stores):
+    tab = summary_settings_screen.ProvidersTab()
+    _preset(tab, KIND_CODEX_CLI)
+    tab._command_field.setText('"C:\\Program Files\\OpenAI\\codex.exe"')
+
+    tab._save_button.click()
+
+    assert ProviderStore.load().get("ChatGPT").command == "C:\\Program Files\\OpenAI\\codex.exe"
+    assert tab._command_field.text() == "C:\\Program Files\\OpenAI\\codex.exe"  # and the form shows it clean
