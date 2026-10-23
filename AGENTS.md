@@ -25,6 +25,7 @@ The goal is a clean, extensible core (CLI now, GUI later) without unnecessary co
   - `python -m diarrhizer run "<path>" --out "./out" --min-speakers 2 --max-speakers 6 --lang ru --device cuda`
 - Summarize a finished job (templates + providers are shared with the GUI):
   - `python -m diarrhizer summarize "<job folder>" --template "<name>" --provider "<name>" --print`
+  - `python -m diarrhizer summarize --list-wildcards` (the `{{wildcards}}` a template may use; `--note "<text>"` fills `{{note}}`)
 
 ---
 
@@ -34,7 +35,7 @@ The goal is a clean, extensible core (CLI now, GUI later) without unnecessary co
 - `src/diarrhizer/pipeline/runner.py` — pipeline orchestration (stage runner)
 - `src/diarrhizer/pipeline/stages/*` — individual stages (convert/transcribe/diarize/merge/export)
 - `src/diarrhizer/adapters/*` — wrappers around FFmpeg / WhisperX / diarization / language models (`llm.py`: one request; `llm_accounts.py`: sign-in, models and limits of a subscription provider - through the vendors' own tools, never with tokens of ours)
-- `src/diarrhizer/summary/*` — summaries of a finished job: prompt templates, providers, the service (an on-demand add-on, not a pipeline stage)
+- `src/diarrhizer/summary/*` — summaries of a finished job: prompt templates and their `{{wildcards}}` (`wildcards.py`), providers, the service (an on-demand add-on, not a pipeline stage)
 - `src/diarrhizer/diagnostics/doctor.py` — environment checks (Windows is sensitive)
 - `docs/architecture.md` — pipeline and artifacts overview
 

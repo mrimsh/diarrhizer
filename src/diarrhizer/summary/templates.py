@@ -1,9 +1,10 @@
 """Prompt templates for summarizing a transcript.
 
-A template is a named prompt; the transcript (export/result.md) is attached to
-it when a summary is requested (service.build_prompt). Built-in templates are
-read-only; user templates and the default choice live in a JSON file shared by
-the CLI and the GUI.
+A template is a named prompt; the transcript (export/result.md) goes where the
+prompt says {{transcript}} and is attached at its end when it does not
+(wildcards.render_prompt, see summary/wildcards.py for the other {{wildcards}}).
+Built-in templates are read-only; user templates and the default choice live in
+a JSON file shared by the CLI and the GUI.
 """
 
 import dataclasses
@@ -24,7 +25,9 @@ MAX_NAME_LENGTH = 80
 # [SEMANTIC-BEGIN] CONFIG:SUMMARY_TEMPLATES
 # @purpose: Named prompts that tell the model what kind of summary to write from a transcript
 # @description: A template is just a prompt (plus an optional description); the transcript is attached by
-#   SUMMARY:JOB at request time, so a prompt never has to contain it. Names are free text (spaces and
+#   SUMMARY:JOB at request time, so a prompt never has to contain it - but may place it, and the user's note
+#   and facts about the job, with {{wildcards}} (SUMMARY:WILDCARDS; not checked when the template is saved,
+#   an unknown one is reported when it is used). Names are free text (spaces and
 #   Cyrillic allowed) and are the identity: built-in names cannot be overwritten or deleted, and a default
 #   pointing at a deleted template falls back to the first built-in instead of breaking every run.
 #   TemplateStore keeps user templates plus the default name in a JSON file; a missing file is an empty
@@ -33,7 +36,7 @@ MAX_NAME_LENGTH = 80
 # @outputs: PromptTemplate instances, summary_templates.json
 # @sideEffects: TemplateStore.load() reads and save() atomically writes the JSON store
 # @errors: ValueError for invalid fields, unknown/built-in names, or an unreadable store file
-# @see: SUMMARY:JOB, CONFIG:SUMMARY_PROVIDERS, CLI:SUMMARIZE, GUI:SUMMARY_SETTINGS
+# @see: SUMMARY:JOB, SUMMARY:WILDCARDS, CONFIG:SUMMARY_PROVIDERS, CLI:SUMMARIZE, GUI:SUMMARY_SETTINGS
 @dataclass(frozen=True)
 class PromptTemplate:
     """A prompt the transcript is attached to.

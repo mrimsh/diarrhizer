@@ -4,6 +4,7 @@ about what is sent, what is stored and how failures are reported.
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from diarrhizer.summary import service
 from diarrhizer.summary.provider_info import LimitWindow, Limits, Usage
 from diarrhizer.summary.providers import KIND_CODEX_CLI, KIND_OPENAI_API, Provider, ProviderStore
 from diarrhizer.summary.templates import PromptTemplate, TemplateStore
+from diarrhizer.summary.wildcards import WILDCARDS, UnknownWildcardError, Wildcard
 
 TRANSCRIPT = "# Transcription\n\n[00:00:01 → 00:00:05] **Иван:** Привет, начнём встречу.\n"
 TEMPLATE = PromptTemplate(name="Итоги", prompt="Подведи итоги встречи.")
@@ -354,3 +356,337 @@ def test_summarize_reports_a_broken_store_file(run_cli, job_dir, model, summary_
     summary_stores[1].write_text("{broken", encoding="utf-8")
     code, _out, err = run_cli(job_dir)
     assert code == 1 and "Cannot read summary providers file" in err
+
+
+# --- wildcards in templates: {{transcript}}, {{note}} and the job's facts ----------------------------------
+#
+# The fakes are the same as above: the model is a recorder, so these tests compare what would be sent.
+
+FENCED = f"<transcript>\n{TRANSCRIPT.strip()}\n</transcript>"
+
+
+def template_with(prompt: str) -> PromptTemplate:
+    return PromptTemplate(name="Свой", prompt=prompt)
+
+
+@pytest.fixture
+def warned():
+    """The messages the summary service logged as warnings (the CLI shows its logger, a library caller does not)."""
+    messages = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            if record.levelno >= logging.WARNING:
+                messages.append(record.getMessage())
+
+    handler = Collect()
+    logger = logging.getLogger("diarrhizer.summary")
+    logger.addHandler(handler)
+    yield messages
+    logger.removeHandler(handler)
+
+
+@pytest.fixture
+def rich_job(job_dir):
+    """A job with what the pipeline records besides the transcript: run.json, segments, saved speaker names."""
+    for folder in ("meta", "merged", "asr"):
+        (job_dir / folder).mkdir()
+
+    def write(relative, data):
+        (job_dir / relative).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    write("meta/run.json", {
+        "input_path": "D:\\Записи\\Созвон с Иваном.mp3",
+        "start_time": "2026-10-23T09:00:00",
+        "pipeline_config": {"language": "ru"},
+    })
+    write("merged/segments.json", {"segments": [
+        {"start": 0.0, "end": 5.2, "speaker_id": "SPEAKER_00", "text": "Привет"},
+        {"start": 5.2, "end": 3725.9, "speaker_id": "SPEAKER_01", "text": "Здравствуйте"},
+        {"start": 3725.9, "end": 3730.0, "speaker_id": "SPEAKER_00", "text": "Пока"},
+    ]})
+    write("speakers.json", {"SPEAKER_00": "Иван", "SPEAKER_01": "  "})  # the second one was not named
+    return job_dir
+
+
+def test_a_template_places_the_transcript_and_the_note_where_it_wants(job_dir, model):
+    template = template_with("{{note}}\n\nСтенограмма:\n{{transcript}}\nСделай итоги.")
+
+    result = service.summarize_job(job_dir, template, PROVIDER, note="Только решения")
+
+    assert model.prompts == [f"Только решения\n\nСтенограмма:\n{FENCED}\nСделай итоги.\n"]
+    assert result["warnings"] == []
+
+
+def test_a_template_without_the_transcript_wildcard_gets_it_at_the_end_as_before(job_dir, model):
+    service.summarize_job(job_dir, template_with("Итоги встречи «{{job_name}}»."), PROVIDER)
+    assert model.prompts == [f"Итоги встречи «meeting».\n\n{FENCED}\n"]
+    assert service.build_prompt("Подведи итоги.", "x") == "Подведи итоги.\n\n<transcript>\nx\n</transcript>\n"
+
+
+def test_a_note_for_a_template_without_the_note_wildcard_is_kept_and_reported(job_dir, model, warned):
+    result = service.summarize_job(job_dir, template_with("Подведи итоги."), PROVIDER, note="  Важны сроки.\n")
+
+    assert model.prompts == [f"Подведи итоги.\n\nВажны сроки.\n\n{FENCED}\n"]  # before the transcript, trimmed
+    (warning,) = result["warnings"]
+    assert "'Свой'" in warning and "{{note}}" in warning and "before the transcript" in warning
+    assert warned == [f"[summary] Warning: {warning}"]  # the log says it too, not only the result
+    assert json.loads(Path(result["meta_path"]).read_text(encoding="utf-8"))["user_fields"] == {"note": "Важны сроки."}
+
+
+def test_a_note_for_a_template_that_places_the_transcript_itself_goes_to_the_end(job_dir, model):
+    result = service.summarize_job(job_dir, template_with("{{transcript}}\nСделай итоги."), PROVIDER, note="Важны сроки.")
+
+    assert model.prompts == [f"{FENCED}\nСделай итоги.\n\nВажны сроки.\n"]
+    assert "at the end of the prompt" in result["warnings"][0]
+
+
+@pytest.mark.parametrize("note", [None, "", "  \n"])
+def test_no_note_means_no_warning_and_an_empty_value(job_dir, model, warned, note):
+    plain = service.summarize_job(job_dir, template_with("Итоги."), PROVIDER, note=note)
+    with_wildcard = service.summarize_job(job_dir, template_with("Итоги. [{{note}}]"), PROVIDER, note=note)
+
+    assert plain["warnings"] == with_wildcard["warnings"] == [] and warned == []
+    assert model.prompts == [f"Итоги.\n\n{FENCED}\n", f"Итоги. []\n\n{FENCED}\n"]
+
+
+def test_an_unknown_wildcard_is_refused_by_name_before_anything_is_sent(job_dir, model):
+    template = template_with("Итоги.\nДля {{client}} и {{ note }}.")
+
+    with pytest.raises(UnknownWildcardError) as excinfo:
+        service.summarize_job(job_dir, template, PROVIDER)
+
+    message = str(excinfo.value)
+    assert isinstance(excinfo.value, ValueError) and excinfo.value.name == "client"
+    assert "Unknown wildcard {{client}} in line 2 of the template 'Свой'" in message
+    for name in WILDCARDS:  # the valid ones are listed
+        assert "{{" + name + "}}" in message
+    assert model.prompts == [] and not (job_dir / "summary").exists()
+
+
+def test_a_backslash_makes_the_double_braces_literal(job_dir, model):
+    template = template_with("Пиши \\{{transcript}} как есть и \\{{ ещё \\{{note}}.")
+
+    service.summarize_job(job_dir, template, PROVIDER, note="заметка")
+
+    assert model.prompts[0].startswith("Пиши {{transcript}} как есть и {{ ещё {{note}}.")  # the backslash is consumed
+    assert model.prompts[0].count("<transcript>") == 1  # an escaped wildcard is not a wildcard: appended once
+
+
+def test_single_braces_and_things_that_are_not_names_are_left_alone(job_dir, model):
+    prompt = 'Ответь JSON: {"themes": ["a"], "owner": {"name": "x"}}, шаблон {{"a": 1}} и {{ 2 слова }} и }} и {{{note}}}.'
+
+    service.summarize_job(job_dir, template_with(prompt), PROVIDER, note="N")
+
+    assert model.prompts[0].startswith(prompt.replace("{{{note}}}", "{N}"))  # only {{note}} inside {} was a wildcard
+
+
+def test_a_wildcard_may_stand_many_times_and_values_are_not_scanned_for_wildcards(job_dir, model):
+    template = template_with("{{ note }} / {{note}} / {{ job_name}} / {{job_name }}")
+
+    service.summarize_job(job_dir, template, PROVIDER, note="{{transcript}} и \\{{x}}")
+
+    assert model.prompts[0].startswith("{{transcript}} и \\{{x}} / {{transcript}} и \\{{x}} / meeting / meeting")
+    assert model.prompts[0].count("<transcript>") == 1  # the note's "{{transcript}}" stayed text
+
+
+def test_the_transcript_may_be_placed_twice(job_dir, model):
+    service.summarize_job(job_dir, template_with("{{transcript}} ... {{transcript}}"), PROVIDER)
+    assert model.prompts == [f"{FENCED} ... {FENCED}\n"]
+
+
+def test_a_transcript_that_looks_like_a_template_is_sent_as_it_is(job_dir, model):
+    (job_dir / "export" / "result.md").write_text("Он сказал {{note}} и {{ничего}}.\n", encoding="utf-8")
+    service.summarize_job(job_dir, template_with("Итоги."), PROVIDER, note="N")
+    assert "Он сказал {{note}} и {{ничего}}." in model.prompts[0]
+
+
+def test_the_wildcards_that_describe_the_job_come_from_what_the_job_recorded(rich_job, model):
+    template = template_with("{{job_name}}|{{date}}|{{duration}}|{{speakers}}|{{language}}")
+
+    service.summarize_job(rich_job, template, PROVIDER)
+
+    # The name from run.json's input path; the date from the folder (when the job was made); the length to the end
+    # of the last phrase; a speaker that was never named keeps its id; the language from the job's settings.
+    assert model.prompts[0].startswith("Созвон с Иваном|2026-10-22|01:02:10|Иван, Speaker_01|ru\n")
+
+
+def test_a_job_without_records_gives_empty_values_not_errors(job_dir, model):
+    template = template_with("{{job_name}}|{{date}}|{{duration}}|{{speakers}}|{{language}}")
+
+    result = service.summarize_job(job_dir, template, PROVIDER)
+
+    assert model.prompts[0].startswith("meeting|2026-10-22|||\n")  # the name and date are in the folder's name
+    assert result["warnings"] == []
+
+
+def test_the_date_falls_back_to_the_start_time_and_the_name_to_the_folder(tmp_path, model):
+    job = tmp_path / "scan"
+    (job / "export").mkdir(parents=True)
+    (job / "export" / "result.md").write_text(TRANSCRIPT, encoding="utf-8")
+    (job / "meta").mkdir()
+    (job / "meta" / "run.json").write_text('{"start_time": "2026-03-04T05:06:07"}', encoding="utf-8")
+
+    service.summarize_job(job, template_with("{{job_name}}|{{date}}"), PROVIDER)
+
+    assert model.prompts[0].startswith("scan|2026-03-04\n")
+
+
+def test_with_the_language_on_auto_the_detected_one_is_used(rich_job, model):
+    (rich_job / "meta" / "run.json").write_text('{"pipeline_config": {"language": "auto"}}', encoding="utf-8")
+    template = template_with("[{{language}}]")
+
+    service.summarize_job(rich_job, template, PROVIDER)
+    (rich_job / "asr" / "transcript.json").write_text('{"language": "en", "segments": []}', encoding="utf-8")
+    service.summarize_job(rich_job, template, PROVIDER)
+
+    assert [prompt.split("\n")[0] for prompt in model.prompts] == ["[]", "[en]"]  # "auto" is not a language
+
+
+def test_files_of_the_wrong_shape_do_not_break_a_summary(rich_job, model):
+    (rich_job / "meta" / "run.json").write_text("[1, 2]", encoding="utf-8")
+    (rich_job / "merged" / "segments.json").write_text('{"segments": [1, {"end": "soon"}, null]}', encoding="utf-8")
+    (rich_job / "speakers.json").write_text("{broken", encoding="utf-8")
+
+    service.summarize_job(rich_job, template_with("{{job_name}}|{{duration}}|{{speakers}}|{{language}}"), PROVIDER)
+
+    # Only the one phrase that is a dict counts, and without a speaker id it is Speaker_00, as everywhere else.
+    assert model.prompts[0].startswith("meeting||Speaker_00|\n")
+
+
+def test_the_registry_is_the_one_place_that_defines_wildcards(job_dir, model, run_cli, monkeypatch):
+    monkeypatch.setitem(WILDCARDS, "mood", Wildcard("mood", "How the call felt.", lambda ctx: "тёплое"))
+
+    service.summarize_job(job_dir, template_with("Настроение: {{mood}}."), PROVIDER)
+    with pytest.raises(UnknownWildcardError, match=r"\{\{mood\}\}"):  # and it is in the list of valid ones
+        service.summarize_job(job_dir, template_with("{{nope}}"), PROVIDER)
+    _code, out, _err = run_cli("--list-wildcards")
+
+    assert model.prompts[0].startswith("Настроение: тёплое.")
+    assert "{{mood}}" in out and "How the call felt." in out
+
+
+def test_every_registered_wildcard_has_a_description_and_is_described_in_the_docs():
+    from diarrhizer.env_file import REPO_ROOT
+
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    architecture = (REPO_ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
+    for name, wildcard in WILDCARDS.items():
+        assert wildcard.name == name and wildcard.description.strip()
+        assert "{{" + name + "}}" in readme, f"README.md does not describe {{{{{name}}}}}"
+        assert "{{" + name + "}}" in architecture, f"docs/architecture.md does not describe {{{{{name}}}}}"
+
+
+# --- what is stored about the wildcards --------------------------------------------------------------------
+
+
+def test_the_summary_records_the_users_fields_and_the_wildcards_the_template_names(job_dir, model):
+    template = template_with("{{note}} {{job_name}} {{note}}")
+
+    result = service.summarize_job(job_dir, template, PROVIDER, note="Фокус на сроках")
+
+    meta = json.loads(Path(result["meta_path"]).read_text(encoding="utf-8"))
+    assert meta["user_fields"] == {"note": "Фокус на сроках"}
+    assert meta["wildcards_used"] == ["note", "job_name"]  # each once, in order of appearance
+    assert meta["prompt"] == template.prompt  # the template as written, not the filled-in text
+    assert result["user_fields"] == meta["user_fields"] and result["wildcards_used"] == meta["wildcards_used"]
+
+
+def test_without_a_note_the_field_is_there_but_empty(job_dir, model):
+    result = service.summarize_job(job_dir, TEMPLATE, PROVIDER)
+
+    meta = json.loads(Path(result["meta_path"]).read_text(encoding="utf-8"))
+    assert meta["user_fields"] == {"note": ""} and meta["wildcards_used"] == []  # the transcript was appended, not named
+
+
+def test_a_summary_stored_before_wildcards_existed_reads_as_it_did(job_dir):
+    folder = job_dir / "summary"
+    folder.mkdir()
+    old = {"created_at": "2026-10-22T10:00:00", "template": "Итоги", "prompt": "Подведи итоги.",
+           "provider": {"name": "ChatGPT", "kind": "codex-cli", "model": ""}, "source": "export/result.md",
+           "transcript_chars": 10, "duration_seconds": 3.2, "truncated": False, "model": "gpt-x",
+           "usage": {"input_tokens": 120, "output_tokens": 30}, "cost_usd": None, "cost_note": None, "limits": None}
+    (folder / "20261022_100000_Итоги.json").write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+    (folder / "20261022_100000_Итоги.md").write_text("Итоги\n", encoding="utf-8")
+
+    (summary,) = service.list_summaries(job_dir)
+
+    assert summary["template"] == "Итоги" and summary["prompt"] == "Подведи итоги." and summary["model"] == "gpt-x"
+    assert summary["user_fields"] == {} and summary["wildcards_used"] == []  # nothing was recorded, nothing is invented
+    assert service.summary_title(summary) == "22.10.2026 10:00 · Итоги · ChatGPT"
+    assert service.describe_usage(summary) == ["Tokens: 120 in, 30 out"]
+
+
+# --- the note and the wildcard list on the command line -------------------------------------------------
+
+
+def test_summarize_list_wildcards_needs_no_job_and_no_stores(run_cli, model):
+    code, out, err = run_cli("--list-wildcards")
+
+    assert code == 0 and err == "" and model.prompts == []
+    for name, wildcard in WILDCARDS.items():
+        assert "{{" + name + "}}" in out
+    assert "\\{{" in out  # how to write a literal one
+    assert "{{transcript}}" in out and "{{note}}" in out and "{{language}}" in out
+
+
+def test_summarize_note_goes_into_the_prompt_and_is_stored(run_cli, job_dir, model, configured):
+    code, out, err = run_cli(job_dir, "--template", "Мой шаблон", "--note", "Фокус на сроках")
+
+    assert code == 0, err
+    assert "and a note (15 chars)" in out
+    assert model.prompts[0].startswith("Сделай мой разбор.\n\nФокус на сроках\n\n<transcript>")
+    (stored,) = service.list_summaries(job_dir)
+    assert stored["user_fields"] == {"note": "Фокус на сроках"}
+
+
+def test_summarize_warns_about_a_note_the_template_has_no_place_for(run_cli, job_dir, model, configured, warned):
+    code, _out, err = run_cli(job_dir, "--template", "Мой шаблон", "--note", "Фокус на сроках")
+
+    assert code == 0, err
+    assert len(warned) == 1 and "has no {{note}}" in warned[0]  # the CLI prints its logger; the text is not lost either
+
+
+def test_summarize_note_file_is_read_as_utf8_or_as_powershell_writes_it(run_cli, job_dir, model, configured, tmp_path):
+    for encoding in ("utf-8", "utf-8-sig", "utf-16"):  # utf-16 = `echo text > note.txt` in Windows PowerShell 5
+        note = tmp_path / f"note_{encoding}.txt"
+        note.write_bytes("Строка 1\nСтрока 2\n".encode(encoding))
+        code, _out, err = run_cli(job_dir, "--template", "Мой шаблон", "--note-file", note)
+        assert code == 0, err
+        assert "Строка 1\nСтрока 2\n\n<transcript>" in model.prompts[-1]
+    assert len(model.prompts) == 3
+
+
+def test_summarize_reports_a_missing_or_binary_note_file_and_sends_nothing(run_cli, job_dir, model, configured, tmp_path):
+    code, _out, err = run_cli(job_dir, "--note-file", tmp_path / "nope.txt")
+    assert code == 1 and "Note file not found" in err
+
+    binary = tmp_path / "note.bin"
+    binary.write_bytes(b"\xff\xfe\x00\xd8\x00")  # a BOM, then half a surrogate pair
+    code, _out, err = run_cli(job_dir, "--note-file", binary)
+    assert code == 1 and "not UTF-8" in err
+    assert model.prompts == []
+
+
+def test_summarize_takes_either_note_or_note_file_not_both(run_cli, job_dir, model, configured, tmp_path, capsys):
+    note = tmp_path / "note.txt"
+    note.write_text("x", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        run_cli(job_dir, "--note", "a", "--note-file", note)
+
+    assert excinfo.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+    assert model.prompts == []
+
+
+def test_summarize_reports_an_unknown_wildcard_of_a_template_and_sends_nothing(run_cli, job_dir, model, configured):
+    templates = TemplateStore.load()
+    templates.put(PromptTemplate(name="С ошибкой", prompt="Итоги для {{client}}."))
+    templates.save()
+
+    code, _out, err = run_cli(job_dir, "--template", "С ошибкой")
+
+    assert code == 1
+    assert "Unknown wildcard {{client}} in line 1 of the template 'С ошибкой'" in err and "{{transcript}}" in err
+    assert model.prompts == [] and not (job_dir / "summary").exists()

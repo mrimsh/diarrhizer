@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import sys
+import textwrap
 from pathlib import Path
 
 from diarrhizer.audio_formats import BUILTIN_FORMATS, store_path
@@ -38,19 +39,30 @@ def _configure_logging() -> None:
 # @purpose: Summarize a finished job's transcript with a prompt template and a model provider
 # @description: Takes the job folder (or its export/result.md), attaches export/result.md to the chosen
 #   template's prompt and asks the chosen provider; both default to the ones marked as default in
-#   summary_templates.json / summary_providers.json (shared with the GUI). The reply is stored in the job's
-#   summary/ folder; --print also writes it to stdout, --list shows the available templates and providers.
-# @inputs: args.job, args.template, args.provider, args.print, args.list
+#   summary_templates.json / summary_providers.json (shared with the GUI). The template's {{wildcards}}
+#   (SUMMARY:WILDCARDS) are filled in; --note / --note-file (mutually exclusive) give the text for {{note}}
+#   and --list-wildcards shows the wildcards (names and descriptions) and exits. The reply is stored in the
+#   job's summary/ folder; --print also writes it to stdout, --list shows the available templates and providers.
+# @inputs: args.job, args.template, args.provider, args.note, args.note_file, args.print, args.list, args.list_wildcards
 # @outputs: summary/<timestamp>_<template>.md (+ .json) in the job folder; its path on stdout
 # @sideEffects: Sends the transcript to the provider (subscription CLI or HTTPS API); writes files
-# @errors: Exits with code 1 on a missing job/result, unknown template or provider, or a provider failure
-# @see: SUMMARY:JOB, CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS, ADAPTER:LLM
+# @errors: Exits with code 1 on a missing job/result or note file, an unknown template, provider or wildcard, or a provider failure; code 2 for --note together with --note-file
+# @see: SUMMARY:JOB, SUMMARY:WILDCARDS, CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS, ADAPTER:LLM
 def _run_summarize(args: argparse.Namespace) -> int:
     # Imported here so `doctor` and `run` never load the summary modules.
     from diarrhizer.adapters.llm import LLMError
     from diarrhizer.summary import service
     from diarrhizer.summary.providers import ProviderStore
     from diarrhizer.summary.templates import TemplateStore
+    from diarrhizer.summary.wildcards import WILDCARDS
+
+    if args.list_wildcards:
+        print("Wildcards for prompt templates: write {{name}} where the value should stand;")
+        print("a literal {{ is written \\{{ (single braces are never touched).\n")
+        for wildcard in WILDCARDS.values():
+            print(f"  {{{{{wildcard.name}}}}}")
+            print(textwrap.fill(wildcard.description, width=100, initial_indent="      ", subsequent_indent="      "))
+        return 0
 
     try:
         templates = TemplateStore.load()
@@ -77,8 +89,10 @@ def _run_summarize(args: argparse.Namespace) -> int:
         job_dir = service.resolve_job_dir(args.job)
         template = templates.resolve(args.template)
         provider = providers.resolve(args.provider)
-        print(f"Summarizing {job_dir.name} with template '{template.name}' via '{provider.name}'...")
-        result = service.summarize_job(job_dir, template, provider)
+        note = service.read_note_file(args.note_file) if args.note_file else (args.note or "")
+        with_note = f" and a note ({len(note.strip())} chars)" if note.strip() else ""
+        print(f"Summarizing {job_dir.name} with template '{template.name}'{with_note} via '{provider.name}'...")
+        result = service.summarize_job(job_dir, template, provider, note=note)  # warnings: logged by the service
     except (FileNotFoundError, ValueError, LLMError, OSError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
@@ -331,6 +345,20 @@ def main() -> int:
         help="Provider name from summary_providers.json (default: its default provider); "
              "providers are added in the GUI (Саммаризация → Провайдеры)"
     )
+    note_group = summarize_parser.add_mutually_exclusive_group()
+    note_group.add_argument(
+        "--note",
+        default=None,
+        metavar="TEXT",
+        help="Your own text for this run: it goes where the template has {{note}}; a template without "
+             "{{note}} gets it before the transcript, with a warning (--list-wildcards describes {{note}})"
+    )
+    note_group.add_argument(
+        "--note-file",
+        default=None,
+        metavar="PATH",
+        help="Read the note from a text file (UTF-8, or UTF-16 with a BOM) instead of --note"
+    )
     summarize_parser.add_argument(
         "--print",
         action="store_true",
@@ -340,6 +368,11 @@ def main() -> int:
         "--list",
         action="store_true",
         help="List the available templates and providers and exit"
+    )
+    summarize_parser.add_argument(
+        "--list-wildcards",
+        action="store_true",
+        help="List the {{wildcards}} a prompt template may contain, with descriptions, and exit"
     )
 
     args = parser.parse_args()

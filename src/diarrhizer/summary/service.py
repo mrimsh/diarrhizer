@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from diarrhizer.adapters import llm, llm_accounts
+from diarrhizer.summary import wildcards
 from diarrhizer.summary.provider_info import Limits
 from diarrhizer.summary.providers import KIND_CODEX_CLI, Provider
 from diarrhizer.summary.templates import PromptTemplate
@@ -63,20 +64,43 @@ def read_transcript(job_dir: str | Path) -> str:
     return text
 
 
-def build_prompt(template_prompt: str, transcript: str) -> str:
-    """The template's prompt with the transcript attached after it.
+def read_note_file(path: str | Path) -> str:
+    """The text of a note file. UTF-8 (with or without a BOM) or UTF-16 with a BOM - what PowerShell's `>` writes.
 
-    The transcript is fenced in <transcript> tags so a model cannot mistake the
-    speakers' words for instructions, and the prompt can refer to it by name.
+    Raises:
+        FileNotFoundError: no such file
+        ValueError: the file is not text in one of those encodings
     """
-    return f"{template_prompt.strip()}\n\n<transcript>\n{transcript}\n</transcript>\n"
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Note file not found: {path}")
+    raw = path.read_bytes()
+    try:
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+            return raw.decode("utf-16")
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise ValueError(f"{path} is not UTF-8 (or UTF-16 with a BOM) text") from None
+
+
+def build_prompt(template_prompt: str, transcript: str, note: str = "", job_dir: str | Path | None = None) -> str:
+    """The request text for a template: its {{wildcards}} filled in, the transcript attached if it is not placed.
+
+    See wildcards.render_prompt (SUMMARY:WILDCARDS); this is its text only. Without wildcards and a note the
+    prompt is the template followed by the transcript fenced in <transcript> tags, as it always was.
+    """
+    return wildcards.render_prompt(template_prompt, wildcards.PromptContext(transcript, note, job_dir)).text
 
 
 # [SEMANTIC-BEGIN] SUMMARY:JOB
 # @purpose: Produce and store a summary of one job's transcript with a chosen template and provider
-# @description: Reads export/result.md as it is (speaker names included), attaches it to the template's
-#   prompt (build_prompt), asks the provider (ADAPTER:LLM) and writes the reply to
-#   summary/<YYYYmmdd_HHMMSS>_<template>.md plus a .json with the template name and prompt, provider
+# @description: Reads export/result.md as it is (speaker names included), builds the request from the template's
+#   prompt (SUMMARY:WILDCARDS: {{transcript}}, {{note}} and the job's facts are filled in where the template
+#   puts them; the transcript is appended when it does not; an optional note of the user for this run goes
+#   in the same way, with a warning - logged and returned - when the template has no {{note}}), asks the
+#   provider (ADAPTER:LLM) and writes the reply to
+#   summary/<YYYYmmdd_HHMMSS>_<template>.md plus a .json with the template name and prompt (as written, with
+#   its {{wildcards}}), the user's fields ({"note": ...}), the wildcards the template names, provider
 #   name/kind/model, timing, transcript size and whether the reply was cut off at the length limit - and what
 #   the request used, as far as the provider says: the model that answered, token counts, a cost (with a note
 #   on where the figure comes from: Claude Code's estimate, the provider's own, or the prices set on the
@@ -85,20 +109,28 @@ def build_prompt(template_prompt: str, transcript: str) -> str:
 #   are never overwritten (a name
 #   clash within the same second gets a _2, _3 suffix). The transcript's size is not checked: a model
 #   whose context is too small answers with an error that is passed on as is.
-#   list_summaries() reads the .json files back, newest first, for the GUI and the CLI.
-# @inputs: job_dir, PromptTemplate, Provider
-# @outputs: dict with path (the .md), meta_path, text and the stored metadata (incl. model, usage, cost_usd, cost_note, limits)
+#   list_summaries() reads the .json files back, newest first, for the GUI and the CLI; a summary stored
+#   before the user's fields and wildcards were recorded lists with them empty.
+# @inputs: job_dir, PromptTemplate, Provider, optional note
+# @outputs: dict with path (the .md), meta_path, text, warnings and the stored metadata (incl. user_fields, wildcards_used, model, usage, cost_usd, cost_note, limits)
 # @sideEffects: Sends the transcript to the provider (and, for Codex, asks its app-server for the limits); writes summary/*.md and summary/*.json atomically
-# @errors: FileNotFoundError/ValueError (no or empty result.md), adapters.llm.LLMError (provider failed)
-# @see: ADAPTER:LLM, ADAPTER:LLM_ACCOUNTS, CONFIG:PROVIDER_INFO, CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS, STAGE:EXPORT, CLI:SUMMARIZE, GUI:SUMMARY_DIALOG
-def summarize_job(job_dir: str | Path, template: PromptTemplate, provider: Provider) -> dict:
+# @errors: FileNotFoundError/ValueError (no or empty result.md; UnknownWildcardError for a template that names an unknown wildcard), adapters.llm.LLMError (provider failed)
+# @see: ADAPTER:LLM, ADAPTER:LLM_ACCOUNTS, CONFIG:PROVIDER_INFO, CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS, SUMMARY:WILDCARDS, STAGE:EXPORT, CLI:SUMMARIZE, GUI:SUMMARY_DIALOG
+def summarize_job(
+    job_dir: str | Path, template: PromptTemplate, provider: Provider, note: str | None = None
+) -> dict:
     job_dir = Path(job_dir)
     transcript = read_transcript(job_dir)
-    prompt = build_prompt(template.prompt, transcript)
+    rendered = wildcards.render_prompt(
+        template.prompt, wildcards.PromptContext(transcript, note or "", job_dir), template.name
+    )
+    prompt = rendered.text
     logger.info(
         "[summary] %s: template '%s', provider '%s' (%s), transcript %d chars",
         job_dir.name, template.name, provider.name, provider.kind, len(transcript),
     )
+    for warning in rendered.warnings:
+        logger.warning("[summary] Warning: %s", warning)
 
     started = time.monotonic()
     reply = llm.complete(provider, prompt)
@@ -110,6 +142,8 @@ def summarize_job(job_dir: str | Path, template: PromptTemplate, provider: Provi
         "created_at": now.isoformat(timespec="seconds"),
         "template": template.name,
         "prompt": template.prompt,
+        "user_fields": {"note": (note or "").strip()},
+        "wildcards_used": rendered.wildcards_used,
         "provider": {"name": provider.name, "kind": provider.kind, "model": provider.model},
         "source": TRANSCRIPT_PATH,
         "transcript_chars": len(transcript),
@@ -125,7 +159,13 @@ def summarize_job(job_dir: str | Path, template: PromptTemplate, provider: Provi
     write_text_atomic(md_path, reply.text + "\n")
     write_json_atomic(md_path.with_suffix(".json"), meta)
     logger.info("[summary] Saved %s (%.1fs)", md_path, duration)
-    return {**meta, "path": str(md_path), "meta_path": str(md_path.with_suffix(".json")), "text": reply.text}
+    return {
+        **meta,
+        "path": str(md_path),
+        "meta_path": str(md_path.with_suffix(".json")),
+        "text": reply.text,
+        "warnings": rendered.warnings,
+    }
 # [SEMANTIC-END] SUMMARY:JOB
 
 
@@ -169,6 +209,7 @@ def list_summaries(job_dir: str | Path) -> list[dict]:
     """The job's stored summaries, newest first.
 
     Each entry is the stored metadata plus "path" (the .md) and "meta_path".
+    A summary stored before "user_fields" and "wildcards_used" were recorded has them empty.
     Summaries whose .md or .json is missing or unreadable are left out.
     """
     folder = Path(job_dir) / SUMMARY_DIR
@@ -177,7 +218,9 @@ def list_summaries(job_dir: str | Path) -> list[dict]:
         meta = read_json(meta_path)
         md_path = meta_path.with_suffix(".md")
         if isinstance(meta, dict) and md_path.exists():
-            summaries.append({**meta, "path": str(md_path), "meta_path": str(meta_path)})
+            summaries.append({
+                "user_fields": {}, "wildcards_used": [], **meta, "path": str(md_path), "meta_path": str(meta_path),
+            })
     return summaries
 
 

@@ -370,13 +370,47 @@ A finished job's transcript (`export/result.md`, with the speaker names as saved
 a language model. A summary is an on-demand add-on, not a pipeline stage: you ask for it, as often as
 you like and with different templates, and it never touches the job's cached stages. Each one is stored
 in the job folder as `summary/<timestamp>_<template>.md` (the model's reply, verbatim) plus a `.json`
-next to it with what produced it (template, prompt, provider, the model that answered, duration, tokens,
-cost and limits as far as the provider reports them).
+next to it with what produced it (template, prompt, your note and the wildcards the template uses, provider,
+the model that answered, duration, tokens, cost and limits as far as the provider reports them).
 
-**Templates.** A template is a named prompt; the transcript is attached to it automatically (inside
-`<transcript>` tags) when the request is sent, so the prompt only says what to do. Three built-in
-templates (short summary, meeting minutes, call review) are read-only; yours live in
-`summary_templates.json`.
+**Templates.** A template is a named prompt. Three built-in templates (short summary, meeting minutes, call
+review) are read-only; yours live in `summary_templates.json`. The template decides where the transcript and
+other values stand in the request: write a **wildcard**, `{{name}}`, and its value is put there.
+
+| Wildcard | Becomes |
+|----------|---------|
+| `{{transcript}}` | the job's transcript (`export/result.md`, speaker names as saved) inside `<transcript>…</transcript>` |
+| `{{note}}` | your own text for this run (`--note` / `--note-file`); an empty string when none was given |
+| `{{job_name}}` | name of the input file without its extension |
+| `{{date}}` | date of the job, `YYYY-MM-DD`: when the recording was processed (the call's own date is not recorded) |
+| `{{duration}}` | length of the recording, `HH:MM:SS`, up to the end of the last phrase |
+| `{{speakers}}` | the speakers, comma-separated, under the names given in the job (as renamed in the GUI) |
+| `{{language}}` | language of the recording: the one set for the job, else the one Whisper detected |
+
+`python -m diarrhizer summarize --list-wildcards` prints the same list. An example template:
+
+```
+Протокол встречи «{{job_name}}» от {{date}} ({{duration}}), участники: {{speakers}}.
+Обрати внимание: {{note}}
+
+{{transcript}}
+```
+
+* **Only double braces are special.** `{ ... }` is left as it is, so a prompt may contain JSON; so is `{{`
+  followed by anything that is not a name (`{{"a": 1}}`). To write a literal `{{name}}` put a backslash in
+  front: `\{{name}}` gives `{{name}}` (the backslash disappears). A lone `}}` needs no escaping.
+* A wildcard may stand several times. Values are not searched for wildcards again: a transcript or a note
+  that contains `{{note}}` is sent as it is.
+* **No `{{transcript}}` in the template:** the transcript is added after the template's text, as it always was
+  — templates written before wildcards keep working unchanged.
+* **A note for a template without `{{note}}` is not lost:** it is added after the template's text — before the
+  appended transcript, or at the very end when the template places `{{transcript}}` itself — and a warning
+  says so (the CLI prints it, `summarize_job` returns it in `warnings`).
+* **A name that does not exist** (`{{cliet}}`) is an error that names it and lists the valid ones; nothing is
+  sent. **A fact the job does not have** (no recorded input file, no speaker names…) is an empty string, not
+  an error.
+* The summary's `.json` keeps `user_fields` (`{"note": "..."}`) and `wildcards_used` next to the template's
+  prompt as written; summaries stored before these existed are read as before.
 
 **Providers.** Where the request goes. Add as many as you like and mark one as the default:
 
@@ -430,12 +464,16 @@ model query runs in a separate process and can be cancelled.
 
 ```powershell
 python -m diarrhizer summarize --list
+python -m diarrhizer summarize --list-wildcards
 python -m diarrhizer summarize ".\out\meeting_20260101_120000" --template "Протокол встречи" --provider ChatGPT --print
+python -m diarrhizer summarize ".\out\meeting_20260101_120000" --note "Сфокусируйся на сроках и ответственных"
+python -m diarrhizer summarize ".\out\meeting_20260101_120000" --note-file ".\note.txt"
 ```
 
 `--template` / `--provider` default to the ones marked as default; the argument may also be the job's
-`export/result.md`. After the summary is saved the command prints what the request used (tokens, cost,
-limits) when the provider reported it.
+`export/result.md`. `--note` / `--note-file` (one of them; the file is UTF-8, or UTF-16 with a BOM as
+PowerShell's `>` writes it) give the text for `{{note}}`. After the summary is saved the command prints what
+the request used (tokens, cost, limits) when the provider reported it.
 
 Things to know:
 

@@ -437,11 +437,14 @@ python -m diarrhizer summarize --list
 | `job` | positional, optional | — | Job folder, or its `export/result.md`. Required unless `--list` |
 | `--template` | string | the default template | Template name (`--list` shows them) |
 | `--provider` | string | the default provider | Provider name from `summary_providers.json`; with none configured the error says where to add one |
+| `--note` | string | — | Your text for this run: it goes where the template has `{{note}}`; a template without it gets the note before the transcript, with a warning. Not together with `--note-file` |
+| `--note-file` | path | — | The same, read from a text file (UTF-8, or UTF-16 with a BOM) |
 | `--print` | flag | off | Also print the summary (it is always stored under the job's `summary/`) |
 | `--list` | flag | off | List templates and providers and exit |
+| `--list-wildcards` | flag | off | List the `{{wildcards}}` a template may use, with descriptions, and exit (no job needed) |
 
-Exit code 1 for a missing job/result, an unknown template or provider, or a provider failure.
-See [Summaries](#summaries) below.
+Exit code 1 for a missing job/result or note file, an unknown template, provider or wildcard, or a provider
+failure (2 for `--note` together with `--note-file`). See [Summaries](#summaries) below.
 
 ---
 
@@ -454,14 +457,38 @@ not in them.
 
 ```
 export/result.md ──► SUMMARY:JOB ──► ADAPTER:LLM ──► provider (CLI or HTTPS API)
-(read as it is,      build_prompt:                       │
- names included)     template.prompt + <transcript>…      ▼
-                                         summary/<stamp>_<template>.md + .json
+(read as it is,      render_prompt:                      │
+ names included)     {{wildcards}} filled in,            ▼
+                     transcript / note appended   summary/<stamp>_<template>.md + .json
+                     where the template has no place
 ```
 
 - **Templates** (`summary/templates.py`, `CONFIG:SUMMARY_TEMPLATES`): a named prompt. Built-ins are read-only;
   user templates and the default name are stored in `summary_templates.json` (same shape of store as
   `audio_formats.json`: missing file = empty, malformed = `ValueError` naming the file).
+- **Wildcards** (`summary/wildcards.py`, `CONFIG:SUMMARY_WILDCARDS` / `SUMMARY:WILDCARDS`): a template says where
+  a value goes by writing `{{name}}`. The one registry `WILDCARDS` (name → description → function of a
+  `PromptContext`) defines them; validation, the `summarize --list-wildcards` listing and the error that names
+  the valid ones all read it, so a new wildcard is one entry there (plus a line in the README table).
+
+  | Wildcard | Value | Source |
+  |----------|-------|--------|
+  | `{{transcript}}` | the transcript in `<transcript>…</transcript>` | `export/result.md` |
+  | `{{note}}` | the user's text for this run; `""` when none | `summarize_job(note=…)` |
+  | `{{job_name}}` | input file name without extension | `meta/run.json` `input_path`, else the folder name |
+  | `{{date}}` | `YYYY-MM-DD` of the job | folder name `<stem>_<YYYYMMDD>_<HHMMSS>`, else `meta/run.json` `start_time` |
+  | `{{duration}}` | `HH:MM:SS` up to the last phrase | `merged/segments.json` (largest `end`) |
+  | `{{speakers}}` | speakers in order of appearance, comma-separated | `merged/segments.json` + the names in `speakers.json` (an unnamed speaker keeps `Speaker_NN`) |
+  | `{{language}}` | language code | `meta/run.json` `pipeline_config.language`; for `auto` the detected one from `asr/transcript.json` |
+
+  Syntax: `{{name}}`, spaces inside the braces allowed; single braces and `{{` + a non-name (JSON) are never
+  touched; `\{{` is an escaped literal `{{`. One left-to-right pass, so a value is never scanned again. Job
+  facts come from what the job already records and are `""` when it is missing or malformed - never an error.
+  Rules: no `{{transcript}}` → the fenced transcript is appended (templates written before wildcards are
+  unchanged); a note for a template without `{{note}}` is added after the template's text (before the appended
+  transcript, else at the end) and reported as a warning (logged, and returned by `summarize_job`); an unknown
+  name raises `UnknownWildcardError` (a `ValueError`) naming it, its line and the valid ones, before anything is
+  sent. `{{date}}` is when the job was made: the pipeline does not record when the call took place.
 - **Providers** (`summary/providers.py`, `CONFIG:SUMMARY_PROVIDERS`): `codex-cli` and `claude-cli` (the vendors'
   CLIs, i.e. the user's ChatGPT / Claude subscription), `openai-api` (any OpenAI-compatible
   chat/completions endpoint) and `anthropic-api`. Stored in `summary_providers.json`, which never contains a
@@ -491,7 +518,9 @@ export/result.md ──► SUMMARY:JOB ──► ADAPTER:LLM ──► provider 
   --json`, and gets the model list from the stream-json control protocol's `initialize` request (answered
   without a model request). Claude has no limits query: `read_limits` sends a one-word request and returns the
   status that came with the reply. API providers: `GET <endpoint>/models`.
-- **Service** (`summary/service.py`, `SUMMARY:JOB`): reads `export/result.md`, builds the prompt, asks the
+- **Service** (`summary/service.py`, `SUMMARY:JOB`): reads `export/result.md`, builds the prompt
+  (`summarize_job(…, note=None)`; the template's prompt is stored as written, with the user's fields
+  `{"note": …}` and the `wildcards_used`; entries of older summaries list those two empty), asks the
   provider, and stores the reply atomically only after it arrived (a failed or cancelled request leaves
   nothing behind). Earlier summaries are never overwritten. The summary's `.json` also records the model that
   answered, the usage, the cost (with a note on where the figure comes from - an estimate is not a bill) and the
