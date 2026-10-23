@@ -120,7 +120,8 @@ def preview_prompt(
 #   name/kind/model, timing, transcript size and whether the reply was cut off at the length limit - and what
 #   the request used, as far as the provider says: the model that answered, token counts, a cost (with a note
 #   on where the figure comes from: Claude Code's estimate, the provider's own, or the prices set on the
-#   Provider) and the plan's limits (from the reply for Claude; read from Codex right after the request, a
+#   Provider; the usage carries the prompt cache's parts of the input where the provider says them, and
+#   describe_usage() shows those that are known) and the plan's limits (from the reply for Claude; read from Codex right after the request, a
 #   failure to read them is only logged). Nothing is written when the provider fails, and earlier summaries
 #   are never overwritten (a name
 #   clash within the same second gets a _2, _3 suffix). The transcript's size is not checked: a model
@@ -282,7 +283,13 @@ def describe_usage(meta: dict) -> list[str]:
     lines = []
     usage = meta.get("usage")
     if isinstance(usage, dict) and (usage.get("input_tokens") or usage.get("output_tokens")):
-        cached = f" ({usage['cached_tokens']:,} cached)" if usage.get("cached_tokens") else ""
+        # The cache's parts of the input, when the provider told them (None = not reported, nothing is said).
+        cache_parts = [
+            f"{usage[key]:,} {label}"
+            for key, label in (("cached_tokens", "cached"), ("cache_write_tokens", "written to cache"))
+            if usage.get(key)
+        ]
+        cached = f" ({', '.join(cache_parts)})" if cache_parts else ""
         lines.append(f"Tokens: {usage.get('input_tokens', 0):,} in{cached}, {usage.get('output_tokens', 0):,} out")
     cost = meta.get("cost_usd")
     if isinstance(cost, (int, float)):

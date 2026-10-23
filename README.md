@@ -439,6 +439,14 @@ other values stand in the request: write a **wildcard**, `{{name}}`, and its val
   one-word request and says so. API providers: tokens, and a cost — the provider's own if its reply has one
   (OpenRouter), else computed from prices you may set per provider (USD per million tokens). A figure the
   provider did not report is not shown, never guessed.
+* **The prompt cache.** Where the provider says how much of the input its cache served or wrote (Anthropic, Claude
+  Code, OpenAI and compatible servers, Codex report the first; Anthropic and Claude Code also the second), the token
+  line shows it: `Tokens: 2,000 in (1,500 cached, 300 written to cache), 50 out`. A provider that says nothing about
+  it leaves it out. For an API provider the cost can use cache prices: `price_cache_read` and `price_cache_write`
+  (USD per million tokens, next to `price_input`, which they need). Cache tokens that have a price are charged at it,
+  every other input token at `price_input`; without them the cost is computed as before. Providers files written
+  earlier load unchanged. (The GUI's provider form has no fields for the two prices yet: set them in
+  `summary_providers.json`, and note that saving that provider in the form drops them.)
 * A subscription tool is started in an empty temporary folder, without your personal tool setup (hooks,
   plugins, MCP servers; for Codex also its `config.toml`, whose model or reasoning effort may not suit `exec`)
   and without `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `CODEX_API_KEY` in its environment, so a key kept for

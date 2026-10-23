@@ -39,6 +39,7 @@ DEFAULT_COMMANDS = {KIND_CODEX_CLI: "codex", KIND_CLAUDE_CLI: "claude"}
 DEFAULT_ANTHROPIC_ENDPOINT = "https://api.anthropic.com"
 DEFAULT_TIMEOUT_SECONDS = 600
 
+_PRICE_FIELDS = ("price_input", "price_output", "price_cache_read", "price_cache_write")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MAX_NAME_LENGTH = 60
 
@@ -56,8 +57,9 @@ def default_key_env(name: str) -> str:
 #   to api.anthropic.com); the key is never stored here - api_key_env names the environment variable it is
 #   read from, which keeps the JSON file free of secrets (an OpenAI-compatible local server may need no key,
 #   so an empty api_key_env sends no Authorization header). An API provider may carry prices per million
-#   tokens (price_input / price_output) so a request's cost can be estimated; a subscription provider reports
-#   its own figures. The model of a subscription provider is optional (empty = the tool's default); which models
+#   tokens (price_input / price_output, and optionally price_cache_read / price_cache_write for the prompt
+#   cache) so a request's cost can be estimated; a subscription provider reports its own figures. A file
+#   written before the cache prices existed loads unchanged. The model of a subscription provider is optional (empty = the tool's default); which models
 #   exist is the provider's to say (ADAPTER:LLM_ACCOUNTS). ProviderStore keeps the providers and the default
 #   name in a JSON file; there are no built-ins, an empty store is a normal state the callers explain. A CLI
 #   provider's command is a name looked up on PATH or the full path of the program (quotes around it are dropped).
@@ -83,6 +85,9 @@ class Provider:
         extra_args: CLI kinds: arguments appended to the command line
         price_input: API kinds: USD per million input tokens, to estimate a request's cost (None = no estimate)
         price_output: API kinds: USD per million output tokens (needs price_input)
+        price_cache_read: API kinds: USD per million input tokens served from the prompt cache (needs
+            price_input; None = they are charged at price_input, as is every cache token without its own price)
+        price_cache_write: API kinds: USD per million input tokens written to the prompt cache (needs price_input)
     """
 
     name: str
@@ -97,6 +102,8 @@ class Provider:
     extra_args: tuple[str, ...] = ()
     price_input: float | None = None
     price_output: float | None = None
+    price_cache_read: float | None = None
+    price_cache_write: float | None = None
 
     def __post_init__(self) -> None:
         # JSON hands back lists; a tuple keeps the frozen dataclass hashable.
@@ -135,14 +142,14 @@ class Provider:
             raise ValueError(f"{prefix}: temperature must be a number from 0 to 2, got {self.temperature!r}")
         if self.max_tokens is not None and (not _is_int(self.max_tokens) or self.max_tokens < 1):
             raise ValueError(f"{prefix}: max_tokens must be a positive integer, got {self.max_tokens!r}")
-        for attr in ("price_input", "price_output"):
+        for attr in _PRICE_FIELDS:
             price = getattr(self, attr)
             if price is not None and (
                 isinstance(price, bool) or not isinstance(price, (int, float)) or price < 0
             ):
                 raise ValueError(f"{prefix}: {attr} must be a number of USD per million tokens, got {price!r}")
-        if self.price_output is not None and self.price_input is None:
-            raise ValueError(f"{prefix}: price_output needs price_input as well")
+            if attr != "price_input" and price is not None and self.price_input is None:
+                raise ValueError(f"{prefix}: {attr} needs price_input as well")
 
         if self.kind in CLI_KINDS:
             return
@@ -159,11 +166,30 @@ class Provider:
     def is_cli(self) -> bool:
         return self.kind in CLI_KINDS
 
-    def estimate_cost(self, input_tokens: int, output_tokens: int) -> float | None:
-        """USD for a request of this size at the prices set for the provider, None without prices."""
+    def estimate_cost(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
+    ) -> float | None:
+        """USD for a request of this size at the prices set for the provider, None without prices.
+
+        input_tokens is all of the input, the cache parts included. Cache tokens that have a price of their
+        own (price_cache_read / price_cache_write) are charged at it; every other input token - and every
+        cache token whose count the provider did not report - at price_input, as before cache prices existed.
+        """
         if self.price_input is None:
             return None
-        return (input_tokens * self.price_input + output_tokens * (self.price_output or 0.0)) / 1_000_000
+        read = (cache_read_tokens or 0) if self.price_cache_read is not None else 0
+        write = (cache_write_tokens or 0) if self.price_cache_write is not None else 0
+        plain = max(input_tokens - read - write, 0)
+        return (
+            plain * self.price_input
+            + read * (self.price_cache_read or 0.0)
+            + write * (self.price_cache_write or 0.0)
+            + output_tokens * (self.price_output or 0.0)
+        ) / 1_000_000
 
     @property
     def executable(self) -> str:
@@ -187,6 +213,8 @@ class Provider:
                 "max_tokens": self.max_tokens,
                 "price_input": self.price_input,
                 "price_output": self.price_output,
+                "price_cache_read": self.price_cache_read,
+                "price_cache_write": self.price_cache_write,
             }
         data.update({key: value for key, value in optional.items() if value not in ("", None, [])})
         data["timeout_seconds"] = self.timeout_seconds

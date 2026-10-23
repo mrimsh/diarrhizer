@@ -22,9 +22,11 @@ def _pick(cls, data: Mapping[str, Any]) -> dict:
 # @purpose: The shapes of what a provider tells us: who is signed in, which models, what a request used, what is left
 # @description: Account (signed-in state, e-mail, plan), ModelOption (an id to pass to the provider, a display
 #   name, the provider's own description - which for Claude includes its price), Usage (token counts of one
-#   request), Limits (usage windows of the plan with percent used and reset time, plus credits). Nothing here
-#   is computed or defaulted on the provider's behalf: a cost, a percentage or a plan name is present only
-#   when the provider reported it (or, for cost, when the user set prices - see Provider.price_input).
+#   request: input and output, and the prompt-cache parts of the input - read, written, neither - each None
+#   when the provider does not say), Limits (usage windows of the plan with percent used and reset time, plus
+#   credits). Nothing here is computed or defaulted on the provider's behalf: a cost, a percentage or a plan
+#   name is present only when the provider reported it (or, for cost, when the user set prices - see
+#   Provider.price_input).
 # @inputs: values parsed by the adapters
 # @outputs: dataclasses with to_dict()/from_dict()
 # @sideEffects: None
@@ -72,19 +74,27 @@ class ModelOption:
 
 @dataclass(frozen=True)
 class Usage:
-    """Token counts of one request."""
+    """Token counts of one request.
+
+    input_tokens is everything the model read: what the provider's prompt cache served, what the request wrote
+    to it and what was neither. Those three are separate fields where the provider says them; None means
+    "not reported", which is not the same as 0. to_dict() leaves the None ones out, so a record that never had
+    them looks as it always did, and from_dict() reads such a record back.
+    """
 
     input_tokens: int = 0
     output_tokens: int = 0
-    cached_tokens: int = 0  # input tokens served from the provider's prompt cache
+    cached_tokens: Optional[int] = None  # input tokens read from the provider's prompt cache
     reasoning_tokens: int = 0
+    cache_write_tokens: Optional[int] = None  # input tokens written to the cache by this request
+    uncached_input_tokens: Optional[int] = None  # input tokens that were neither read from nor written to it
 
     @property
     def total(self) -> int:
         return self.input_tokens + self.output_tokens
 
     def to_dict(self) -> dict:
-        return dataclasses.asdict(self)
+        return {key: value for key, value in dataclasses.asdict(self).items() if value is not None}
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "Usage":

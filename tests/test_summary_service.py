@@ -175,6 +175,33 @@ def test_describe_usage_says_only_what_was_reported():
     ]
 
 
+def test_describe_usage_names_the_cache_parts_of_the_input_that_are_known():
+    def tokens(**usage):
+        return service.describe_usage({"usage": {"input_tokens": 2000, "output_tokens": 50, **usage}})
+
+    assert tokens(cached_tokens=1500, cache_write_tokens=300, uncached_input_tokens=200) == [
+        "Tokens: 2,000 in (1,500 cached, 300 written to cache), 50 out"
+    ]
+    assert tokens(cache_write_tokens=300) == ["Tokens: 2,000 in (300 written to cache), 50 out"]  # the first request
+    assert tokens(cached_tokens=1500) == ["Tokens: 2,000 in (1,500 cached), 50 out"]
+    assert tokens() == ["Tokens: 2,000 in, 50 out"]  # the provider said nothing about a cache: nothing is said
+    assert tokens(cached_tokens=0, cache_write_tokens=0) == ["Tokens: 2,000 in, 50 out"]  # said, and none was used
+
+
+def test_the_cache_parts_of_the_usage_are_stored_with_the_summary_and_old_records_read_as_before(job_dir, model):
+    model.reply = LLMReply("Итоги", usage=Usage(2000, 50, cached_tokens=1500, cache_write_tokens=300,
+                                                uncached_input_tokens=200))
+
+    result = service.summarize_job(job_dir, TEMPLATE, PROVIDER)
+
+    stored = json.loads(Path(result["meta_path"]).read_text(encoding="utf-8"))["usage"]
+    assert stored == {"input_tokens": 2000, "output_tokens": 50, "cached_tokens": 1500, "reasoning_tokens": 0,
+                      "cache_write_tokens": 300, "uncached_input_tokens": 200}
+    assert service.describe_usage(result)[0] == "Tokens: 2,000 in (1,500 cached, 300 written to cache), 50 out"
+    (listed,) = service.list_summaries(job_dir)
+    assert Usage.from_dict(listed["usage"]) == Usage(2000, 50, 1500, 0, 300, 200)
+
+
 def test_format_window_names_the_usual_lengths():
     assert [service.format_window(m) for m in (300, 10080, 45, 90, None, 0)] == ["5 h", "7 d", "45 min", "90 min", "", ""]
 

@@ -7,6 +7,9 @@ tools are asked for machine-readable output (`codex --json`, Claude's
 `stream-json`) so a reply comes back with what it used. API providers are
 plain HTTPS JSON calls made with urllib - no SDK dependency.
 
+A request is a conversation (complete_chat: messages with roles, content as text or
+blocks, a block may mark a cache breakpoint); complete() is a single user message.
+
 Signing in, the model list and the plan's limits are in llm_accounts.py.
 """
 
@@ -23,6 +26,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -106,9 +110,113 @@ class LLMReply:
     limits: Optional[Limits] = None
 
 
+ROLES = ("system", "user", "assistant")
+_ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant"}
+
+
+@dataclass(frozen=True)
+class Block:
+    """A piece of a message's text.
+
+    `cache` marks a cache breakpoint: the request up to the end of this block is worth caching. The Anthropic
+    API is told so (cache_control); an OpenAI-compatible API caches a repeated prefix by itself, so nothing is
+    sent there; a CLI provider gets plain text.
+    """
+
+    text: str
+    cache: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.text, str) or not self.text:
+            raise ValueError(f"a message block needs non-empty text, got {self.text!r}")
+        if not isinstance(self.cache, bool):
+            raise ValueError(f"a block's cache flag must be true or false, got {self.cache!r}")
+
+    @classmethod
+    def from_value(cls, value) -> "Block":
+        """A Block, a plain string, or a dict {"text": ..., "cache": true|false}."""
+        if isinstance(value, Block):
+            return value
+        if isinstance(value, str):
+            return cls(value)
+        if isinstance(value, Mapping) and set(value) <= {"text", "cache"}:
+            return cls(value.get("text"), value.get("cache", False))
+        raise ValueError(f"a message block is a string or {{'text': ..., 'cache': ...}}, got {value!r}")
+
+
+@dataclass(frozen=True)
+class Message:
+    """One message of a conversation: a role and its content, a string or a list of Blocks."""
+
+    role: str
+    content: "str | tuple[Block, ...]"
+
+    def __post_init__(self) -> None:
+        if self.role not in ROLES:
+            raise ValueError(f"a message's role must be one of {', '.join(ROLES)}, got {self.role!r}")
+        if isinstance(self.content, str):
+            if not self.content:
+                raise ValueError(f"a {self.role} message needs content")
+            return
+        if isinstance(self.content, Mapping) or not isinstance(self.content, Sequence):
+            raise ValueError(f"a message's content is a string or a list of blocks, got {self.content!r}")
+        blocks = tuple(Block.from_value(block) for block in self.content)
+        if not blocks:
+            raise ValueError(f"a {self.role} message needs content")
+        object.__setattr__(self, "content", blocks)
+
+    @property
+    def blocks(self) -> "tuple[Block, ...]":
+        return (Block(self.content),) if isinstance(self.content, str) else self.content
+
+    @property
+    def text(self) -> str:
+        """The message as one string: its blocks run together."""
+        return "".join(block.text for block in self.blocks)
+
+    @classmethod
+    def from_value(cls, value) -> "Message":
+        """A Message, or a dict {"role": ..., "content": ...} (what crosses a process queue or a JSON file)."""
+        if isinstance(value, Message):
+            return value
+        if isinstance(value, Mapping) and set(value) == {"role", "content"}:
+            return cls(value["role"], value["content"])
+        raise ValueError(f"a message is a Message or {{'role': ..., 'content': ...}}, got {value!r}")
+
+
+def coerce_messages(messages: "Sequence[Message | Mapping]") -> list[Message]:
+    """The messages as Message objects; ValueError says what is wrong with them."""
+    if isinstance(messages, (str, bytes, Mapping)) or not isinstance(messages, Sequence):
+        raise ValueError(f"messages must be a list of messages, got {type(messages).__name__}")
+    chat = [Message.from_value(message) for message in messages]
+    if not any(message.role != "system" for message in chat):
+        raise ValueError("messages need at least one user or assistant message")
+    return chat
+
+
+def messages_as_text(messages: "Sequence[Message]") -> str:
+    """A conversation as the one text request a CLI takes - all of it, every time.
+
+    A lone user message is sent as it is (what `complete` always sent). Anything longer is written out with
+    the role of each message ahead of it.
+    """
+    if len(messages) == 1 and messages[0].role == "user":
+        return messages[0].text
+    return "\n\n".join(f"{_ROLE_LABELS[message.role]}:\n{message.text}" for message in messages)
+
+
 # [SEMANTIC-BEGIN] ADAPTER:LLM
-# @purpose: Send one prompt to a configured provider and return the model's reply with what it used
-# @description: codex-cli runs `codex exec --json --sandbox read-only` and claude-cli runs `claude -p --tools ""
+# @purpose: Send a conversation (or one prompt) to a configured provider and return the model's reply with what it used
+# @description: complete_chat() takes messages - roles system/user/assistant, content a string or a list of
+#   Blocks, a Block may carry a cache flag (a cache breakpoint) - and complete(provider, prompt) is its thin
+#   wrapper: one user message. anthropic-api gets the messages and a top-level `system` (a string, or a list of
+#   text blocks when a system message has blocks), a content list for every message that was given blocks,
+#   and cache_control {"type": "ephemeral"} on each block flagged cache; openai-compatible APIs get plain
+#   messages (a message's blocks run together) and nothing about caching, which they do by repeated prefix.
+#   A CLI provider gets the whole conversation as one text request every time (a lone user message verbatim,
+#   a longer conversation with a "System:/User:/Assistant:" label ahead of each message); keeping a CLI session
+#   between requests is not done here.
+#   codex-cli runs `codex exec --json --sandbox read-only` and claude-cli runs `claude -p --tools ""
 #   --output-format stream-json`, both with the prompt on stdin, in an empty temporary working directory (so
 #   neither tool wanders into or loads the context of the repo), without the API-key variables that would
 #   bypass the subscription and with the ISOLATION_FLAGS that skip the user's own tool setup (retried without
@@ -118,28 +226,37 @@ class LLMReply:
 #   the whole process tree - the Windows .cmd shims start the real tool as a grandchild. openai-api and
 #   anthropic-api are single non-streaming HTTPS POSTs: the endpoint may be a base URL or the full method URL,
 #   the key is read from the provider's api_key_env at call time and never appears in an error message; usage
-#   comes from the reply and cost from the provider (OpenRouter) or from the prices set on the Provider.
+#   comes from the reply - input and output tokens and, where the provider says them, the cache parts of the
+#   input (read from the cache, written to it, neither; None when not reported, never a made-up 0) - and cost
+#   from the provider (OpenRouter) or from the prices set on the Provider (cache tokens at their own prices
+#   when those are set, else at the input price).
 #   Errors are always LLMError with an actionable text; a tool that cannot be started says which of the three it is
 #   (a bare name that is not on PATH, a path with no file behind it, a folder) and names the section of
 #   docs/troubleshooting.md that explains how to find the executable and tell the app where it is.
-# @inputs: provider (CONFIG:SUMMARY_PROVIDERS), prompt text (already containing the transcript)
+# @inputs: provider (CONFIG:SUMMARY_PROVIDERS), messages (Message / Block, or the same as dicts) or a prompt text (already containing the transcript)
 # @outputs: LLMReply(text, truncated, model, usage, cost_usd, cost_note, limits)
-# @sideEffects: Starts the vendor CLI (which talks to its service) or sends the prompt over the network;
+# @sideEffects: Starts the vendor CLI (which talks to its service) or sends the messages over the network;
 #   creates and removes a temporary directory
-# @errors: LLMError (tool missing, not signed in, HTTP/network failure, timeout, empty or malformed reply)
+# @errors: LLMError (tool missing, not signed in, HTTP/network failure, timeout, empty or malformed reply); ValueError for malformed messages
 # @see: CONFIG:SUMMARY_PROVIDERS, CONFIG:PROVIDER_INFO, ADAPTER:LLM_ACCOUNTS, SUMMARY:JOB, GUI:CHILD_TASKS
-def complete(provider: Provider, prompt: str) -> LLMReply:
+def complete_chat(provider: Provider, messages: "Sequence[Message | Mapping]") -> LLMReply:
+    chat = coerce_messages(messages)
     if provider.is_cli:
-        reply = _complete_cli(provider, prompt)
+        reply = _complete_cli(provider, messages_as_text(chat))
     elif provider.kind == KIND_OPENAI_API:
-        reply = _complete_openai(provider, prompt)
+        reply = _complete_openai(provider, chat)
     elif provider.kind == KIND_ANTHROPIC_API:
-        reply = _complete_anthropic(provider, prompt)
+        reply = _complete_anthropic(provider, chat)
     else:  # Provider validates its kind; this guards a kind added without a backend.
         raise LLMError(f"Provider '{provider.name}': unsupported kind {provider.kind!r}")
     if not reply.text.strip():
         raise LLMError(f"Provider '{provider.name}' returned an empty reply")
     return dataclasses.replace(reply, text=reply.text.strip())
+
+
+def complete(provider: Provider, prompt: str) -> LLMReply:
+    """One prompt, one reply: a conversation of one user message."""
+    return complete_chat(provider, [Message("user", prompt)])
 # [SEMANTIC-END] ADAPTER:LLM
 
 
@@ -211,14 +328,7 @@ def _claude_reply(stdout: str) -> LLMReply:
     if model_usage:
         # The model that did the work, when subagents or helpers used others as well.
         model = max(model_usage, key=lambda m: _count(model_usage[m], "inputTokens") + _count(model_usage[m], "outputTokens"))
-    usage_data = result.get("usage") or {}
-    cache_read = _count(usage_data, "cache_read_input_tokens")
-    usage = Usage(
-        input_tokens=_count(usage_data, "input_tokens") + cache_read + _count(usage_data, "cache_creation_input_tokens"),
-        output_tokens=_count(usage_data, "output_tokens"),
-        cached_tokens=cache_read,
-        reasoning_tokens=_count(usage_data.get("output_tokens_details") or {}, "thinking_tokens"),
-    )
+    usage = _anthropic_usage(result.get("usage") or {})
     cost = result.get("total_cost_usd")
     limit_events = [e.get("rate_limit_info") for e in events if e.get("type") == "rate_limit_event"]
     return LLMReply(
@@ -268,11 +378,9 @@ def _codex_reply(provider: Provider, stdout: str, reply_file: Path) -> LLMReply:
     usage = None
     if completed:
         data = completed[-1]
-        usage = Usage(
-            input_tokens=_count(data, "input_tokens"),
-            output_tokens=_count(data, "output_tokens"),
-            cached_tokens=_count(data, "cached_input_tokens"),
-            reasoning_tokens=_count(data, "reasoning_output_tokens"),
+        usage = _inclusive_usage(  # Codex counts the cached tokens inside input_tokens, as OpenAI does
+            _count(data, "input_tokens"), _count(data, "output_tokens"), _opt_count(data, "cached_input_tokens"),
+            None, _count(data, "reasoning_output_tokens"),
         )
     return LLMReply(text=text, model=provider.model, usage=usage if usage and usage.total else None)
 
@@ -280,6 +388,51 @@ def _codex_reply(provider: Provider, stdout: str, reply_file: Path) -> LLMReply:
 def _count(data: dict, key: str) -> int:
     value = data.get(key)
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+
+def _opt_count(data: dict, key: str) -> Optional[int]:
+    """The number under `key`, None when the provider does not report it (which is not the same as 0)."""
+    value = data.get(key)
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _anthropic_usage(raw: dict) -> Usage:
+    """Usage from Anthropic's `usage` (the API's, and Claude Code's result event, which has the same keys).
+
+    Anthropic reports the input in three separate counters: what was neither read from nor written to the
+    cache (input_tokens), what the cache served and what the request wrote to it. All three are input.
+    """
+    uncached = _opt_count(raw, "input_tokens")
+    read = _opt_count(raw, "cache_read_input_tokens")
+    write = _opt_count(raw, "cache_creation_input_tokens")
+    details = raw.get("output_tokens_details")
+    return Usage(
+        input_tokens=(uncached or 0) + (read or 0) + (write or 0),
+        output_tokens=_count(raw, "output_tokens"),
+        cached_tokens=read,
+        reasoning_tokens=_count(details, "thinking_tokens") if isinstance(details, dict) else 0,
+        cache_write_tokens=write,
+        uncached_input_tokens=uncached,
+    )
+
+
+def _inclusive_usage(
+    total_input: int, output: int, read: Optional[int], write: Optional[int], reasoning: int
+) -> Usage:
+    """Usage in the OpenAI shape, where the input total already contains the cache's parts.
+
+    The uncached part is what is left of the input once the cache's parts are taken out - known only when the
+    provider reports how much of it the cache served.
+    """
+    uncached = max(total_input - read - (write or 0), 0) if read is not None else None
+    return Usage(
+        input_tokens=total_input,
+        output_tokens=output,
+        cached_tokens=read,
+        reasoning_tokens=reasoning,
+        cache_write_tokens=write,
+        uncached_input_tokens=uncached,
+    )
 
 
 def find_executable(provider: Provider) -> str:
@@ -413,8 +566,12 @@ def _cli_failure(provider: Provider, code: int, stdout: str, stderr: str) -> LLM
 # --- HTTP APIs -------------------------------------------------------------------
 
 
-def _complete_openai(provider: Provider, prompt: str) -> LLMReply:
-    body: dict = {"model": provider.model, "messages": [{"role": "user", "content": prompt}]}
+def _complete_openai(provider: Provider, messages: list[Message]) -> LLMReply:
+    # Plain messages. A cache breakpoint is not sent: these servers cache a repeated prefix by themselves.
+    body: dict = {
+        "model": provider.model,
+        "messages": [{"role": message.role, "content": message.text} for message in messages],
+    }
     if provider.temperature is not None:
         body["temperature"] = provider.temperature
     if provider.max_tokens is not None:
@@ -429,13 +586,13 @@ def _complete_openai(provider: Provider, prompt: str) -> LLMReply:
     except (KeyError, IndexError, TypeError, AttributeError):
         raise LLMError(f"Provider '{provider.name}': unexpected reply shape: {_short(data)}") from None
     raw = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-    cached = raw.get("prompt_tokens_details") if isinstance(raw.get("prompt_tokens_details"), dict) else {}
+    prompt_details = raw.get("prompt_tokens_details") if isinstance(raw.get("prompt_tokens_details"), dict) else {}
     reasoning = raw.get("completion_tokens_details") if isinstance(raw.get("completion_tokens_details"), dict) else {}
-    usage = Usage(
-        input_tokens=_count(raw, "prompt_tokens"),
-        output_tokens=_count(raw, "completion_tokens"),
-        cached_tokens=_count(cached, "cached_tokens"),
-        reasoning_tokens=_count(reasoning, "reasoning_tokens"),
+    usage = _inclusive_usage(
+        _count(raw, "prompt_tokens"), _count(raw, "completion_tokens"),
+        _opt_count(prompt_details, "cached_tokens"),
+        _opt_count(prompt_details, "cache_write_tokens"),  # OpenAI has none; some gateways report it
+        _count(reasoning, "reasoning_tokens"),
     )
     cost, note = _api_cost(provider, usage, raw.get("cost"))
     return LLMReply(
@@ -444,14 +601,40 @@ def _complete_openai(provider: Provider, prompt: str) -> LLMReply:
     )
 
 
-def _complete_anthropic(provider: Provider, prompt: str) -> LLMReply:
+def _anthropic_body(provider: Provider, messages: list[Message]) -> dict:
+    """The Messages API request: system messages go to the top-level `system`, the rest to `messages`.
+
+    Content given as a string is sent as a string; content given as blocks as a list of text blocks, each
+    flagged cache getting cache_control {"type": "ephemeral"} (the cache breakpoint).
+    """
+
+    def blocks(message: Message) -> list[dict]:
+        return [
+            {"type": "text", "text": block.text, **({"cache_control": {"type": "ephemeral"}} if block.cache else {})}
+            for block in message.blocks
+        ]
+
+    system = [message for message in messages if message.role == "system"]
     body: dict = {
         "model": provider.model,
         "max_tokens": provider.max_tokens or ANTHROPIC_DEFAULT_MAX_TOKENS,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [
+            {"role": message.role, "content": message.content if isinstance(message.content, str) else blocks(message)}
+            for message in messages if message.role != "system"
+        ],
     }
+    if system:
+        if all(isinstance(message.content, str) for message in system):
+            body["system"] = "\n\n".join(message.content for message in system)
+        else:
+            body["system"] = [block for message in system for block in blocks(message)]
     if provider.temperature is not None:
         body["temperature"] = provider.temperature
+    return body
+
+
+def _complete_anthropic(provider: Provider, messages: list[Message]) -> LLMReply:
+    body = _anthropic_body(provider, messages)
     data = request_json(provider, method_url(provider.endpoint, "v1/messages"), _anthropic_headers(provider), body)
     try:
         text = "".join(
@@ -462,13 +645,7 @@ def _complete_anthropic(provider: Provider, prompt: str) -> LLMReply:
         truncated = data.get("stop_reason") == "max_tokens"
     except (KeyError, TypeError, AttributeError):
         raise LLMError(f"Provider '{provider.name}': unexpected reply shape: {_short(data)}") from None
-    raw = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-    cache_read = _count(raw, "cache_read_input_tokens")
-    usage = Usage(
-        input_tokens=_count(raw, "input_tokens") + cache_read + _count(raw, "cache_creation_input_tokens"),
-        output_tokens=_count(raw, "output_tokens"),
-        cached_tokens=cache_read,
-    )
+    usage = _anthropic_usage(data.get("usage") if isinstance(data.get("usage"), dict) else {})
     cost, note = _api_cost(provider, usage, None)
     return LLMReply(
         text=text, truncated=truncated, model=str(data.get("model") or provider.model),
@@ -480,7 +657,9 @@ def _api_cost(provider: Provider, usage: Usage, reported) -> tuple[Optional[floa
     """(USD, where it comes from): the provider's own figure if the reply has one, else the user's prices."""
     if isinstance(reported, (int, float)) and not isinstance(reported, bool):
         return float(reported), PROVIDER_COST_NOTE
-    estimate = provider.estimate_cost(usage.input_tokens, usage.output_tokens)
+    estimate = provider.estimate_cost(
+        usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens
+    )
     return (estimate, PRICE_COST_NOTE) if estimate is not None else (None, "")
 
 

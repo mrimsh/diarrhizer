@@ -494,19 +494,35 @@ export/result.md ──► SUMMARY:JOB ──► ADAPTER:LLM ──► provider 
   CLIs, i.e. the user's ChatGPT / Claude subscription), `openai-api` (any OpenAI-compatible
   chat/completions endpoint) and `anthropic-api`. Stored in `summary_providers.json`, which never contains a
   secret: an API provider names an environment variable (`api_key_env`); the GUI keeps the key in the
-  repo-root `.env`, like the HF token. An API provider may carry prices per million tokens (cost estimate).
+  repo-root `.env`, like the HF token. An API provider may carry prices per million tokens (cost estimate):
+  `price_input`, `price_output` and, for the prompt cache, `price_cache_read` / `price_cache_write` (they need
+  `price_input`; a cache token without a price of its own is charged at `price_input`, and cache counts the
+  provider did not report change nothing - the cost is then what it was before these prices existed).
 - **What a provider reports** (`summary/provider_info.py`, `CONFIG:PROVIDER_INFO`): `Account`, `ModelOption`,
   `Usage`, `Limits`/`LimitWindow` - plain dataclasses with `to_dict()`/`from_dict()` (they cross the GUI's
   process queue and are stored in a summary's `.json`). A field the provider did not report stays empty; nothing
-  is defaulted on its behalf.
-- **Request adapter** (`adapters/llm.py`, `ADAPTER:LLM`): sends one prompt and returns an `LLMReply` with the
-  text and what the request used. CLIs get the prompt on stdin (no argv length or quoting limits) and run in an
+  is defaulted on its behalf. `Usage` has `input_tokens` (all of the input), `output_tokens`, `reasoning_tokens`
+  and the cache's parts of the input - `cached_tokens` (read from the cache), `cache_write_tokens`,
+  `uncached_input_tokens` - each `None` when not reported (not 0: "none used" and "unknown" differ); `to_dict()`
+  leaves the `None` ones out, so records written before they existed read back as they were.
+- **Request adapter** (`adapters/llm.py`, `ADAPTER:LLM`): sends a conversation and returns an `LLMReply` with the
+  text and what the request used. `complete_chat(provider, messages)` takes `Message`s (role `system` / `user` /
+  `assistant`; content a string or a list of `Block`s, a block may carry `cache=True` - a cache breakpoint; dicts
+  of the same shape are accepted too); `complete(provider, prompt)` is one user message through it. Anthropic API:
+  system messages go to the top-level `system`, content given as blocks is sent as text blocks, a block flagged
+  `cache` gets `cache_control: {"type": "ephemeral"}`. OpenAI-compatible APIs: plain messages (a message's blocks
+  run together) and nothing about caching - they cache a repeated prefix by themselves. CLIs get the whole
+  conversation as one text request every time (a lone user message verbatim; a longer one with `System:` /
+  `User:` / `Assistant:` ahead of each message); keeping a CLI session between requests is not done.
+  CLIs get the prompt on stdin (no argv length or quoting limits) and run in an
   empty temporary folder, with the API-key variables that would switch the billing removed and with flags that
   skip the user's own tool setup (retried without them if the installed version rejects a flag); a timeout kills
   the whole process tree. Codex runs with `--json` (tokens from `turn.completed`), Claude with
   `--output-format stream-json` (the result event: reply, tokens, an estimated `total_cost_usd`; the last
   `rate_limit_event`: status, utilization, reset). APIs are one non-streaming `urllib` POST; usage comes from the
-  reply, the cost from the provider (OpenRouter) or the provider's prices. The key is read at call time and
+  reply - Anthropic and Claude Code report the input as three counters (uncached, cache read, cache creation: all
+  input), OpenAI and Codex count the cached tokens inside the input total (the uncached part is what is left) - the
+  cost from the provider (OpenRouter) or the provider's prices. The key is read at call time and
   never put into an error message. No SDK dependency.
 - **Account adapter** (`adapters/llm_accounts.py`, `ADAPTER:LLM_ACCOUNTS`): signing in and out, the model list
   and the plan's limits of a subscription provider - through the vendors' own interfaces, never through tokens

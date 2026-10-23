@@ -10,7 +10,7 @@ import time
 import pytest
 
 from diarrhizer.adapters import llm
-from diarrhizer.adapters.llm import LLMError, complete
+from diarrhizer.adapters.llm import Block, LLMError, Message, complete, complete_chat
 from diarrhizer.summary.provider_info import Usage
 from diarrhizer.summary.providers import (
     KIND_ANTHROPIC_API,
@@ -84,7 +84,9 @@ def test_openai_reports_the_model_and_token_usage_and_no_cost_without_prices(api
     reply = complete(_openai(api), PROMPT)
 
     assert reply.model == "gpt-x-2026-01-01"  # what the server says, not the alias that was asked for
-    assert reply.usage == Usage(input_tokens=1200, output_tokens=300, cached_tokens=1000, reasoning_tokens=50)
+    assert reply.usage == Usage(
+        input_tokens=1200, output_tokens=300, cached_tokens=1000, reasoning_tokens=50, uncached_input_tokens=200
+    )  # OpenAI counts the cached tokens inside prompt_tokens; it has no cache writes to report
     assert reply.cost_usd is None and reply.cost_note == ""  # a price nobody told us is not guessed
 
 
@@ -116,8 +118,10 @@ def test_anthropic_reports_usage_with_cache_tokens_counted_as_input(api, monkeyp
     reply = complete(_anthropic(api, price_input=3.0, price_output=15.0), PROMPT)
 
     assert reply.model == "claude-x-20260101"
-    assert reply.usage == Usage(input_tokens=550, output_tokens=20, cached_tokens=400)
-    assert reply.cost_usd == pytest.approx((550 * 3.0 + 20 * 15.0) / 1_000_000)
+    assert reply.usage == Usage(
+        input_tokens=550, output_tokens=20, cached_tokens=400, cache_write_tokens=50, uncached_input_tokens=100
+    )
+    assert reply.cost_usd == pytest.approx((550 * 3.0 + 20 * 15.0) / 1_000_000)  # no cache prices: all input at one
 
 
 def test_openai_flags_a_reply_cut_off_by_the_length_limit(api):
@@ -359,7 +363,10 @@ def test_claude_reports_model_tokens_estimated_cost_and_the_limit_status(fake_cl
 
     assert reply.model == "claude-sonnet-5"  # the model that did the work (modelUsage), not the alias asked for
     # Cached and cache-writing tokens are input too: 10 plain + 200 read + 30 written.
-    assert reply.usage == Usage(input_tokens=240, output_tokens=7, cached_tokens=200, reasoning_tokens=3)
+    assert reply.usage == Usage(
+        input_tokens=240, output_tokens=7, cached_tokens=200, reasoning_tokens=3,
+        cache_write_tokens=30, uncached_input_tokens=10,
+    )
     assert reply.cost_usd == pytest.approx(0.0123)
     assert "estimated" in reply.cost_note and "not billed per token" in reply.cost_note  # a subscription is not a bill
     (window,) = reply.limits.windows  # the last rate_limit_event wins
@@ -391,7 +398,9 @@ def test_codex_reply_comes_from_the_output_file_not_the_noisy_streams(fake_cli):
     assert call["stdin"] == PROMPT
     assert reply.model == "gpt-5"
     # Codex counts cached tokens inside input_tokens; it reports no cost.
-    assert reply.usage == Usage(input_tokens=13712, output_tokens=5, cached_tokens=1000, reasoning_tokens=2)
+    assert reply.usage == Usage(
+        input_tokens=13712, output_tokens=5, cached_tokens=1000, reasoning_tokens=2, uncached_input_tokens=12712
+    )  # and no cache writes: Codex does not report them
     assert reply.cost_usd is None and reply.limits is None
 
 
@@ -550,3 +559,305 @@ def test_a_cli_that_never_answers_is_killed_at_the_timeout(fake_cli, monkeypatch
     with pytest.raises(LLMError, match="no reply within 1 s"):
         complete(_claude(make, timeout_seconds=1), PROMPT)
     assert time.monotonic() - started < 20  # not the tool's 60 s sleep
+
+
+# --- conversations: complete_chat ------------------------------------------------------------------
+
+
+TRANSCRIPT_BLOCK = "<transcript>\nПривет, мир\n</transcript>"
+
+
+def _conversation() -> list:
+    return [
+        Message("system", "Ты — аккуратный редактор протоколов."),
+        Message("user", [Block(TRANSCRIPT_BLOCK, cache=True), Block("Подведи итоги.")]),
+        Message("assistant", "Итоги: начали встречу."),
+        Message("user", "А кто что должен сделать?"),
+    ]
+
+
+EPHEMERAL = {"type": "ephemeral"}
+
+
+def test_anthropic_gets_the_messages_a_system_prompt_and_a_cache_breakpoint_on_the_flagged_block(api, monkeypatch):
+    monkeypatch.setenv("ANT_KEY", "k")
+    api.body = {"content": [{"type": "text", "text": "ok"}]}
+
+    complete_chat(_anthropic(api, temperature=0.3), _conversation())
+
+    (request,) = api.requests
+    assert request["path"] == "/v1/messages"
+    assert request["body"] == {
+        "model": "claude-x",
+        "max_tokens": llm.ANTHROPIC_DEFAULT_MAX_TOKENS,
+        "system": "Ты — аккуратный редактор протоколов.",  # system messages are not messages for this API
+        "messages": [
+            {"role": "user", "content": [  # given blocks: sent as blocks; the flagged one is the breakpoint
+                {"type": "text", "text": TRANSCRIPT_BLOCK, "cache_control": EPHEMERAL},
+                {"type": "text", "text": "Подведи итоги."},
+            ]},
+            {"role": "assistant", "content": "Итоги: начали встречу."},  # given a string: sent as a string
+            {"role": "user", "content": "А кто что должен сделать?"},
+        ],
+        "temperature": 0.3,
+    }
+
+
+def test_anthropic_system_messages_become_a_string_or_blocks_with_their_own_breakpoint(api, monkeypatch):
+    monkeypatch.setenv("ANT_KEY", "k")
+    api.body = {"content": [{"type": "text", "text": "ok"}]}
+    user = Message("user", "Привет")
+
+    complete_chat(_anthropic(api), [Message("system", "Правило 1."), Message("system", "Правило 2."), user])
+    complete_chat(_anthropic(api), [Message("system", [Block("Длинные правила.", cache=True)]),
+                                    Message("system", "Короткое."), user])
+    complete_chat(_anthropic(api), [user])
+
+    strings, blocks, none = (request["body"] for request in api.requests)
+    assert strings["system"] == "Правило 1.\n\nПравило 2."
+    assert blocks["system"] == [{"type": "text", "text": "Длинные правила.", "cache_control": EPHEMERAL},
+                                {"type": "text", "text": "Короткое."}]
+    assert "system" not in none
+    assert none["messages"] == [{"role": "user", "content": "Привет"}]  # a plain string stays a string
+
+
+def test_an_openai_compatible_api_gets_plain_messages_and_nothing_about_caching(api):
+    api.body = _openai_reply()
+
+    complete_chat(_openai(api), _conversation())
+
+    (request,) = api.requests
+    assert request["body"] == {
+        "model": "gpt-x",
+        "messages": [
+            {"role": "system", "content": "Ты — аккуратный редактор протоколов."},
+            {"role": "user", "content": TRANSCRIPT_BLOCK + "Подведи итоги."},  # the blocks run together
+            {"role": "assistant", "content": "Итоги: начали встречу."},
+            {"role": "user", "content": "А кто что должен сделать?"},
+        ],
+    }
+    assert "cache" not in json.dumps(request["body"])  # the server caches a repeated prefix by itself
+
+
+def test_messages_may_be_given_as_dicts_as_they_cross_a_queue_or_a_file(api, monkeypatch):
+    monkeypatch.setenv("ANT_KEY", "k")
+    api.body = {"content": [{"type": "text", "text": "ok"}]}
+
+    complete_chat(_anthropic(api), [{"role": "user", "content": [{"text": "префикс", "cache": True}, "вопрос"]}])
+
+    assert api.requests[0]["body"]["messages"] == [{"role": "user", "content": [
+        {"type": "text", "text": "префикс", "cache_control": EPHEMERAL}, {"type": "text", "text": "вопрос"},
+    ]}]
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [],
+        [Message("system", "только правила")],
+        "строка вместо списка",
+        [{"role": "user"}],
+        [{"role": "user", "content": "x", "cache": True}],
+        [{"role": "robot", "content": "x"}],
+        [{"role": "user", "content": ""}],
+        [{"role": "user", "content": []}],
+        [{"role": "user", "content": [{"text": "x", "cache": "yes"}]}],
+        [{"role": "user", "content": [{"text": "x", "ttl": 5}]}],
+        [{"role": "user", "content": [{"text": ""}]}],
+        [{"role": "user", "content": {"text": "x"}}],
+        [42],
+    ],
+)
+def test_malformed_messages_are_refused_before_anything_is_sent(api, monkeypatch, messages):
+    monkeypatch.setenv("ANT_KEY", "k")
+    with pytest.raises(ValueError):
+        complete_chat(_anthropic(api), messages)
+    assert api.requests == []
+
+
+def test_a_message_is_its_blocks_and_its_text_is_them_run_together():
+    plain = Message("user", "текст")
+    blocks = Message("user", [Block("а"), "б", {"text": "в", "cache": True}])
+
+    assert plain.blocks == (Block("текст"),) and plain.text == "текст"
+    assert blocks.blocks == (Block("а"), Block("б"), Block("в", cache=True)) and blocks.text == "абв"
+    assert Message.from_value({"role": "assistant", "content": "x"}) == Message("assistant", "x")
+
+
+@pytest.mark.parametrize("kind", ["anthropic", "openai"])
+def test_complete_is_one_user_message_of_complete_chat(api, monkeypatch, kind):
+    monkeypatch.setenv("ANT_KEY", "k")
+    provider = _anthropic(api) if kind == "anthropic" else _openai(api)
+    api.body = {"content": [{"type": "text", "text": "ok"}]} if kind == "anthropic" else _openai_reply("ok")
+
+    via_complete = complete(provider, PROMPT)
+    via_chat = complete_chat(provider, [Message("user", PROMPT)])
+
+    assert via_complete == via_chat
+    first, second = (request["body"] for request in api.requests)
+    assert first == second  # byte for byte the request `complete` has always sent
+    assert first["messages"] == [{"role": "user", "content": PROMPT}]
+
+
+def test_complete_hands_its_prompt_to_complete_chat(monkeypatch):
+    seen = []
+    monkeypatch.setattr(llm, "complete_chat", lambda provider, messages: seen.append((provider.name, messages)) or "reply")
+    provider = Provider(name="gw", kind=KIND_OPENAI_API, endpoint="http://x/v1", model="m")
+
+    assert complete(provider, "вопрос") == "reply"
+    assert seen == [("gw", [Message("user", "вопрос")])]
+
+
+def test_a_cli_gets_a_lone_user_message_verbatim_and_a_longer_conversation_written_out(fake_cli):
+    make, log = fake_cli
+
+    complete_chat(_claude(make), [Message("user", PROMPT)])
+    complete_chat(_claude(make), _conversation())
+
+    lone, history = (call["stdin"] for call in log())
+    assert lone == PROMPT
+    assert history == (
+        "System:\nТы — аккуратный редактор протоколов.\n\n"
+        f"User:\n{TRANSCRIPT_BLOCK}Подведи итоги.\n\n"  # blocks run together; no cache flag means anything here
+        "Assistant:\nИтоги: начали встречу.\n\n"
+        "User:\nА кто что должен сделать?"
+    )  # the whole conversation, every time
+
+
+# --- usage and the prompt cache ------------------------------------------------------------------------
+
+
+def test_anthropic_cache_counters_are_reported_separately_and_input_is_their_sum(api, monkeypatch):
+    monkeypatch.setenv("ANT_KEY", "k")
+    api.body = {"content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 100, "cache_read_input_tokens": 400, "cache_creation_input_tokens": 50,
+                          "output_tokens": 20}}
+
+    usage = complete_chat(_anthropic(api), _conversation()).usage
+
+    assert (usage.cached_tokens, usage.cache_write_tokens, usage.uncached_input_tokens) == (400, 50, 100)
+    assert usage.input_tokens == 550 and usage.output_tokens == 20
+
+
+def test_a_reported_zero_is_a_zero_and_a_missing_counter_is_none(api, monkeypatch):
+    monkeypatch.setenv("ANT_KEY", "k")
+    api.body = {"content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 12, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 1200,
+                          "output_tokens": 3}}
+    first_request = complete_chat(_anthropic(api), _conversation()).usage
+    assert first_request.cached_tokens == 0 and first_request.cache_write_tokens == 1200  # the cache was filled
+
+    api.body = {"content": [{"type": "text", "text": "ok"}], "usage": {"input_tokens": 100, "output_tokens": 20}}
+    no_cache_info = complete_chat(_anthropic(api), _conversation()).usage
+    assert no_cache_info.cached_tokens is None and no_cache_info.cache_write_tokens is None  # not 0: unknown
+    assert (no_cache_info.input_tokens, no_cache_info.uncached_input_tokens) == (100, 100)
+
+
+def test_openai_cached_tokens_are_part_of_prompt_tokens_and_writes_are_unknown(api):
+    api.body = {**_openai_reply(), "usage": {"prompt_tokens": 2000, "completion_tokens": 10,
+                                             "prompt_tokens_details": {"cached_tokens": 1500}}}
+
+    usage = complete_chat(_openai(api), _conversation()).usage
+
+    assert (usage.input_tokens, usage.cached_tokens, usage.uncached_input_tokens) == (2000, 1500, 500)
+    assert usage.cache_write_tokens is None  # OpenAI does not report writes
+
+
+def test_openai_usage_without_cache_details_leaves_the_cache_fields_empty(api):
+    api.body = {**_openai_reply(), "usage": {"prompt_tokens": 2000, "completion_tokens": 10}}
+    usage = complete_chat(_openai(api), _conversation()).usage
+    assert (usage.cached_tokens, usage.cache_write_tokens, usage.uncached_input_tokens) == (None, None, None)
+    assert usage.input_tokens == 2000
+
+    api.body = _openai_reply()  # no usage at all
+    assert complete_chat(_openai(api), _conversation()).usage is None
+
+
+def test_a_gateway_that_reports_cache_writes_has_them_taken_out_of_the_uncached_part(api):
+    api.body = {**_openai_reply(), "usage": {"prompt_tokens": 3000, "completion_tokens": 10,
+                                             "prompt_tokens_details": {"cached_tokens": 1000, "cache_write_tokens": 500}}}
+
+    usage = complete_chat(_openai(api), _conversation()).usage
+
+    assert (usage.cached_tokens, usage.cache_write_tokens, usage.uncached_input_tokens) == (1000, 500, 1500)
+
+
+def test_usage_records_keep_their_old_shape_and_old_ones_load():
+    assert Usage(input_tokens=100, output_tokens=5).to_dict() == {
+        "input_tokens": 100, "output_tokens": 5, "reasoning_tokens": 0,
+    }  # what was not reported is not written
+    full = Usage(550, 20, cached_tokens=400, reasoning_tokens=1, cache_write_tokens=50, uncached_input_tokens=100)
+    assert Usage.from_dict(full.to_dict()) == full
+
+    old = {"input_tokens": 13712, "output_tokens": 5, "cached_tokens": 1000, "reasoning_tokens": 2}
+    assert Usage.from_dict(old) == Usage(13712, 5, 1000, 2)  # no cache writes recorded: None
+    assert Usage.from_dict({"input_tokens": 9, "output_tokens": 1}).cached_tokens is None
+    assert Usage.from_dict({**old, "something_new": 1}) == Usage.from_dict(old)  # an unknown key is no crash
+
+
+# --- the cost of a request with a cache -------------------------------------------------------------------
+
+
+CACHE_PRICES = dict(price_input=3.0, price_output=15.0, price_cache_read=0.3, price_cache_write=3.75)
+
+
+def _anthropic_cache_reply(api):
+    api.body = {"content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 100, "cache_read_input_tokens": 400, "cache_creation_input_tokens": 50,
+                          "output_tokens": 20}}
+
+
+def test_cache_tokens_are_charged_at_their_own_prices_when_those_are_set(api, monkeypatch):
+    monkeypatch.setenv("ANT_KEY", "k")
+    _anthropic_cache_reply(api)
+
+    reply = complete_chat(_anthropic(api, **CACHE_PRICES), _conversation())
+
+    assert reply.cost_usd == pytest.approx((100 * 3.0 + 400 * 0.3 + 50 * 3.75 + 20 * 15.0) / 1_000_000)
+    assert "prices set for this provider" in reply.cost_note
+
+
+def test_without_cache_prices_the_cost_is_what_it_was(api, monkeypatch):
+    monkeypatch.setenv("ANT_KEY", "k")
+    _anthropic_cache_reply(api)
+
+    reply = complete_chat(_anthropic(api, price_input=3.0, price_output=15.0), _conversation())
+
+    assert reply.cost_usd == pytest.approx((550 * 3.0 + 20 * 15.0) / 1_000_000)  # every input token at the one price
+
+
+def test_a_cache_token_without_a_price_of_its_own_is_charged_as_input(api, monkeypatch):
+    monkeypatch.setenv("ANT_KEY", "k")
+    _anthropic_cache_reply(api)
+
+    only_read = complete_chat(_anthropic(api, price_input=3.0, price_output=15.0, price_cache_read=0.3), _conversation())
+    only_write = complete_chat(_anthropic(api, price_input=3.0, price_output=15.0, price_cache_write=3.75), _conversation())
+
+    assert only_read.cost_usd == pytest.approx(((100 + 50) * 3.0 + 400 * 0.3 + 20 * 15.0) / 1_000_000)
+    assert only_write.cost_usd == pytest.approx(((100 + 400) * 3.0 + 50 * 3.75 + 20 * 15.0) / 1_000_000)
+
+
+def test_cache_prices_are_used_for_an_openai_compatible_api_too(api):
+    api.body = {**_openai_reply(), "usage": {"prompt_tokens": 1200, "completion_tokens": 300,
+                                             "prompt_tokens_details": {"cached_tokens": 1000}}}
+
+    reply = complete_chat(_openai(api, price_input=1.0, price_output=4.0, price_cache_read=0.1), _conversation())
+
+    assert reply.cost_usd == pytest.approx((200 * 1.0 + 1000 * 0.1 + 300 * 4.0) / 1_000_000)
+
+
+def test_cache_prices_do_nothing_for_tokens_the_provider_did_not_report(api):
+    api.body = {**_openai_reply(), "usage": {"prompt_tokens": 1200, "completion_tokens": 300}}
+
+    reply = complete_chat(_openai(api, **CACHE_PRICES), _conversation())
+
+    assert reply.cost_usd == pytest.approx((1200 * 3.0 + 300 * 15.0) / 1_000_000)  # no split known: as before
+
+
+def test_a_cost_the_provider_reports_still_wins_over_cache_prices(api):
+    api.body = {**_openai_reply(), "usage": {"prompt_tokens": 10, "completion_tokens": 10, "cost": 0.00042,
+                                             "prompt_tokens_details": {"cached_tokens": 5}}}
+
+    reply = complete_chat(_openai(api, **CACHE_PRICES), _conversation())
+
+    assert reply.cost_usd == pytest.approx(0.00042) and reply.cost_note == "reported by the provider"

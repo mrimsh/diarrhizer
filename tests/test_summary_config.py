@@ -199,11 +199,58 @@ def test_prices_are_optional_and_turn_token_counts_into_a_cost_estimate():
         {"price_input": True},
         {"price_output": 1.0},  # an output price without an input price
         {"price_input": 1.0, "price_output": -0.1},
+        {"price_cache_read": 0.3},  # a cache price without an input price
+        {"price_cache_write": 3.75},
+        {"price_input": 1.0, "price_cache_read": -0.3},
+        {"price_input": 1.0, "price_cache_write": "dear"},
+        {"price_input": 1.0, "price_cache_read": True},
     ],
 )
 def test_bad_prices_are_rejected(overrides):
     with pytest.raises(ValueError, match="price"):
         _api(**overrides)
+
+
+def test_cache_tokens_with_a_price_of_their_own_are_charged_at_it_and_the_rest_as_input():
+    full = _api(price_input=3.0, price_output=15.0, price_cache_read=0.3, price_cache_write=3.75)
+    # 1000 input tokens in all: 600 read from the cache, 100 written to it, 300 neither; 200 output.
+    assert full.estimate_cost(1000, 200, 600, 100) == pytest.approx((300 * 3.0 + 600 * 0.3 + 100 * 3.75 + 200 * 15.0) / 1e6)
+
+    read_only = _api(price_input=3.0, price_output=15.0, price_cache_read=0.3)
+    assert read_only.estimate_cost(1000, 200, 600, 100) == pytest.approx((400 * 3.0 + 600 * 0.3 + 200 * 15.0) / 1e6)
+
+    unpriced = _api(price_input=3.0, price_output=15.0)  # no cache prices: as it was before they existed
+    assert unpriced.estimate_cost(1000, 200, 600, 100) == unpriced.estimate_cost(1000, 200) == pytest.approx(
+        (1000 * 3.0 + 200 * 15.0) / 1e6
+    )
+    assert full.estimate_cost(1000, 200) == unpriced.estimate_cost(1000, 200)  # counts not reported: no split
+    assert full.estimate_cost(1000, 200, None, None) == unpriced.estimate_cost(1000, 200)
+
+    free_cache = _api(price_input=3.0, price_cache_read=0)  # a real price of zero is a price
+    assert free_cache.estimate_cost(1_000_000, 0, 1_000_000, 0) == 0.0
+    assert full.estimate_cost(100, 0, 500, 0) == pytest.approx(500 * 0.3 / 1e6)  # more cached than input: no negative part
+
+
+def test_cache_prices_are_stored_with_the_other_prices_and_only_when_set():
+    priced = _api(price_input=3.0, price_output=15.0, price_cache_read=0.3, price_cache_write=3.75)
+    stored = priced.to_dict(include_name=False)
+    assert (stored["price_cache_read"], stored["price_cache_write"]) == (0.3, 3.75)
+    assert Provider.from_dict(priced.to_dict()) == priced
+    assert not {"price_cache_read", "price_cache_write"} & set(_api(price_input=1.0).to_dict())
+    assert not {"price_cache_read", "price_cache_write"} & set(Provider(name="c", kind=KIND_CODEX_CLI).to_dict())
+
+
+def test_a_providers_file_written_before_cache_prices_loads_and_saves_unchanged(summary_stores):
+    _templates, path = summary_stores
+    example = (REPO_ROOT / "summary_providers.example.json").read_text(encoding="utf-8")
+    path.write_text(example, encoding="utf-8")
+
+    store = ProviderStore.load()
+
+    assert all(p.price_cache_read is None and p.price_cache_write is None for p in store.providers.values())
+    assert store.get("OpenRouter").price_input == 0.15  # the prices it had are intact
+    store.save()
+    assert json.loads(path.read_text(encoding="utf-8")) == json.loads(example)  # nothing was added to the file
 
 
 def test_prices_are_stored_for_api_providers_only():
