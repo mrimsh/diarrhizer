@@ -45,7 +45,13 @@ class QueuedRun:
 # @description: add() appends runs; when the queue was idle it first drops the previous batch, so `items`
 #   is always "the batch the Monitor screen shows". Runs execute strictly one at a time (one GPU, and the
 #   models are loaded per stage anyway). A failed or cancelled run does not stop the batch;
-#   cancel_pending() abandons whatever has not started yet.
+#   cancel_pending() abandons whatever has not started yet. The user may reorder and drop what is still
+#   waiting: move_pending() changes only the relative order of PENDING items - they keep occupying the
+#   slots pending items held, so the running and finished items never move and waiting items never
+#   get ahead of them; the index counts among waiting items only and is clamped to the ends. remove_pending()
+#   deletes a waiting item from `items` for good (the user withdrew it, unlike a CANCELLED one). Both check
+#   the item's status themselves and return False, changing nothing, for an unknown item or one that is
+#   not PENDING any more (it started, or ended).
 # @inputs: QueuedRun items
 # @outputs: queue state for MainWindow / MonitorScreen
 # @sideEffects: None
@@ -79,6 +85,28 @@ class JobQueue:
                 item.status = CANCELLED
                 count += 1
         return count
+
+    def move_pending(self, item: QueuedRun, new_index: int) -> bool:
+        """Put a waiting item at `new_index` among the waiting items (0 = runs next)."""
+        slots = [i for i, other in enumerate(self.items) if other.status == PENDING]
+        waiting = [self.items[i] for i in slots]
+        old_index = next((i for i, other in enumerate(waiting) if other is item), None)
+        if old_index is None:
+            return False
+        waiting.insert(max(0, min(new_index, len(waiting) - 1)), waiting.pop(old_index))
+        for slot, other in zip(slots, waiting):
+            self.items[slot] = other
+        return True
+
+    def remove_pending(self, item: QueuedRun) -> bool:
+        """Drop a waiting item from the batch; a running or finished one stays."""
+        for i, other in enumerate(self.items):
+            if other is item:
+                if other.status != PENDING:
+                    return False
+                del self.items[i]
+                return True
+        return False
 
     def position(self, item: QueuedRun) -> tuple[int, int]:
         """1-based position of item in the batch, and the batch size."""
