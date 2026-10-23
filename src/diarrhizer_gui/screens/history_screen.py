@@ -9,11 +9,13 @@ so are the stages built on it, with the recorded settings - which a dialog
 (GUI:RESTART_DIALOG) lets the user change first.
 """
 
+import json
 import os
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -168,6 +170,49 @@ class RowActions(QWidget):
         return button
 
 
+_SPEAKER_RANGE = re.compile(r"^\s*(\d+)\D+(\d+)\s*$")
+FILE_COLUMN = 1
+ACTIONS_COLUMN = 6
+
+
+def column_sort_key(job: JobSummary, column: int):
+    """What the table is ordered by in `column`; None = no value (always listed last)."""
+    if column == 0:
+        return job.sort_key
+    if column == 1:
+        return None if job.input_name == "—" else job.input_name.casefold()
+    if column == 2:
+        return None if job.language == "—" else job.language.casefold()
+    if column == 3:
+        match = _SPEAKER_RANGE.match(job.speakers)
+        return (int(match.group(1)), int(match.group(2))) if match else None
+    if column == 4:
+        return None if job.asr_model == "—" else job.asr_model.casefold()
+    if column == 5:
+        return sum(1 for done in job.stage_done.values() if done)
+    return None
+
+
+def sort_jobs(jobs: list, column: int, descending: bool) -> list:
+    """Stable sort by a column; jobs without a value stay at the end in either direction."""
+    keyed = [(column_sort_key(job, column), job) for job in jobs]
+    present = sorted((x for x in keyed if x[0] is not None), key=lambda x: x[0], reverse=descending)
+    return [job for _, job in present] + [job for key, job in keyed if key is None]
+
+
+# [SEMANTIC-BEGIN] GUI:HISTORY_TABLE
+# @purpose: List the jobs of the results folder with sorting by column and user-set column widths
+# @description: self._jobs is always in the order shown, so self._jobs[row] is the job of table row `row`
+#   (double click, filter, row actions). QTableWidget's own sorting is off - cell widgets would not move
+#   with the rows; a click on a sortable header (all but "Действия") re-sorts self._jobs in Python and
+#   rebuilds the table. Default order: date, newest first. Empty values go last in both directions.
+#   The sort column/direction and the widths the user dragged are kept in QSettings
+#   (settings_keys.HISTORY_*); values that do not fit the table are ignored. "Файл" fills the free width
+#   until the user sets its width. The selected job stays selected across refresh() by job_id.
+# @inputs: job folders under the results folder; header clicks; header drags
+# @outputs: view_result_requested, runs_requested
+# @sideEffects: reads/writes QSettings; deletes job folders on request
+# @errors: bad saved settings fall back to defaults
 class HistoryScreen(QWidget):
     COLUMNS = ["Дата", "Файл", "Язык", "Спикеры", "Модель", "Этапы", "Действия"]
     view_result_requested = Signal(Path)
@@ -178,7 +223,15 @@ class HistoryScreen(QWidget):
         self._settings = QSettings("Diarrhizer", "DiarrhizerGUI")
         self._is_busy = is_busy or (lambda job_dir: False)
         self._probe = probe  # EnvironmentProbe: restart settings disable cuda when it is unavailable
-        self._jobs: list = []
+        self._jobs: list = []  # in display order
+        self._scanned: list = []
+        self._sort_column, self._sort_descending = self._load_sort()
+        self._user_widths = self._load_widths()
+        self._adjusting = False  # our own resizes are not the user's
+        self._width_timer = QTimer(self)
+        self._width_timer.setSingleShot(True)
+        self._width_timer.setInterval(400)
+        self._width_timer.timeout.connect(self._save_widths)
 
         title = QLabel("История заданий")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
@@ -216,8 +269,21 @@ class HistoryScreen(QWidget):
         self._table.setToolTip("Двойной щелчок по строке открывает результат")
         self._table.cellDoubleClicked.connect(self._on_double_click)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setMinimumSectionSize(50)
+        header.setStretchLastSection(False)
+        for column in range(ACTIONS_COLUMN):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(ACTIONS_COLUMN, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        self._show_sort_indicator()
+        header.sectionClicked.connect(self._on_header_clicked)
+        header.sectionResized.connect(self._on_section_resized)
+        self._adjusting = True
+        for column, width in self._user_widths.items():
+            header.resizeSection(column, width)
+        self._adjusting = False
+        self._table.viewport().installEventFilter(self)
 
         self._empty_label = QLabel(
             "Заданий пока нет — запустите обработку или укажите другую папку."
@@ -255,9 +321,85 @@ class HistoryScreen(QWidget):
             self._settings.setValue(settings_keys.OUT_DIR, chosen)
             self.refresh()
 
+    # --- sorting and widths ----------------------------------------------------
+
+    def _load_sort(self) -> tuple:
+        """(column, descending) from QSettings; the default is the date, newest first."""
+        try:
+            column = int(self._settings.value(settings_keys.HISTORY_SORT_COLUMN))
+            order = self._settings.value(settings_keys.HISTORY_SORT_ORDER)
+            if 0 <= column < ACTIONS_COLUMN and order in ("asc", "desc"):
+                return column, order == "desc"
+        except (TypeError, ValueError):
+            pass
+        return 0, True
+
+    def _load_widths(self) -> dict:
+        """{column: width} the user set; anything that does not fit this table means none."""
+        try:
+            data = json.loads(self._settings.value(settings_keys.HISTORY_COLUMN_WIDTHS) or "")
+            if data["columns"] != len(self.COLUMNS):
+                return {}
+            widths = {int(column): int(width) for column, width in data["widths"].items()}
+        except (TypeError, ValueError, KeyError, AttributeError):
+            return {}
+        if all(0 <= c < ACTIONS_COLUMN and 40 <= w <= 5000 for c, w in widths.items()):
+            return widths
+        return {}
+
+    def _save_widths(self) -> None:
+        data = {"columns": len(self.COLUMNS), "widths": {str(c): w for c, w in self._user_widths.items()}}
+        self._settings.setValue(settings_keys.HISTORY_COLUMN_WIDTHS, json.dumps(data))
+
+    def _show_sort_indicator(self) -> None:
+        order = Qt.SortOrder.DescendingOrder if self._sort_descending else Qt.SortOrder.AscendingOrder
+        self._table.horizontalHeader().setSortIndicator(self._sort_column, order)
+
+    def _on_header_clicked(self, column: int) -> None:
+        if column >= ACTIONS_COLUMN:
+            return
+        if column == self._sort_column:
+            self._sort_descending = not self._sort_descending
+        else:
+            self._sort_column, self._sort_descending = column, False
+        self._show_sort_indicator()
+        self._settings.setValue(settings_keys.HISTORY_SORT_COLUMN, self._sort_column)
+        self._settings.setValue(settings_keys.HISTORY_SORT_ORDER, "desc" if self._sort_descending else "asc")
+        self._populate(self._scanned)
+
+    def _on_section_resized(self, column: int, _old: int, new: int) -> None:
+        if self._adjusting or column >= ACTIONS_COLUMN:
+            return
+        self._user_widths[column] = new
+        self._width_timer.start()
+
+    def _fit_widths(self) -> None:
+        """Columns the user has not sized: to their contents; "Файл" takes what is left."""
+        header = self._table.horizontalHeader()
+        self._adjusting = True
+        try:
+            for column in range(ACTIONS_COLUMN):
+                if column != FILE_COLUMN and column not in self._user_widths:
+                    self._table.resizeColumnToContents(column)
+            if FILE_COLUMN not in self._user_widths:
+                others = sum(header.sectionSize(c) for c in range(len(self.COLUMNS)) if c != FILE_COLUMN)
+                header.resizeSection(FILE_COLUMN, max(150, self._table.viewport().width() - others))
+        finally:
+            self._adjusting = False
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self._table.viewport() and event.type() == QEvent.Type.Resize:
+            self._fit_widths()
+        return super().eventFilter(obj, event)
+
     def refresh(self) -> None:
-        out_dir = Path(self._path_field.text())
-        jobs = scan_jobs(out_dir)
+        self._scanned = scan_jobs(Path(self._path_field.text()))
+        self._populate(self._scanned)
+
+    def _populate(self, jobs: list) -> None:
+        """Rebuild the table from `jobs` in the chosen order, keeping the selected job selected."""
+        selected = self._selected_job_id()
+        jobs = sort_jobs(jobs, self._sort_column, self._sort_descending)
         self._jobs = jobs
 
         self._table.setRowCount(0)
@@ -285,7 +427,19 @@ class HistoryScreen(QWidget):
             row_actions.delete_requested.connect(self._delete)
             self._table.setCellWidget(row, 6, row_actions)
 
+        self._fit_widths()
         self._apply_filter()
+        if selected is not None:
+            for row, job in enumerate(jobs):
+                if job.job_id == selected:
+                    self._table.selectRow(row)
+                    break
+
+    def _selected_job_id(self) -> Optional[str]:
+        rows = self._table.selectionModel().selectedRows()
+        if rows and 0 <= rows[0].row() < len(self._jobs):
+            return self._jobs[rows[0].row()].job_id
+        return None
 
     def _apply_filter(self) -> None:
         needle = self._filter_field.text().strip().lower()
@@ -394,3 +548,4 @@ class HistoryScreen(QWidget):
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Не удалось удалить", str(exc))
         self.refresh()
+# [SEMANTIC-END] GUI:HISTORY_TABLE

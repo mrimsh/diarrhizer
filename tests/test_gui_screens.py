@@ -532,6 +532,177 @@ def test_history_filter_hides_other_files(qapp, isolated, tmp_path):
     assert dict(zip(names, hidden)) == {"meeting.mp4": False, "call.m4a": True}
 
 
+def _history_job(out: Path, stamp: str, name: str, config=None, stages=0) -> Path:
+    """A job folder `<name>_<stamp>` with the first `stages` stages' outputs (5 = finished)."""
+    job_dir = out / f"{Path(name).stem}_{stamp}"
+    meta = {"input_path": f"D:/calls/{name}"}
+    if config is not None:
+        meta["pipeline_config"] = config
+    _write(job_dir / "meta" / "run.json", meta)
+    for artifact in ["audio/normalized.wav", "asr/transcript.json", "diar/diarization.json",
+                     "merged/segments.json", "export/result.md"][:stages]:
+        _touch(job_dir / artifact)
+    return job_dir
+
+
+@pytest.fixture
+def history_out(isolated, tmp_path):
+    out = tmp_path / "out"
+    cfg = {"language": "ru", "min_speakers": 2, "max_speakers": 2, "asr_model": "small"}
+    _history_job(out, "20260105_100000", "alpha.wav", cfg, stages=5)
+    _history_job(out, "20260103_100000", "Beta.wav",
+                 {"language": "en", "min_speakers": 10, "max_speakers": 10, "asr_model": "large-v3"}, stages=2)
+    _history_job(out, "20260104_100000", "gamma.wav", None, stages=0)  # no config: placeholders
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    return out
+
+
+def _order(screen):
+    return [job.input_name for job in screen._jobs]
+
+
+def _click(screen, column, times=1):
+    for _ in range(times):
+        screen._table.horizontalHeader().sectionClicked.emit(column)
+
+
+def test_history_default_order_is_newest_first_with_the_indicator_on_date(qapp, history_out):
+    screen = history_screen.HistoryScreen()
+    assert _order(screen) == ["alpha.wav", "gamma.wav", "Beta.wav"]
+    header = screen._table.horizontalHeader()
+    assert (header.sortIndicatorSection(), header.sortIndicatorOrder()) == (0, Qt.SortOrder.DescendingOrder)
+
+
+def test_history_sorts_by_each_column_with_its_own_type(qapp, history_out):
+    screen = history_screen.HistoryScreen()
+    _click(screen, 0)  # date: a real time, oldest first
+    assert _order(screen) == ["Beta.wav", "gamma.wav", "alpha.wav"]
+    _click(screen, 1)  # file, case-insensitive
+    assert _order(screen) == ["alpha.wav", "Beta.wav", "gamma.wav"]
+    _click(screen, 2)  # language: en, ru; the job without one is last
+    assert _order(screen) == ["Beta.wav", "alpha.wav", "gamma.wav"]
+    _click(screen, 3)  # speakers as numbers: 2 before 10, no value last
+    assert _order(screen) == ["alpha.wav", "Beta.wav", "gamma.wav"]
+    _click(screen, 4)  # model: large-v3 < small, no value last
+    assert _order(screen) == ["Beta.wav", "alpha.wav", "gamma.wav"]
+    _click(screen, 5)  # stages done: 0, 2, 5
+    assert _order(screen) == ["gamma.wav", "Beta.wav", "alpha.wav"]
+
+
+def test_history_second_click_reverses_but_empty_values_stay_last(qapp, history_out):
+    screen = history_screen.HistoryScreen()
+    _click(screen, 3)
+    assert _order(screen) == ["alpha.wav", "Beta.wav", "gamma.wav"]
+    _click(screen, 3)
+    assert _order(screen) == ["Beta.wav", "alpha.wav", "gamma.wav"]  # 10 before 2, no value still last
+    header = screen._table.horizontalHeader()
+    assert (header.sortIndicatorSection(), header.sortIndicatorOrder()) == (3, Qt.SortOrder.DescendingOrder)
+
+
+def test_history_actions_column_is_not_sortable(qapp, history_out):
+    screen = history_screen.HistoryScreen()
+    _click(screen, 3)
+    _click(screen, 6)
+    assert _order(screen) == ["alpha.wav", "Beta.wav", "gamma.wav"]
+    assert screen._table.horizontalHeader().sortIndicatorSection() == 3
+
+
+def test_history_sort_is_stable(qapp, isolated, tmp_path):
+    out = tmp_path / "out"
+    for stamp, name in [("20260101_000000", "a.wav"), ("20260102_000000", "b.wav"), ("20260103_000000", "c.wav")]:
+        _history_job(out, stamp, name, {"language": "ru"})
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    screen = history_screen.HistoryScreen()
+    _click(screen, 2)  # all equal: the date order (newest first) is kept
+    assert _order(screen) == ["c.wav", "b.wav", "a.wav"]
+    _click(screen, 2)
+    assert _order(screen) == ["c.wav", "b.wav", "a.wav"]
+
+
+def test_history_rows_match_self_jobs_after_sorting(qapp, history_out):
+    screen = history_screen.HistoryScreen()
+    _click(screen, 1)
+    for row, job in enumerate(screen._jobs):
+        assert job.input_name in screen._table.item(row, 1).text()
+        assert screen._table.item(row, 0).text() == job.date_label
+
+
+def test_history_double_click_and_row_actions_use_the_sorted_row(qapp, history_out, monkeypatch):
+    other = _history_job(history_out, "20260106_100000", "zeta.wav", {"language": "de"}, stages=5)
+    screen = history_screen.HistoryScreen()
+    _click(screen, 1)  # alpha, Beta, gamma, zeta
+    opened = []
+    screen.view_result_requested.connect(opened.append)
+    row = _order(screen).index("zeta.wav")
+    screen._on_double_click(row, 0)
+    assert opened == [other]
+
+    buttons = {b.text(): b for b in screen._table.cellWidget(row, 6).findChildren(QPushButton)}
+    buttons["Результат"].click()
+    assert opened == [other, other]
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *_a, **_k: QMessageBox.StandardButton.Yes)
+    buttons["Удалить"].click()
+    assert not other.exists()
+    assert _order(screen) == ["alpha.wav", "Beta.wav", "gamma.wav"]  # the sort is kept after the refresh
+
+
+def test_history_filter_works_with_the_sort(qapp, history_out):
+    screen = history_screen.HistoryScreen()
+    _click(screen, 1)
+    screen._filter_field.setText("a.wav")  # alpha.wav, Beta.wav, gamma.wav -> only names with "a.wav"
+    shown = [job.input_name for row, job in enumerate(screen._jobs) if not screen._table.isRowHidden(row)]
+    assert shown == ["alpha.wav", "Beta.wav", "gamma.wav"]
+    screen._filter_field.setText("alpha")
+    shown = [job.input_name for row, job in enumerate(screen._jobs) if not screen._table.isRowHidden(row)]
+    assert shown == ["alpha.wav"]
+    _click(screen, 1)  # re-sorting keeps the filter applied
+    shown = [job.input_name for row, job in enumerate(screen._jobs) if not screen._table.isRowHidden(row)]
+    assert shown == ["alpha.wav"]
+
+
+def test_history_selection_survives_refresh_and_resort(qapp, history_out):
+    screen = history_screen.HistoryScreen()
+    screen._table.selectRow(_order(screen).index("Beta.wav"))
+    screen.refresh()
+    _click(screen, 1)
+    (selected,) = screen._table.selectionModel().selectedRows()
+    assert screen._jobs[selected.row()].input_name == "Beta.wav"
+
+
+def test_history_remembers_sort_and_widths(qapp, history_out):
+    screen = history_screen.HistoryScreen()
+    _click(screen, 3, times=2)
+    screen._table.horizontalHeader().resizeSection(2, 123)
+    screen._table.horizontalHeader().resizeSection(1, 321)
+    screen._save_widths()
+
+    again = history_screen.HistoryScreen()
+    assert _order(again) == ["Beta.wav", "alpha.wav", "gamma.wav"]
+    header = again._table.horizontalHeader()
+    assert (header.sortIndicatorSection(), header.sortIndicatorOrder()) == (3, Qt.SortOrder.DescendingOrder)
+    again.refresh()  # the widths the user set are not touched by a refresh
+    assert (header.sectionSize(2), header.sectionSize(1)) == (123, 321)
+
+
+def test_history_ignores_unusable_saved_sort_and_widths(qapp, history_out, isolated):
+    store = isolated()
+    for column, order, widths in [
+        ("99", "asc", '{"columns": 7, "widths": {"2": "wide"}}'),   # unknown column; not a width
+        ("6", "asc", '{"columns": 5, "widths": {"2": 100}}'),    # actions column; another column count
+        ("x", "up", "not json"),
+        ("1", "sideways", '{"columns": 7, "widths": {"9": 100}}'),
+        ("-1", "asc", '{"columns": 7, "widths": {"2": -5}}'),
+    ]:
+        store.setValue(settings_keys.HISTORY_SORT_COLUMN, column)
+        store.setValue(settings_keys.HISTORY_SORT_ORDER, order)
+        store.setValue(settings_keys.HISTORY_COLUMN_WIDTHS, widths)
+        store.sync()
+        screen = history_screen.HistoryScreen()
+        assert _order(screen) == ["alpha.wav", "gamma.wav", "Beta.wav"], (column, order)
+        assert screen._user_widths == {}, widths
+
+
 # --- Result ------------------------------------------------------------------------------
 
 SEGMENTS = [

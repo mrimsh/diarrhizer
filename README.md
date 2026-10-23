@@ -181,7 +181,7 @@ python -m diarrhizer_gui.app
 * **Выполнение** — the running batch: stage progress, live log, queue, **Остановить** (stops at
   once; finished stages are kept). Reachable from the sidebar at any time; the sidebar, window title
   and a taskbar flash show progress and completion.
-* **История заданий** — all jobs in the results folder with stage indicators, a filter, and
+* **История заданий** — all jobs in the results folder with stage indicators, a filter, sorting by a click on a column header (date, file, language, speakers, model, stages; empty values last) and column widths you can drag (both are remembered), and
   **Продолжить** for unfinished jobs: it resumes from the first missing stage with the job's own
   settings (e.g. after a stop or a failed diarization, without re-transcribing).
   **Перезапустить этап** (any job) recomputes the chosen stage from scratch, plus the stages built
