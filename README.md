@@ -179,7 +179,7 @@ python -m diarrhizer_gui.app
   mode and parameters, run. Every file becomes its own job; they run one after another. The
   parameters of the last run are remembered. The file list is the processing order: drag rows (several at once) or use **Вверх** / **Вниз** / **По имени**.
 * **Выполнение** — the running batch: stage progress, live log, queue, **Остановить** (stops at
-  once; finished stages are kept). Reachable from the sidebar at any time; the sidebar, window title
+  once; finished stages are kept). Jobs still waiting in the queue can be dragged into a new order or withdrawn with ✕. Reachable from the sidebar at any time; the sidebar, window title
   and a taskbar flash show progress and completion.
 * **История заданий** — all jobs in the results folder with stage indicators, a filter, sorting by a click on a column header (date, file, language, speakers, model, stages; empty values last) and column widths you can drag (both are remembered), and
   **Продолжить** for unfinished jobs: it resumes from the first missing stage with the job's own

@@ -127,6 +127,8 @@ class MainWindow(QMainWindow):
         self._monitor.back_requested.connect(self._go_to_history)
         self._monitor.view_result_requested.connect(self._show_result)
         self._monitor.cancel_requested.connect(self._on_cancel_requested)
+        self._monitor.queue_reorder_requested.connect(self._on_queue_reorder)
+        self._monitor.queue_remove_requested.connect(self._on_queue_remove)
 
         self._history = HistoryScreen(is_busy=self._is_job_busy, probe=self._probe)
         self._history.view_result_requested.connect(self._show_result)
@@ -224,6 +226,20 @@ class MainWindow(QMainWindow):
         self._show_monitor()
         if not was_active:
             self._start_next()
+        self._update_progress_labels()
+
+    def _on_queue_reorder(self, order: list) -> None:
+        """Waiting runs in the order the user dragged them to; any that started meanwhile are left alone."""
+        index = 0
+        for item in order:
+            if self._queue.move_pending(item, index):
+                index += 1
+        self._monitor.refresh_queue(self._queue.items)
+        self._update_progress_labels()
+
+    def _on_queue_remove(self, item) -> None:
+        self._queue.remove_pending(item)
+        self._monitor.refresh_queue(self._queue.items)
         self._update_progress_labels()
 
     def _start_next(self) -> None:

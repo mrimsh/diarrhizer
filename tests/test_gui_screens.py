@@ -703,6 +703,149 @@ def test_history_ignores_unusable_saved_sort_and_widths(qapp, history_out, isola
         assert screen._user_widths == {}, widths
 
 
+# --- Monitor queue -----------------------------------------------------------------------
+
+
+class _Wired:
+    """A MonitorScreen hooked to a JobQueue the way MainWindow hooks it (its own handlers are used)."""
+
+    def __init__(self, labels, tmp_path):
+        from types import SimpleNamespace
+
+        from diarrhizer_gui import main_window
+        from diarrhizer_gui.screens.monitor_screen import MonitorScreen
+
+        self.queue = JobQueue()
+        self.runs = {label: _run(label, job_dir=str(tmp_path / label)) for label in labels}
+        self.queue.add(list(self.runs.values()))
+        self.screen = MonitorScreen()
+        host = SimpleNamespace(_queue=self.queue, _monitor=self.screen, _update_progress_labels=lambda: None)
+        self.screen.queue_reorder_requested.connect(lambda order: main_window.MainWindow._on_queue_reorder(host, order))
+        self.screen.queue_remove_requested.connect(lambda item: main_window.MainWindow._on_queue_remove(host, item))
+
+    def start(self, done=(), running=None):
+        for label in done:
+            self.runs[label].status = DONE
+        if running:
+            self.runs[running].status = RUNNING
+        self.screen.refresh_queue(self.queue.items)
+
+    def shown(self):
+        return [self.screen._items[self.screen._queue_list.item(row).data(Qt.ItemDataRole.UserRole)].label
+                for row in range(self.screen._queue_list.count())]
+
+    def drop(self, source_row, target_row):
+        """What a finished drag leaves in the list, then what the screen does about it."""
+        self.screen._queue_list.model().moveRow(QModelIndex(), source_row, QModelIndex(), target_row)
+        self.screen._finish_drag()
+
+
+def _remove_buttons(screen):
+    from PySide6.QtWidgets import QToolButton
+
+    rows = []
+    for row in range(screen._queue_list.count()):
+        widget = screen._queue_list.itemWidget(screen._queue_list.item(row))
+        rows.append(widget.findChildren(QToolButton) if widget is not None else [])
+    return rows
+
+
+def test_monitor_drop_reorders_the_waiting_runs_in_the_queue_and_the_list(qapp, tmp_path):
+    w = _Wired(["d", "r", "a", "b", "c"], tmp_path)
+    w.start(done=["d"], running="r")
+    w.drop(4, 2)  # c to the top of the waiting ones
+    assert [i.label for i in w.queue.items] == ["d", "r", "c", "a", "b"]
+    assert w.shown() == ["d", "r", "c", "a", "b"]
+    assert [item.label for item in w.screen._items] == ["d", "r", "c", "a", "b"]
+
+
+def test_monitor_drop_above_the_running_or_finished_row_is_discarded(qapp, tmp_path):
+    w = _Wired(["d", "r", "a", "b"], tmp_path)
+    w.start(done=["d"], running="r")
+    w.drop(3, 1)  # b above the running row
+    assert [i.label for i in w.queue.items] == ["d", "r", "a", "b"]
+    assert w.shown() == ["d", "r", "a", "b"]
+    w.drop(2, 0)  # a above the finished row
+    assert [i.label for i in w.queue.items] == ["d", "r", "a", "b"]
+    assert w.shown() == ["d", "r", "a", "b"]
+    w.drop(1, 3)  # the running row dragged down
+    assert [i.label for i in w.queue.items] == ["d", "r", "a", "b"]
+    assert w.shown() == ["d", "r", "a", "b"]
+
+
+def test_monitor_only_waiting_rows_have_a_remove_button_and_can_be_dragged(qapp, tmp_path):
+    w = _Wired(["d", "r", "a", "b"], tmp_path)
+    w.start(done=["d"], running="r")
+    assert [len(buttons) for buttons in _remove_buttons(w.screen)] == [0, 0, 1, 1]
+    flags = [bool(w.screen._queue_list.item(row).flags() & Qt.ItemFlag.ItemIsDragEnabled) for row in range(4)]
+    assert flags == [False, False, True, True]
+
+
+def test_monitor_remove_button_drops_the_run_from_queue_list_and_busy_dirs(qapp, tmp_path):
+    w = _Wired(["d", "r", "a", "b"], tmp_path)
+    w.start(done=["d"], running="r")
+    assert (tmp_path / "a").resolve() in w.queue.busy_job_dirs()
+    _remove_buttons(w.screen)[2][0].click()
+    assert [i.label for i in w.queue.items] == ["d", "r", "b"]
+    assert w.shown() == ["d", "r", "b"]
+    assert (tmp_path / "a").resolve() not in w.queue.busy_job_dirs()
+    assert w.queue.pending_count() == 1 and w.queue.counts()[CANCELLED] == 0
+    assert not w.screen._queue_list.isHidden()
+    _remove_buttons(w.screen)[2][0].click()
+    assert [i.label for i in w.queue.items] == ["d", "r"]
+    _remove_buttons(w.screen)  # no crash with the list hidden: one finished + one running still show two
+    w.runs["r"].status = DONE
+    w.queue.remove_pending(w.runs["d"])  # not waiting: refused
+    assert [i.label for i in w.queue.items] == ["d", "r"]
+
+
+def test_monitor_list_hides_when_one_item_is_left(qapp, tmp_path):
+    w = _Wired(["r", "a"], tmp_path)
+    w.start(running="r")
+    assert not w.screen._queue_list.isHidden()
+    _remove_buttons(w.screen)[1][0].click()
+    assert [i.label for i in w.queue.items] == ["r"]
+    assert w.screen._queue_list.isHidden()
+
+
+def test_monitor_drop_after_the_queue_moved_on_touches_only_waiting_runs(qapp, tmp_path):
+    w = _Wired(["d", "r", "a", "b", "c"], tmp_path)
+    w.start(done=["d"], running="r")
+    w.screen._queue_list.dragging = True  # a drag is in progress...
+    w.runs["r"].status, w.runs["a"].status = DONE, RUNNING  # ...and the queue moves on under it
+    w.screen.refresh_queue(w.queue.items)
+    assert w.shown() == ["d", "r", "a", "b", "c"]  # the list is not rebuilt mid-drag
+    assert [item.label for item in w.screen._items] == ["d", "r", "a", "b", "c"]
+    w.screen._queue_list.dragging = False
+    w.drop(4, 2)  # c dropped in front of a, which has just started
+    assert [i.label for i in w.queue.items] == ["d", "r", "a", "c", "b"]
+    assert w.queue.items[2].status == RUNNING
+    assert [item.status for item in w.screen._items] == [DONE, DONE, RUNNING, PENDING, PENDING]
+    assert w.shown() == ["d", "r", "a", "c", "b"]
+
+
+def test_monitor_removing_a_run_that_just_started_changes_nothing(qapp, tmp_path):
+    w = _Wired(["r", "a", "b"], tmp_path)
+    w.start(running="r")
+    buttons = _remove_buttons(w.screen)
+    w.runs["r"].status, w.runs["a"].status = DONE, RUNNING  # started before the click arrived
+    buttons[1][0].click()
+    assert [i.label for i in w.queue.items] == ["r", "a", "b"]
+    assert w.shown() == ["r", "a", "b"]
+    assert [len(b) for b in _remove_buttons(w.screen)] == [0, 0, 1]
+
+
+def test_monitor_double_click_still_opens_a_finished_run(qapp, tmp_path):
+    w = _Wired(["d", "r", "a"], tmp_path)
+    w.start(done=["d"], running="r")
+    opened = []
+    w.screen.view_result_requested.connect(opened.append)
+    w.screen._on_queue_double_click(w.screen._queue_list.item(0))
+    assert opened == [tmp_path / "d"]
+    w.screen._on_queue_double_click(w.screen._queue_list.item(2))  # a waiting row: nothing
+    assert opened == [tmp_path / "d"]
+
+
 # --- Result ------------------------------------------------------------------------------
 
 SEGMENTS = [

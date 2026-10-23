@@ -14,15 +14,17 @@ end_item() / batch_finished().
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -31,6 +33,7 @@ from diarrhizer_gui.job_queue import (
     CANCELLED,
     DONE,
     FAILED,
+    PENDING,
     RUNNING,
     STATUS_ICONS,
     STATUS_LABELS,
@@ -127,10 +130,67 @@ class StageStep(QWidget):
         self._dot.setToolTip(f"{self._name}: {STATE_LABELS[state]}")
 
 
+class QueueList(QListWidget):
+    """The queue rows; waiting rows can be dragged. `drag_finished` fires (from the event loop, not from
+    inside the drop) once a drag ended, whether it dropped anything or not."""
+
+    drag_finished = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dragging = False
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDropIndicatorShown(True)
+
+    def startDrag(self, supported_actions) -> None:
+        self.dragging = True
+        try:
+            super().startDrag(supported_actions)  # blocks until the drop
+        finally:
+            self.dragging = False
+            QTimer.singleShot(0, self.drag_finished.emit)
+
+
+class QueueRow(QWidget):
+    """A waiting row: the text and a button that withdraws the run."""
+
+    def __init__(self, text: str, tooltip: str, on_remove) -> None:
+        super().__init__()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 0, 2, 0)
+        label = QLabel(text)
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(label, stretch=1)
+        button = QToolButton()
+        button.setObjectName("queueRemove")
+        button.setText("✕")
+        button.setAutoRaise(True)
+        button.setToolTip("Убрать из очереди")
+        button.clicked.connect(on_remove)
+        layout.addWidget(button)
+        self.setToolTip(tooltip)
+
+
+# [SEMANTIC-BEGIN] GUI:MONITOR
+# @purpose: Live view of the running batch, with the queue the user can still rearrange
+# @description: MainWindow drives it (begin_item/end_item/batch_finished/refresh_queue). The screen never
+#   changes the queue itself: dragging a waiting row emits queue_reorder_requested(new order of the waiting
+#   runs), the ✕ on a waiting row emits queue_remove_requested(run); MainWindow applies them with
+#   JobQueue.move_pending()/remove_pending() and calls refresh_queue() again, so JobQueue stays the one source
+#   of truth. Only waiting rows are draggable and a drop that moves a running/finished row (or puts a row
+#   anywhere but among the waiting ones) is discarded. The list is rebuilt from the queue after every drag
+#   (a drop loses row widgets); a refresh_queue() that arrives mid-drag is held until the drag ends.
+# @inputs: queue state from MainWindow, progress lines, mouse
+# @outputs: cancel_requested, view_result_requested, queue_reorder_requested, queue_remove_requested
+# @sideEffects: none
+# @errors: none
 class MonitorScreen(QWidget):
     back_requested = Signal()
     view_result_requested = Signal(Path)
     cancel_requested = Signal()
+    queue_reorder_requested = Signal(list)  # [QueuedRun] waiting runs in the wanted order
+    queue_remove_requested = Signal(object)  # QueuedRun
 
     def __init__(self) -> None:
         super().__init__()
@@ -151,9 +211,13 @@ class MonitorScreen(QWidget):
         self._stepper = QWidget()
         self._stepper.setLayout(stepper_row)
 
-        self._queue_list = QListWidget()
+        self._queue_list = QueueList()
         self._queue_list.setMaximumHeight(130)
-        self._queue_list.setToolTip("Двойной щелчок по готовому заданию открывает результат")
+        self._queue_list.setToolTip(
+            "Двойной щелчок по готовому заданию открывает результат. "
+            "Ожидающие задания можно перетаскивать и убирать (✕)."
+        )
+        self._queue_list.drag_finished.connect(self._finish_drag)
         self._queue_list.itemDoubleClicked.connect(self._on_queue_double_click)
 
         self._log = QPlainTextEdit()
@@ -191,7 +255,9 @@ class MonitorScreen(QWidget):
 
         self._current_stage: str | None = None
         self._result_job_dir: Path | None = None
-        self._items: list = []
+        self._items: list = []  # what the list shows
+        self._was_pending: list = []  # which of those rows were waiting when the list was built
+        self._latest: list = []  # what the queue holds now (differs only during a drag)
         self.show_idle()
 
     # --- state ---------------------------------------------------------------
@@ -290,19 +356,51 @@ class MonitorScreen(QWidget):
         self._set_status("Останавливаю…", "#7d8394")
 
     def refresh_queue(self, items: list) -> None:
+        self._latest = list(items)
+        if self._queue_list.dragging:
+            return  # rebuilding under the mouse would cancel the drag; _finish_drag catches up
+        self._rebuild(self._latest)
+
+    def _rebuild(self, items: list) -> None:
         self._items = list(items)
+        self._was_pending = [item.status == PENDING for item in items]
+        scroll = self._queue_list.verticalScrollBar().value()
         self._queue_list.clear()
-        for item in items:
+        for index, item in enumerate(items):
             text = f"{STATUS_ICONS[item.status]}  {item.label} — {STATUS_LABELS[item.status]}"
             if item.status == FAILED and item.detail:
                 text += f": {item.detail.splitlines()[0][:120]}"
-            entry = QListWidgetItem(text)
-            entry.setToolTip(item.detail or str(item.job_dir or ""))
+            tooltip = item.detail or str(item.job_dir or "")
+            entry = QListWidgetItem()
+            entry.setData(Qt.ItemDataRole.UserRole, index)  # where the row was; read back after a drop
+            entry.setToolTip(tooltip)
+            if item.status == PENDING:
+                self._queue_list.addItem(entry)
+                self._queue_list.setItemWidget(
+                    entry, QueueRow(text, tooltip, lambda checked=False, run=item: self.queue_remove_requested.emit(run))
+                )
+                entry.setSizeHint(self._queue_list.itemWidget(entry).sizeHint())
+                continue
+            entry.setText(text)
+            entry.setFlags(entry.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
             color = STATUS_COLORS.get(item.status)
             if color:
                 entry.setForeground(QColor(color))
             self._queue_list.addItem(entry)
         self._queue_list.setVisible(len(items) > 1)
+        self._queue_list.verticalScrollBar().setValue(scroll)
+
+    def _finish_drag(self) -> None:
+        """After a drag: ask for the new order if the drop is acceptable, then redraw from the queue."""
+        shown = self._items
+        was = [self._queue_list.item(row).data(Qt.ItemDataRole.UserRole) for row in range(self._queue_list.count())]
+        # Judged by what the rows were when drawn; a run that has started since is refused by the queue.
+        valid = sorted(was) == list(range(len(shown))) and all(
+            was[row] == row for row, pending in enumerate(self._was_pending) if not pending
+        )
+        if valid and was != list(range(len(shown))):
+            self.queue_reorder_requested.emit([shown[index] for index in was if self._was_pending[index]])
+        self._rebuild(self._latest)
 
     # --- helpers -------------------------------------------------------------
 
@@ -320,3 +418,4 @@ class MonitorScreen(QWidget):
             item = self._items[row]
             if item.status == DONE and item.job_dir is not None:
                 self.view_result_requested.emit(item.job_dir)
+# [SEMANTIC-END] GUI:MONITOR
