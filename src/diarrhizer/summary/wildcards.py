@@ -297,6 +297,16 @@ def render_prompt(template_prompt: str, ctx: PromptContext, template_name: str =
 # [SEMANTIC-END] SUMMARY:WILDCARDS
 
 
+def render_instruction(template_prompt: str, ctx: PromptContext, template_name: str = "") -> str:
+    """The template's prompt as an instruction on its own: wildcards filled in, {{transcript}} left empty.
+
+    For a question asked in a dialogue whose context already holds the transcript. Nothing is appended.
+    """
+    used = used_wildcards(template_prompt, template_name)
+    values = {name: ("" if name == "transcript" else WILDCARDS[name].value(ctx)) for name in used}
+    return _TOKEN.sub(lambda m: "{{" if m.group(1) is None else values[m.group(1)], template_prompt).strip()
+
+
 @dataclass(frozen=True)
 class PromptBlock:
     text: str

@@ -88,6 +88,8 @@ class Provider:
         price_cache_read: API kinds: USD per million input tokens served from the prompt cache (needs
             price_input; None = they are charged at price_input, as is every cache token without its own price)
         price_cache_write: API kinds: USD per million input tokens written to the prompt cache (needs price_input)
+        context_tokens: The model's context window in tokens, for the dialogue's long-context check (None = the
+            size is not checked). No provider reports it (Codex's model list has no such field), so it is set here
     """
 
     name: str
@@ -104,6 +106,7 @@ class Provider:
     price_output: float | None = None
     price_cache_read: float | None = None
     price_cache_write: float | None = None
+    context_tokens: int | None = None
 
     def __post_init__(self) -> None:
         # JSON hands back lists; a tuple keeps the frozen dataclass hashable.
@@ -142,6 +145,8 @@ class Provider:
             raise ValueError(f"{prefix}: temperature must be a number from 0 to 2, got {self.temperature!r}")
         if self.max_tokens is not None and (not _is_int(self.max_tokens) or self.max_tokens < 1):
             raise ValueError(f"{prefix}: max_tokens must be a positive integer, got {self.max_tokens!r}")
+        if self.context_tokens is not None and (not _is_int(self.context_tokens) or self.context_tokens < 1):
+            raise ValueError(f"{prefix}: context_tokens must be a positive integer, got {self.context_tokens!r}")
         for attr in _PRICE_FIELDS:
             price = getattr(self, attr)
             if price is not None and (
@@ -203,7 +208,8 @@ class Provider:
     def to_dict(self, include_name: bool = True) -> dict:
         data: dict[str, Any] = {"kind": self.kind}
         if self.is_cli:
-            optional = {"command": self.command, "model": self.model, "extra_args": list(self.extra_args)}
+            optional = {"command": self.command, "model": self.model, "extra_args": list(self.extra_args),
+                        "context_tokens": self.context_tokens}
         else:
             optional = {
                 "endpoint": self.endpoint,
@@ -215,6 +221,7 @@ class Provider:
                 "price_output": self.price_output,
                 "price_cache_read": self.price_cache_read,
                 "price_cache_write": self.price_cache_write,
+                "context_tokens": self.context_tokens,
             }
         data.update({key: value for key, value in optional.items() if value not in ("", None, [])})
         data["timeout_seconds"] = self.timeout_seconds
@@ -317,5 +324,5 @@ class ProviderStore:
         )
 
     def _empty_hint(self) -> str:
-        return f"Add one in the GUI (Саммаризация → Провайдеры) or in {self.path}"
+        return f"Add one in the GUI (Работа с языковой моделью → Провайдеры) or in {self.path}"
 # [SEMANTIC-END] CONFIG:SUMMARY_PROVIDERS

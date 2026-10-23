@@ -626,6 +626,26 @@ class ProvidersTab(QWidget):
         self._prices_row.setToolTip(
             "Необязательно: цены провайдера за миллион токенов — по ним считается стоимость запроса"
         )
+        self._cache_read_field = QLineEdit()
+        self._cache_read_field.setPlaceholderText("чтение")
+        self._cache_write_field = QLineEdit()
+        self._cache_write_field.setPlaceholderText("запись")
+        cache_prices_row = QWidget()
+        cache_prices_layout = QHBoxLayout(cache_prices_row)
+        cache_prices_layout.setContentsMargins(0, 0, 0, 0)
+        cache_prices_layout.addWidget(self._cache_read_field)
+        cache_prices_layout.addWidget(self._cache_write_field)
+        self._cache_prices_row = cache_prices_row
+        self._cache_prices_row.setToolTip(
+            "Необязательно: цены токенов, прочитанных из кэша промпта и записанных в него. Без них такие токены "
+            "считаются по цене входа. Нужна цена входа."
+        )
+        self._context_field = QLineEdit()
+        self._context_field.setPlaceholderText("не проверять")
+        self._context_field.setToolTip(
+            "Необязательно: окно контекста модели в токенах. Провайдеры его не сообщают. Если указано, диалог "
+            "не отправляет запрос, который заведомо длиннее, и предлагает варианты."
+        )
         self._timeout_spin = QSpinBox()
         self._timeout_spin.setRange(1, 24 * 3600)
         self._timeout_spin.setSuffix(" с")
@@ -649,11 +669,13 @@ class ProvidersTab(QWidget):
         self._form.addRow("Температура:", self._temperature_field)
         self._form.addRow("Макс. токенов ответа:", self._max_tokens_field)
         self._form.addRow("Цена, $ за 1 млн токенов:", self._prices_row)
+        self._form.addRow("Цена кэша, $ за 1 млн:", self._cache_prices_row)
+        self._form.addRow("Окно контекста, токенов:", self._context_field)
         self._form.addRow("Таймаут:", self._timeout_spin)
         self._cli_widgets = (self._account_panel, self._command_field, self._extra_args_field)
         self._api_widgets = (
             self._endpoint_field, self._key_row, self._key_env_field,
-            self._temperature_field, self._max_tokens_field, self._prices_row,
+            self._temperature_field, self._max_tokens_field, self._prices_row, self._cache_prices_row,
         )
 
         self._save_button = QPushButton("Сохранить")
@@ -744,7 +766,8 @@ class ProvidersTab(QWidget):
         for widget in (self._list, self._add_button, self._name_field, self._kind_combo, self._command_field,
                        self._extra_args_field, self._model_field, self._models_button, self._endpoint_field,
                        self._key_field, self._key_env_field, self._temperature_field, self._max_tokens_field,
-                       self._price_in_field, self._price_out_field, self._timeout_spin, self._save_button,
+                       self._price_in_field, self._price_out_field, self._cache_read_field,
+                       self._cache_write_field, self._context_field, self._timeout_spin, self._save_button,
                        self._delete_button, self._default_button, self._test_button):
             widget.setEnabled(enabled)
 
@@ -788,6 +811,9 @@ class ProvidersTab(QWidget):
         self._max_tokens_field.setText("" if provider.max_tokens is None else str(provider.max_tokens))
         self._price_in_field.setText("" if provider.price_input is None else f"{provider.price_input:g}")
         self._price_out_field.setText("" if provider.price_output is None else f"{provider.price_output:g}")
+        self._cache_read_field.setText("" if provider.price_cache_read is None else f"{provider.price_cache_read:g}")
+        self._cache_write_field.setText("" if provider.price_cache_write is None else f"{provider.price_cache_write:g}")
+        self._context_field.setText("" if provider.context_tokens is None else str(provider.context_tokens))
         self._timeout_spin.setValue(provider.timeout_seconds)
         self._apply_models(provider.kind)  # the list of the provider's models, if it was fetched before
         self._model_field.setText(provider.model)
@@ -800,7 +826,8 @@ class ProvidersTab(QWidget):
         self._kind_combo.blockSignals(False)
         self._apply_kind(kind)
         for field in (self._command_field, self._extra_args_field, self._key_field, self._key_env_field,
-                      self._temperature_field, self._max_tokens_field, self._price_in_field, self._price_out_field):
+                      self._temperature_field, self._max_tokens_field, self._price_in_field, self._price_out_field,
+                      self._cache_read_field, self._cache_write_field, self._context_field):
             field.clear()
         self._model_field.setText("")
         self._endpoint_field.setText(DEFAULT_ENDPOINTS.get(kind, ""))
@@ -829,6 +856,7 @@ class ProvidersTab(QWidget):
             self._key_field.text(), self._key_env_field.text(), self._temperature_field.text(),
             self._max_tokens_field.text(), self._timeout_spin.value(),
             self._price_in_field.text(), self._price_out_field.text(),
+            self._cache_read_field.text(), self._cache_write_field.text(), self._context_field.text(),
         )
 
     def _dirty(self) -> bool:
@@ -845,6 +873,7 @@ class ProvidersTab(QWidget):
             kind=kind,
             model=self._model_field.text().strip(),
             timeout_seconds=self._timeout_spin.value(),
+            context_tokens=_optional_number(self._context_field.text(), int, "Окно контекста"),
         )
         if kind in CLI_KINDS:
             try:
@@ -862,6 +891,8 @@ class ProvidersTab(QWidget):
             max_tokens=_optional_number(self._max_tokens_field.text(), int, "Макс. токенов ответа"),
             price_input=_optional_number(self._price_in_field.text(), float, "Цена за вход"),
             price_output=_optional_number(self._price_out_field.text(), float, "Цена за выход"),
+            price_cache_read=_optional_number(self._cache_read_field.text(), float, "Цена чтения из кэша"),
+            price_cache_write=_optional_number(self._cache_write_field.text(), float, "Цена записи в кэш"),
             **common,
         )
 
@@ -1142,11 +1173,11 @@ class ProvidersTab(QWidget):
 # @errors: Store/validation errors are shown in the tab's status line
 # @see: CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS, SUMMARY:WILDCARDS, GUI:PROMPT_PREVIEW, GUI:ACCOUNT_PANEL, GUI:LLM_WORKER, GUI:SUMMARY_DIALOG, CONFIG:ENV
 class SummarySettingsScreen(QWidget):
-    """Sidebar screen "Саммаризация": the templates and providers tabs."""
+    """Sidebar screen "Работа с языковой моделью": the templates and providers tabs."""
 
     def __init__(self) -> None:
         super().__init__()
-        title = QLabel("Саммаризация")
+        title = QLabel("Работа с языковой моделью")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
         intro = _muted_label(
             "Саммари создаётся из готового результата: на экране результата задания нажмите «Саммаризация…», "

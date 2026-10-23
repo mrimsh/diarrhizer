@@ -461,6 +461,7 @@ python -m diarrhizer chat "<job folder>" --list | --export PATH --last | --delet
 | `--template`, `--note`, `--note-file`, `--title` | New dialogue only; the note is fixed for the dialogue |
 | `--provider`, `--model` | The provider for this turn (default: the dialogue's last one) / its model |
 | `--no-session` | Do not keep a Codex CLI session; send the whole dialogue each turn |
+| `--drop-turns N`, `--window START-END` | Take a way out of a "context too long" error: leave N more of the oldest turns out from now on / keep only that part of the transcript (`HH:MM:SS`, `MM:SS` or seconds) |
 | `--print` | Also print the answer |
 | `--list`, `--export PATH` (`-` = stdout), `--delete ID` | List / write as Markdown (after the question if one is asked) / remove |
 
@@ -579,12 +580,23 @@ export/result.md ──► SUMMARY:JOB ──► ADAPTER:LLM ──► provider 
   model that answered, `usage` (with the cache parts), `cost_usd`, and the `context_mode` / `context_chars` /
   `cache_available` of the reply (CLI session or whole history). A Codex session is kept and resumed only while it
   has seen every turn (`session_turns`); after another provider answered, the history goes whole into a new one.
-  A failed request adds no turn. Export to Markdown: `export_markdown` / `export_conversation`. `summarize_job`
+  A failed request adds no turn. **Long contexts:** before sending, the request's size is estimated
+  (`estimate_tokens`: characters / 3, rounded up - a deliberately simple estimate, a little high for English, to be
+  compared with a limit and nothing else) and compared with `Provider.context_tokens` (an optional setting: no
+  provider reports a window - Codex's `model/list` has no such field - so there is no `ModelOption` field for it
+  either); no limit, no check. Over it `ask` raises `ContextTooLong` (nothing sent, nothing stored) whose
+  `check.options` are: `window` (the beginning of the transcript, as much as fits, cut at a timestamp), `drop_turns`
+  (the fewest oldest turns that make it fit, the transcript stays) and `switch_model`; taking one is asking again
+  with `window=(start, end)` / `drop_turns=n`. A window is applied to the stored prefix's transcript block (so the
+  cache restarts from a new prefix), omitted turns stay stored; both are kept in the dialogue
+  (`window`, `omitted_turns`), written into every later turn's `truncation` and shown in the GUI - never silent. A
+  dialogue with something cut out keeps no CLI session (the session would still hold what was cut).
+  `check_context` gives the verdict without sending; `conversation_totals` the dialogue's sums. Export to Markdown: `export_markdown` / `export_conversation`. `summarize_job`
   is untouched; the first turn of a dialogue with an empty question is the "summary".
 - **Not done on purpose:** splitting a transcript that exceeds a model's context window (the provider's
   error is passed on as is), streaming, and chat-style follow-ups.
 
-GUI: the **Саммаризация** screen (`screens/summary_settings_screen.py`, `GUI:SUMMARY_SETTINGS`) edits both
+GUI: the **Работа с языковой моделью** screen (`screens/summary_settings_screen.py`, `GUI:SUMMARY_SETTINGS`) edits both
 stores. A subscription provider there has an account box (`screens/account_panel.py`, `GUI:ACCOUNT_PANEL`):
 the signed-in account and one button that signs in, cancels a sign-in or signs out, plus the plan's limits;
 the model field is a list the provider fills (`screens/model_combo.py`) that still accepts a typed id. The
@@ -601,7 +613,11 @@ results folder of the GUI settings (`app/out_dir`). Everything that talks to a p
 sign-in, a model query - runs in
 a child process (`llm_worker.py` + `child_tasks.run_summary_task` / `run_provider_check_task` /
 `run_account_task`; a sign-in reports the address to open as an event), so it can be cancelled together with
-whatever the CLI started. The Russian wording of usage, cost and limits is `provider_text.py`, that of the
+whatever the CLI started. The dialogue screen (`screens/chat_dialog.py`, `GUI:CHAT_DIALOG`, opened from the Result
+screen's **Диалог с моделью…**) works on `summary/chat.py`: the job's dialogues, the turns, templates as quick questions,
+the context in view (size, limit, how the provider handles it), per-turn and total statistics, and, on a context that
+is too long, a panel with one button per option; `run_chat_task` runs `chat.ask` in the child process. The Russian wording
+of the dialogue is `chat_text.py`. The provider form has fields for the cache prices and the context window. The Russian wording of usage, cost and limits is `provider_text.py`, that of the
 wildcard checks `wildcard_text.py`.
 
 ---

@@ -6,7 +6,9 @@ with the transcript in it, kept in the file as it was built when the dialogue wa
 turns so far and the new question, so a provider's prompt cache can serve the prefix on every turn.
 """
 
+import copy
 import logging
+import math
 import re
 import time
 import uuid
@@ -18,6 +20,7 @@ from typing import Optional
 from diarrhizer.adapters import llm
 from diarrhizer.adapters.llm import Block, Message
 from diarrhizer.summary import service, wildcards
+from diarrhizer.export.turns import format_timestamp
 from diarrhizer.summary.providers import KIND_CODEX_CLI, Provider
 from diarrhizer.summary.templates import PromptTemplate
 from diarrhizer.utils import read_json, write_json_atomic, write_text_atomic
@@ -29,6 +32,48 @@ CHAT_DIR = "chat"
 FIRST_QUESTION = "Выполни инструкцию из шаблона."
 _ID_RE = re.compile(r"^[\w-]+$")
 _TITLE_CHARS = 60
+# The size of a text in tokens is estimated, not counted: characters / CHARS_PER_TOKEN, rounded up. Cyrillic runs
+# about 2-3 characters to a token and English about 4; 3 is the compromise, a little high for English, which is the
+# safe side for a limit check. The estimate is for comparing with a limit, nothing else.
+CHARS_PER_TOKEN = 3.0
+_FENCE_OPEN, _FENCE_CLOSE = "<transcript>\n", "\n</transcript>"
+_ENTRY_START = re.compile(r"^\[(\d+):(\d\d):(\d\d)")  # a transcript line begins "[HH:MM:SS → HH:MM:SS] **Name:** ..."
+
+
+def estimate_tokens(chars: int) -> int:
+    """About how many tokens `chars` characters of text are (see CHARS_PER_TOKEN)."""
+    return math.ceil(chars / CHARS_PER_TOKEN)
+
+
+@dataclass
+class ContextOption:
+    """One way out of a context that is too long, for the caller to offer."""
+
+    kind: str  # "window" | "drop_turns" | "switch_model"
+    label: str  # English, for the CLI; an interface words it itself from kind and data
+    data: dict = field(default_factory=dict)  # window: {"start", "end", "kept", "of"}; drop_turns: {"count"}
+
+
+@dataclass
+class ContextCheck:
+    estimated_tokens: int
+    limit: Optional[int]  # None: no limit known, nothing is checked
+    options: list = field(default_factory=list)  # of ContextOption, when the context is too long
+
+    @property
+    def exceeds(self) -> bool:
+        return self.limit is not None and self.estimated_tokens > self.limit
+
+
+class ContextTooLong(ValueError):
+    """The request would go over the model's context limit; nothing was sent. `options` are ways to shrink it."""
+
+    def __init__(self, check: ContextCheck, provider_name: str):
+        self.check = check
+        super().__init__(
+            f"The context is about {check.estimated_tokens:,} tokens, over the {check.limit:,} set for "
+            f"'{provider_name}'. Options: " + "; ".join(option.label for option in check.options)
+        )
 
 
 def _provider_dict(provider: Provider) -> dict:
@@ -52,6 +97,9 @@ class Turn:
     context_mode: str = ""  # llm.CONTEXT_SESSION / llm.CONTEXT_FULL_HISTORY: what was sent
     context_chars: Optional[int] = None
     cache_available: Optional[bool] = None
+    estimated_tokens: Optional[int] = None  # the request's size before sending, by estimate_tokens()
+    context_limit: Optional[int] = None  # the limit it was checked against (None = not checked)
+    truncation: list = field(default_factory=list)  # what this request left out, if anything - never silent
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -77,6 +125,8 @@ class Conversation:
     session_id: str = ""  # a CLI session that holds the turns so far
     session_kind: str = ""  # the provider kind that session belongs to
     session_turns: int = 0  # how many turns that session has seen: it is resumed only if it saw all of them
+    omitted_turns: int = 0  # the oldest turns that are no longer sent (they stay stored and shown)
+    window: Optional[dict] = None  # {"start", "end", "kept", "of"}: the transcript in the prefix was cut to a time window
 
     def to_dict(self) -> dict:
         data = dict(self.__dict__)
@@ -93,9 +143,9 @@ class Conversation:
         return Message("system", [Block(block["text"], bool(block.get("cache"))) for block in self.prefix])
 
     def messages(self, question: str) -> list[Message]:
-        """The request: the prefix, every turn so far, then the new question."""
+        """The request: the prefix, the turns so far (but the omitted oldest ones), then the new question."""
         messages = [self.system_message()]
-        for turn in self.turns:
+        for turn in self.turns[self.omitted_turns:]:
             messages += [Message("user", turn.question), Message("assistant", turn.answer)]
         messages.append(Message("user", question))
         return messages
@@ -135,6 +185,10 @@ def _note_precedes_transcript(prompt: str, note: str) -> bool:
 #   dialogues, and says so in a warning. Provider and model may change from turn to turn (each turn records its
 #   own). A Codex CLI session is kept and resumed only while it has seen every turn; otherwise the whole
 #   history is sent and a new session starts. A failed request adds nothing. Files are written atomically.
+#   Before sending, the request's size is estimated (estimate_tokens) and compared with the provider's
+#   context_tokens (none set = not checked); over it ask() raises ContextTooLong with the ways out - a transcript
+#   window, fewer old turns, another model - and sends nothing; taking one is asking again with window= /
+#   drop_turns=. What is cut stays recorded (the dialogue's window / omitted_turns, every turn's truncation).
 #   list/load/delete work on the chat/ folder; export_markdown() renders a dialogue as Markdown.
 # @inputs: job_dir with export/result.md, PromptTemplate, Provider, optional note, questions
 # @outputs: chat/<id>.json in the job folder; Conversation / Turn objects; Markdown text
@@ -170,7 +224,7 @@ def create_conversation(
         provider=_provider_dict(provider),
         note=note,
         created_at=now.isoformat(timespec="seconds"),
-        updated_at=now.isoformat(timespec="seconds"),
+        updated_at=now.isoformat(timespec="milliseconds"),  # finer than a turn's time: the order of "last used"
         prefix=prefix,
         warnings=warnings,
     )
@@ -186,22 +240,37 @@ def ask(
     question: str,
     provider: Provider,
     keep_cli_session: bool = True,
+    context_limit: int | None = None,
+    drop_turns: int = 0,
+    window: tuple[float, float] | None = None,
 ) -> Turn:
     """Ask the next question of `provider`; returns the new turn (it is saved with the dialogue).
 
     The provider (or its model) may differ from the earlier turns': each turn records its own. An empty question
     is allowed only as the first one (FIRST_QUESTION: carry out the template's instruction).
+
+    The request's size is estimated first. Over the limit (`context_limit`, else the provider's context_tokens;
+    none = no check) nothing is sent: ContextTooLong carries the options. Taking one is asking again with
+    `drop_turns` (leave that many more of the oldest turns out from now on) or `window` ((start, end) seconds:
+    keep only that part of the transcript from now on), or with another provider. What is left out is recorded
+    in the turn's `truncation` and stays in the dialogue's omitted_turns / window.
+
+    Raises:
+        ContextTooLong: the context is over the limit
+        FileNotFoundError/ValueError: no such dialogue, an empty question, a bad window
+        adapters.llm.LLMError: the provider failed (no turn is added)
     """
     job_dir = Path(job_dir)
-    conversation = load_conversation(job_dir, conversation_id)
-    question = question.strip()
-    if not question:
-        if conversation.turns:
-            raise ValueError("The question is empty")
-        question = FIRST_QUESTION
-
+    conversation, question, check = _prepare(
+        load_conversation(job_dir, conversation_id), question, provider, context_limit, drop_turns, window
+    )
+    if check.exceeds:
+        raise ContextTooLong(check, provider.name)
     messages = conversation.messages(question)
-    sessions = keep_cli_session and provider.kind == KIND_CODEX_CLI
+    # A session holds the whole conversation, so it cannot serve a dialogue that has had something cut out of it:
+    # such a dialogue is sent whole each time, without keeping sessions.
+    cut = bool(conversation.omitted_turns or conversation.window)
+    sessions = keep_cli_session and provider.kind == KIND_CODEX_CLI and not cut
     resumable = (
         sessions and conversation.session_id and conversation.session_kind == provider.kind
         and conversation.session_turns == len(conversation.turns)
@@ -226,6 +295,9 @@ def ask(
         context_mode=reply.context_mode,
         context_chars=reply.context_chars,
         cache_available=reply.cache_available,
+        estimated_tokens=check.estimated_tokens,
+        context_limit=check.limit,
+        truncation=truncation_notes(conversation),
     )
     if sessions and reply.session_id:
         conversation.session_id, conversation.session_kind = reply.session_id, provider.kind
@@ -235,11 +307,171 @@ def ask(
         )
     conversation.turns.append(turn)
     conversation.provider = _provider_dict(provider)
-    conversation.updated_at = turn.asked_at
+    conversation.updated_at = datetime.now().isoformat(timespec="milliseconds")
     if not conversation.title:
         conversation.title = question[:_TITLE_CHARS]
     _save(job_dir, conversation)
     return turn
+
+
+def _entries(text: str) -> tuple[list[str], list[tuple[float, str]]]:
+    """A transcript as (lines before the first timestamp, [(start seconds, the entry's lines)]).
+
+    An entry is a line that begins with a [HH:MM:SS timestamp and the lines after it that do not.
+    """
+    head: list[str] = []
+    entries: list[tuple[float, list[str]]] = []
+    for line in text.split("\n"):
+        stamp = _ENTRY_START.match(line)
+        if stamp:
+            hours, minutes, seconds = (int(part) for part in stamp.groups())
+            entries.append((hours * 3600 + minutes * 60 + seconds, [line]))
+        elif entries:
+            entries[-1][1].append(line)
+        else:
+            head.append(line)
+    return head, [(start, "\n".join(lines)) for start, lines in entries]
+
+
+def _transcript_texts(conversation: Conversation) -> list[tuple[int, str]]:
+    """[(block index, transcript text)] of the prefix's transcript blocks (the text between the fence tags)."""
+    found = []
+    for i, block in enumerate(conversation.prefix):
+        text = block["text"]
+        if text.startswith(_FENCE_OPEN) and text.endswith(_FENCE_CLOSE):
+            found.append((i, text[len(_FENCE_OPEN):-len(_FENCE_CLOSE)]))
+    return found
+
+
+def _apply_window(conversation: Conversation, start: float, end: float) -> None:
+    """Cut the transcript in the (in-memory) prefix to the entries that begin in [start, end)."""
+    if not 0 <= start < end:
+        raise ValueError(f"A transcript window needs 0 <= start < end, got {start}..{end}")
+    kept = total = 0
+    for i, text in _transcript_texts(conversation):
+        head, entries = _entries(text)
+        if not entries:
+            raise ValueError("The transcript has no timestamps, so it cannot be cut to a window")
+        chosen = [lines for stamp, lines in entries if start <= stamp < end]
+        if not chosen:
+            raise ValueError(f"No transcript lines begin between {format_timestamp(start)} and {format_timestamp(end)}")
+        kept, total = len(chosen), len(entries)
+        body = "\n".join([*head, *chosen])
+        conversation.prefix[i] = {**conversation.prefix[i], "text": f"{_FENCE_OPEN}{body}{_FENCE_CLOSE}"}
+    conversation.window = {"start": start, "end": end, "kept": kept, "of": total}
+
+
+def truncation_notes(conversation: Conversation) -> list[dict]:
+    """What is left out of a request to this dialogue: the omitted turns and the cut-off transcript, if any."""
+    notes = []
+    if conversation.omitted_turns:
+        notes.append({"kind": "omitted_turns", "count": conversation.omitted_turns, "of": len(conversation.turns)})
+    if conversation.window:
+        notes.append({"kind": "window", **conversation.window})
+    return notes
+
+
+def _size(conversation: Conversation, question: str) -> int:
+    return estimate_tokens(sum(len(message.text) for message in conversation.messages(question)))
+
+
+def _options(conversation: Conversation, question: str, limit: int) -> list[ContextOption]:
+    """The ways to bring a request under `limit`: a transcript window, fewer old turns, another model."""
+    options = []
+    sent = conversation.turns[conversation.omitted_turns:]
+    # Fewer old turns: the fewest of the oldest that brings it under the limit (the transcript stays).
+    over = _size(conversation, question) - limit
+    saved = 0
+    for count, turn in enumerate(sent, 1):
+        saved += estimate_tokens(len(turn.question) + len(turn.answer))
+        if saved >= over:
+            options.append(ContextOption(
+                "drop_turns", f"leave out the {count} oldest turn(s) (the transcript stays)", {"count": count}))
+            break
+    # A transcript window: its beginning, as much as fits next to everything else.
+    for _i, text in _transcript_texts(conversation)[:1]:
+        head, entries = _entries(text)
+        if len(entries) < 2:
+            break
+        room = estimate_tokens(len(text)) - over
+        used = estimate_tokens(len("\n".join(head)))
+        kept = 0
+        for _stamp, lines in entries:
+            used += estimate_tokens(len(lines) + 1)
+            if used > room:
+                break
+            kept += 1
+        if kept >= 1 and kept < len(entries):
+            end = entries[kept][0]
+            minutes = round(end / 60)
+            span = service.format_window(minutes) if minutes else f"{int(end)} s"
+            options.append(ContextOption(
+                "window",
+                f"cut the transcript to its first {span} ({format_timestamp(0)}-{format_timestamp(end)}, "
+                f"{kept} of {len(entries)} lines)",
+                {"start": 0.0, "end": float(end), "kept": kept, "of": len(entries)},
+            ))
+    options.append(ContextOption("switch_model", "use a model with a larger context", {}))
+    return options
+
+
+def _prepare(
+    conversation: Conversation, question: str, provider: Provider, context_limit: int | None, drop_turns: int,
+    window: "tuple[float, float] | None",
+) -> "tuple[Conversation, str, ContextCheck]":
+    """The dialogue as it would be sent (a copy: nothing is changed or saved), the question, and the size check."""
+    question = question.strip()
+    if not question:
+        if conversation.turns:
+            raise ValueError("The question is empty")
+        question = FIRST_QUESTION
+    conversation = copy.deepcopy(conversation)
+    if window is not None:
+        _apply_window(conversation, *window)
+    if drop_turns:
+        if not 0 < drop_turns <= len(conversation.turns) - conversation.omitted_turns:
+            raise ValueError(f"Cannot leave out {drop_turns} turn(s): there are "
+                             f"{len(conversation.turns) - conversation.omitted_turns} sent")
+        conversation.omitted_turns += drop_turns
+    limit = context_limit if context_limit is not None else provider.context_tokens
+    estimated = _size(conversation, question)
+    check = ContextCheck(estimated, limit)
+    if check.exceeds:
+        check.options = _options(conversation, question, limit)
+    return conversation, question, check
+
+
+def check_context(
+    job_dir: str | Path, conversation_id: str, question: str, provider: Provider,
+    context_limit: int | None = None, drop_turns: int = 0, window: "tuple[float, float] | None" = None,
+) -> ContextCheck:
+    """The size of the next request and, if it is over the limit, the options - without sending anything.
+
+    Takes the same arguments as ask(), so an interface can check what it is about to send.
+    """
+    _conversation, _question, check = _prepare(
+        load_conversation(job_dir, conversation_id), question, provider, context_limit, drop_turns, window
+    )
+    return check
+
+
+def conversation_totals(conversation: Conversation) -> dict:
+    """What the whole dialogue used: turns, input / output tokens, cache parts and cost (where reported)."""
+    totals = {"turns": len(conversation.turns), "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+              "cache_write_tokens": 0, "cost_usd": None}
+    for turn in conversation.turns:
+        usage = turn.usage or {}
+        for key in ("input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens"):
+            totals[key] += usage.get(key) or 0
+        if turn.cost_usd is not None:
+            totals["cost_usd"] = (totals["cost_usd"] or 0.0) + turn.cost_usd
+    return totals
+
+
+def quick_question(template: PromptTemplate, job_dir: str | Path, note: str = "") -> str:
+    """A template as a question for an open dialogue: its instruction with the wildcards filled in, no transcript."""
+    ctx = wildcards.PromptContext("", note, Path(job_dir))
+    return wildcards.render_instruction(template.prompt, ctx, template.name)
 
 
 def load_conversation(job_dir: str | Path, conversation_id: str) -> Conversation:

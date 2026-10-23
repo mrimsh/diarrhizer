@@ -471,3 +471,195 @@ def test_chat_shows_a_provider_failure_and_keeps_the_dialogue(run_cli, job_dir, 
     assert code == 1 and "HTTP 401" in err
     (conversation,) = chat.list_conversations(job_dir)  # the dialogue exists, with no turn: ask again to continue
     assert conversation.turns == []
+
+
+# --- the long-context policy -------------------------------------------------------------------------------
+
+
+def long_job(job_dir, entries=40, chars=297):
+    """A transcript of `entries` timestamped lines, one a minute, ~chars characters each."""
+    lines = ["# Transcription", ""]
+    for i in range(entries):
+        stamp = f"[00:{i:02d}:00 → 00:{i:02d}:50]"
+        lines.append(f"{stamp} **Иван:** " + "с" * (chars - len(stamp) - len(" **Иван:** ")))
+    (job_dir / "export" / "result.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return job_dir
+
+
+def limited(tokens, **kwargs) -> Provider:
+    return Provider(name="gw", kind=KIND_OPENAI_API, endpoint="https://api.example.com/v1", model="m-1",
+                    context_tokens=tokens, **kwargs)
+
+
+def test_tokens_are_estimated_from_characters(job_dir):
+    assert chat.estimate_tokens(300) == 100 and chat.estimate_tokens(301) == 101 and chat.estimate_tokens(0) == 0
+
+
+def test_without_a_limit_nothing_is_checked_however_long_the_context(job_dir, model):
+    long_job(job_dir, entries=200)
+    conversation = new(job_dir)
+
+    turn = chat.ask(job_dir, conversation.id, "Вопрос?", GW)  # GW has no context_tokens
+
+    assert turn.context_limit is None and turn.estimated_tokens > 10_000 and turn.truncation == []
+    assert chat.check_context(job_dir, conversation.id, "Ещё?", GW).exceeds is False
+
+
+def test_a_context_over_the_limit_is_not_sent_and_the_options_are_returned(job_dir, model):
+    long_job(job_dir)  # ~4000 tokens of transcript
+    conversation = new(job_dir, provider=limited(5000))
+    chat.ask(job_dir, conversation.id, "Первый?", limited(5000))
+    chat.ask(job_dir, conversation.id, "Второй " + "я" * 600 + "?", limited(5000))
+    sent = len(model.calls)
+
+    with pytest.raises(chat.ContextTooLong) as excinfo:
+        chat.ask(job_dir, conversation.id, "Третий " + "ю" * 2400 + "?", limited(5000))
+
+    assert len(model.calls) == sent  # nothing went out
+    assert len(chat.load_conversation(job_dir, conversation.id).turns) == 2  # and nothing was stored
+    check = excinfo.value.check
+    assert check.exceeds and check.limit == 5000 and check.estimated_tokens > 5000
+    assert [option.kind for option in check.options] == ["drop_turns", "window", "switch_model"]
+    drop, window, _switch = check.options
+    assert drop.data["count"] in (1, 2)
+    assert window.data["start"] == 0 and 0 < window.data["kept"] < window.data["of"] == 40
+    message = str(excinfo.value)
+    assert "over the 5,000" in message and "oldest turn" in message and "first" in message and "larger context" in message
+
+
+def test_the_options_are_only_those_that_would_help(job_dir, model):
+    long_job(job_dir, entries=40)
+    first = new(job_dir, provider=limited(1000))
+
+    check = chat.check_context(job_dir, first.id, "Вопрос?", limited(1000))
+
+    assert check.exceeds and [o.kind for o in check.options] == ["window", "switch_model"]  # no turns, no drop_turns
+    (job_dir / "export" / "result.md").write_text("Просто текст без времени. " * 400, encoding="utf-8")
+    second = new(job_dir, provider=limited(1000))  # a transcript without timestamps cannot be windowed
+    assert [o.kind for o in chat.check_context(job_dir, second.id, "Вопрос?", limited(1000)).options] == ["switch_model"]
+    with pytest.raises(ValueError, match="no timestamps"):
+        chat.ask(job_dir, second.id, "Вопрос?", limited(1000), window=(0, 60))
+
+
+def test_leaving_out_old_turns_is_recorded_and_the_transcript_stays(job_dir, model):
+    long_job(job_dir)
+    conversation = new(job_dir, provider=limited(5000))
+    for i in range(3):
+        chat.ask(job_dir, conversation.id, f"Вопрос {i} " + "я" * 400, limited(5000))
+    big = "Большой вопрос " + "ю" * 2400
+    with pytest.raises(chat.ContextTooLong) as excinfo:
+        chat.ask(job_dir, conversation.id, big, limited(5000))
+    count = next(o.data["count"] for o in excinfo.value.check.options if o.kind == "drop_turns")
+
+    turn = chat.ask(job_dir, conversation.id, big, limited(5000), drop_turns=count)
+
+    sent = model.calls[-1]["messages"]
+    kept = [t for q in range(3) if q >= count for t in (f"Вопрос {q} " + "я" * 400, f"Ответ {q + 1}")]
+    assert [m.text for m in sent[1:]] == kept + [big]
+    assert sent[0] == chat.load_conversation(job_dir, conversation.id).system_message()  # the transcript is still in
+    assert turn.truncation == [{"kind": "omitted_turns", "count": count, "of": 3}]  # said, not silent
+    stored = chat.load_conversation(job_dir, conversation.id)
+    assert stored.omitted_turns == count and len(stored.turns) == 4  # the omitted turns are still kept and shown
+    chat.ask(job_dir, conversation.id, "Ещё?", limited(5000))  # the omission goes on without asking again
+    assert chat.load_conversation(job_dir, conversation.id).turns[-1].truncation[0]["count"] == count
+
+
+def test_cutting_the_transcript_to_a_window_is_recorded_and_the_cut_is_visible(job_dir, model):
+    long_job(job_dir)
+    conversation = new(job_dir, provider=limited(3000))
+    with pytest.raises(chat.ContextTooLong) as excinfo:
+        chat.ask(job_dir, conversation.id, "Вопрос?", limited(3000))
+    option = next(o for o in excinfo.value.check.options if o.kind == "window")
+
+    turn = chat.ask(job_dir, conversation.id, "Вопрос?", limited(3000), window=(option.data["start"], option.data["end"]))
+
+    transcript = model.calls[-1]["messages"][0].blocks[-1].text
+    assert transcript.count("\n[00:") == option.data["kept"] and "[00:00:00" in transcript
+    assert f"[00:{option.data['kept']:02d}:00" not in transcript  # the first line past the window is gone
+    assert turn.truncation[0]["kind"] == "window" and turn.truncation[0]["kept"] == option.data["kept"]
+    assert turn.truncation[0]["of"] == 40 and turn.estimated_tokens <= 3000
+    stored = chat.load_conversation(job_dir, conversation.id)
+    assert stored.window["end"] == option.data["end"] and "# Transcription" in stored.prefix[-1]["text"]  # header stays
+
+
+def test_a_bad_window_or_drop_is_refused(job_dir, model):
+    long_job(job_dir)
+    conversation = new(job_dir)
+    for kwargs in ({"window": (60, 30)}, {"window": (-1, 30)}, {"window": (7200, 9000)}, {"drop_turns": 1}):
+        with pytest.raises(ValueError):
+            chat.ask(job_dir, conversation.id, "?", GW, **kwargs)
+    assert model.calls == []
+
+
+def test_an_explicit_limit_beats_the_providers(job_dir, model):
+    long_job(job_dir)
+    conversation = new(job_dir, provider=limited(10))
+
+    assert chat.check_context(job_dir, conversation.id, "?", limited(10), context_limit=1_000_000).exceeds is False
+    assert chat.check_context(job_dir, conversation.id, "?", limited(1_000_000), context_limit=10).exceeds is True
+
+
+def test_a_dialogue_with_something_cut_out_does_not_keep_cli_sessions(job_dir, model):
+    long_job(job_dir)
+    codex = Provider(name="ChatGPT", kind=KIND_CODEX_CLI, context_tokens=3000)
+    conversation = new(job_dir, provider=codex)
+    model.replies = [LLMReply("a", session_id="S1", context_mode=llm.CONTEXT_FULL_HISTORY)] * 2
+
+    chat.ask(job_dir, conversation.id, "?", codex, window=(0, 600))
+    chat.ask(job_dir, conversation.id, "?", codex)
+
+    assert [(c["keep"], c["session"]) for c in model.calls] == [(False, ""), (False, "")]
+
+
+def test_the_totals_of_a_dialogue_and_a_template_as_a_quick_question(job_dir, model):
+    model.replies = [
+        LLMReply("а", usage=Usage(1000, 10, cached_tokens=600, cache_write_tokens=100, uncached_input_tokens=300),
+                 cost_usd=0.5),
+        LLMReply("б", usage=Usage(1200, 20, cached_tokens=1000, cache_write_tokens=0, uncached_input_tokens=200)),
+        LLMReply("в"),
+    ]
+    conversation = new(job_dir)
+    for _ in range(3):
+        chat.ask(job_dir, conversation.id, "?", GW)
+
+    totals = chat.conversation_totals(chat.load_conversation(job_dir, conversation.id))
+
+    assert totals == {"turns": 3, "input_tokens": 2200, "output_tokens": 30, "cached_tokens": 1600,
+                      "cache_write_tokens": 100, "cost_usd": 0.5}
+    template = PromptTemplate(name="Т", prompt="Протокол «{{job_name}}»: {{transcript}} Кратко. {{note}}")
+    assert chat.quick_question(template, job_dir, "срочно") == "Протокол «meeting»:  Кратко. срочно"
+    assert chat.conversation_totals(new(job_dir))["cost_usd"] is None
+
+
+def test_chat_over_the_limit_says_what_to_do_and_sends_nothing(run_cli, job_dir, model, configured):
+    long_job(job_dir)
+    providers = ProviderStore.load()
+    providers.put(limited(3000))
+    providers.put(Provider(name="big", kind=KIND_OPENAI_API, endpoint="https://b.example.com/v1", model="b",
+                           context_tokens=100_000))
+    providers.save()
+
+    code, _out, err = run_cli(job_dir, "Вопрос?", "--provider", "gw")
+    assert code == 1 and "over the 3,000" in err and "Nothing was sent" in err and "--window" in err
+    assert model.calls == []
+    (conversation,) = chat.list_conversations(job_dir)
+
+    code, _out, err = run_cli(job_dir, "Вопрос?", "--conversation", conversation.id, "--provider", "gw",
+                              "--window", "0-00:10:00")
+    assert code == 0, err
+    assert chat.load_conversation(job_dir, conversation.id).window["end"] == 600
+    code, _out, err = run_cli(job_dir, "Вопрос?", "--conversation", conversation.id, "--provider", "big")
+    assert code == 0, err  # another model is the third way out
+    code, _out, err = run_cli(job_dir, "Вопрос?", "--last", "--window", "ten minutes")
+    assert code == 1 and "Not a time" in err
+
+
+def test_provider_context_tokens_are_validated_and_stored():
+    assert limited(8000).to_dict()["context_tokens"] == 8000
+    assert Provider.from_dict(limited(8000).to_dict()) == limited(8000)
+    assert "context_tokens" not in GW.to_dict()
+    cli_provider = Provider(name="c", kind=KIND_CODEX_CLI, context_tokens=200_000)
+    assert Provider.from_dict(cli_provider.to_dict()).context_tokens == 200_000
+    for bad in (0, -5, "big", True, 1.5):
+        with pytest.raises(ValueError, match="context_tokens"):
+            limited(bad)

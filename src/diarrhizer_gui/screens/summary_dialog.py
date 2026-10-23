@@ -4,7 +4,7 @@ Opened from the Result screen. The model call runs in a child process
 (LlmWorker) so the GUI stays responsive and the request can be cancelled; the
 reply is stored in the job's summary/ folder by diarrhizer.summary.service and
 shown here as Markdown. Templates and providers come from the same JSON files
-the "Саммаризация" settings screen edits.
+the "Работа с языковой моделью" settings screen edits.
 """
 
 import os
@@ -226,7 +226,7 @@ class SummaryDialog(QDialog):
         self._provider_combo.setEnabled(bool(self._providers))
         if not self._providers and not problems:
             problems.append(
-                "Не настроено ни одного провайдера — добавьте его на экране «Саммаризация» "
+                "Не настроено ни одного провайдера — добавьте его на экране «Работа с языковой моделью» "
                 "(вкладка «Провайдеры»): аккаунт ChatGPT или Claude либо API с ключом."
             )
         self._set_status("\n".join(problems), ok=False if problems else None)

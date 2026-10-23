@@ -18,7 +18,7 @@ CRASH_HINT = (
 # [SEMANTIC-BEGIN] GUI:LLM_WORKER
 # @purpose: Run one summary / provider-check / account task off the GUI process and report its outcome as Qt signals
 # @description: Wraps ChildProcess around one of the child_tasks targets (run_summary_task,
-#   run_provider_check_task, run_account_task). Exactly one of finished/failed/cancelled fires. cancel() kills the child
+#   run_chat_task, run_provider_check_task, run_account_task). Exactly one of finished/failed/cancelled fires. cancel() kills the child
 #   and everything it started - including a subscription CLI's own processes - at once; nothing is written
 #   for a cancelled summary, because the reply is stored only after the provider answered. A child that
 #   dies without reporting becomes failed("ProcessCrashed", ...).

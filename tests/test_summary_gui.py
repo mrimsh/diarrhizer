@@ -19,7 +19,7 @@ pytest.importorskip("PySide6", reason="GUI extra not installed")
 
 from PySide6.QtCore import QEventLoop, QObject, Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import QTextCursor  # noqa: E402
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox  # noqa: E402
 
 from diarrhizer.adapters import llm  # noqa: E402
 from diarrhizer.adapters.llm import LLMError, LLMReply  # noqa: E402
@@ -35,10 +35,11 @@ from diarrhizer.summary.providers import (  # noqa: E402
 )
 from diarrhizer.summary.templates import BUILTIN_TEMPLATES, PromptTemplate, TemplateStore  # noqa: E402
 from diarrhizer.summary.wildcards import WILDCARDS, Wildcard  # noqa: E402
-from diarrhizer_gui import child_tasks, settings_keys, wildcard_text  # noqa: E402
+from diarrhizer_gui import chat_text, child_tasks, settings_keys, wildcard_text  # noqa: E402
 from diarrhizer_gui.llm_worker import LlmWorker  # noqa: E402
 from diarrhizer_gui.screens import (  # noqa: E402
     account_panel,
+    chat_dialog,
     prompt_preview_dialog,
     result_screen,
     summary_dialog,
@@ -138,6 +139,7 @@ def fake_worker(monkeypatch):
     FakeWorker.instances = []
     monkeypatch.setattr(summary_settings_screen, "LlmWorker", FakeWorker)
     monkeypatch.setattr(summary_dialog, "LlmWorker", FakeWorker)
+    monkeypatch.setattr(chat_dialog, "LlmWorker", FakeWorker)
     return FakeWorker
 
 
@@ -870,7 +872,8 @@ def test_cancelling_kills_the_cli_started_by_the_child(qapp, tmp_path, monkeypat
     worker.start()
 
     deadline = time.monotonic() + 40
-    while not marker.exists() and time.monotonic() < deadline:  # the stand-in CLI is up and waiting
+    # The stand-in CLI is up and waiting once the marker holds its pid (the file may exist a moment before it does).
+    while not (marker.exists() and marker.read_text().strip()) and time.monotonic() < deadline:
         loop = QEventLoop()
         QTimer.singleShot(100, loop.quit)
         loop.exec()
@@ -1764,3 +1767,433 @@ def test_only_finished_jobs_of_the_results_folder_are_offered_newest_first(tmp_p
 
     assert out_dir == tmp_path / "out"
     assert [job.name for _title, job in jobs] == ["b_20260301_100000", "a_20260101_100000"]
+
+
+# --- the dialogue screen -------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def chat_model(monkeypatch):
+    """Replace complete_chat: `chat_model.calls` records what it was given, `chat_model.replies` what it answers."""
+
+    class ChatModel:
+        replies: list = []
+        calls: list = []
+
+    ChatModel.replies, ChatModel.calls = [], []
+
+    def fake(provider, messages, keep_session=False, session_id=""):
+        ChatModel.calls.append({"provider": provider, "messages": list(messages), "keep": keep_session})
+        if ChatModel.replies:
+            reply = ChatModel.replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        return LLMReply(
+            "Ответ модели", model="m-answer",
+            usage=Usage(1000, 20, cached_tokens=600, cache_write_tokens=100, uncached_input_tokens=300),
+            cost_usd=0.0123, cost_note="оценка", context_mode=llm.CONTEXT_FULL_HISTORY, context_chars=900,
+        )
+
+    monkeypatch.setattr(llm, "complete_chat", fake)
+    return ChatModel
+
+
+@pytest.fixture
+def chat_workers(fake_worker, monkeypatch):
+    monkeypatch.setattr(chat_dialog, "LlmWorker", fake_worker)
+    return fake_worker
+
+
+def _long_job(tmp_path: Path, entries: int = 40) -> Path:
+    job = _job_with_protocol(tmp_path)
+    lines = ["# Transcription", ""]
+    for i in range(entries):
+        stamp = f"[00:{i:02d}:00 → 00:{i:02d}:50]"
+        lines.append(f"{stamp} **Иван:** " + "с" * (297 - len(stamp) - len(" **Иван:** ")))
+    (job / "export" / "result.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return job
+
+
+def _open_chat(tmp_path: Path, job: Path | None = None):
+    return chat_dialog.ChatDialog(None, job or _job_with_protocol(tmp_path), "meeting.mp4")
+
+
+def _ask(dialog, question: str) -> None:
+    dialog._input.setPlainText(question)
+    dialog._send_button.click()
+
+
+def test_the_section_is_called_work_with_a_language_model(qapp):
+    from diarrhizer_gui import main_window
+
+    assert main_window.NAV_LABELS["summary"] == "Работа с языковой моделью"
+    assert "Саммаризация" not in main_window.NAV_LABELS.values()
+    screen = summary_settings_screen.SummarySettingsScreen()
+    assert "Работа с языковой моделью" in [label.text() for label in screen.findChildren(QLabel)]
+
+
+def test_the_one_shot_summary_dialog_is_still_there(qapp, tmp_path, configured):
+    dialog = summary_dialog.SummaryDialog(None, _job_with_protocol(tmp_path), "meeting.mp4")
+    assert dialog.windowTitle() == "Саммаризация" and dialog._create_button.text() == "Создать саммари"
+
+
+def test_the_screen_shows_which_context_is_used_and_how_the_provider_handles_it(qapp, tmp_path, configured):
+    dialog = _open_chat(tmp_path)
+
+    text = dialog._context_label.text()
+    assert "meeting.mp4" in text and "export/result.md" in text and "симв." in text and "токенов" in text
+    assert "Codex" in text and "предел не задан" in text  # the default provider is the ChatGPT one
+
+    dialog._provider_combo.setCurrentIndex(dialog._provider_combo.findData("gw"))
+    assert "автоматический" in dialog._context_label.text()  # an OpenAI-compatible API caches a repeated prefix
+    dialog._session_check.setChecked(False)
+    dialog._provider_combo.setCurrentIndex(dialog._provider_combo.findData("ChatGPT"))
+    assert "Полная история" in dialog._context_label.text()
+
+
+def test_a_new_dialogue_is_stored_listed_and_warns_about_a_note_before_the_transcript(qapp, tmp_path, configured):
+    from diarrhizer.summary import chat
+
+    store = TemplateStore.load()
+    store.put(PromptTemplate(name="С заметкой", prompt="Заметка: {{note}}\n{{transcript}}"))
+    store.save()
+    job = _job_with_protocol(tmp_path)
+    dialog = _open_chat(tmp_path, job)
+    assert dialog._list.count() == 0 and "ещё нет ходов" in dialog._history.toPlainText()
+
+    dialog._template_combo.setCurrentIndex(dialog._template_combo.findData("С заметкой"))
+    dialog._note_field.setText("про сроки")
+    dialog._new_button.click()
+
+    (stored,) = chat.list_conversations(job)
+    assert stored.template == "С заметкой" and stored.note == "про сроки"
+    assert dialog._list.count() == 1 and dialog._list.currentItem().data(Qt.ItemDataRole.UserRole) == stored.id
+    assert "кэш эффективен только в рамках этого диалога" in dialog._status.text()
+    assert dialog._delete_button.isEnabled() and dialog._export_button.isEnabled()
+
+
+def test_a_question_runs_in_the_background_and_the_turn_shows_what_it_used(
+    qapp, tmp_path, configured, chat_workers, chat_model
+):
+    from diarrhizer.summary import chat
+
+    job = _job_with_protocol(tmp_path)
+    dialog = _open_chat(tmp_path, job)
+
+    _ask(dialog, "Кто пришёл?")  # no dialogue yet: one is started with the question
+
+    (worker,) = chat_workers.instances
+    assert worker.started and worker.target is child_tasks.run_chat_task
+    job_arg, conversation_id, question, provider_dict, keep, drop, window = worker.args
+    assert (job_arg, question, keep, drop, window) == (str(job), "Кто пришёл?", True, 0, None)
+    assert provider_dict["name"] == "ChatGPT"
+    assert dialog._send_button.text() == "Отменить" and not dialog._input.isEnabled()  # waiting, can be cancelled
+    assert "Запрос к «ChatGPT»" in dialog._status.text()
+
+    worker.run_like_the_child()
+
+    assert dialog._send_button.text() == "Отправить" and dialog._input.isEnabled() and dialog._input.toPlainText() == ""
+    history = dialog._history.toPlainText()
+    assert "Кто пришёл?" in history and "Ответ модели" in history
+    status = dialog._status.text()
+    assert "из кэша 600" in status and "записано в кэш 100" in status and "0.0123" in status
+    assert "Контекст: полная история" in status
+    assert "из кэша 600" in history  # the same under the turn
+    assert dialog._totals_label.text().startswith("Итого по диалогу: ходов 1, вход 1 000, выход 20")
+    assert "из кэша 600" in dialog._totals_label.text() and "записано в кэш 100" in dialog._totals_label.text()
+    assert "ходов 1" in dialog._list.currentItem().text()
+    (stored,) = chat.list_conversations(job)
+    assert stored.id == conversation_id and stored.turns[0].usage["cache_write_tokens"] == 100
+
+    _ask(dialog, "А что решили?")
+    chat_workers.instances[1].run_like_the_child()
+    assert dialog._totals_label.text().startswith("Итого по диалогу: ходов 2, вход 2 000")
+    assert len(chat_model.calls) == 2 and chat_model.calls[1]["messages"][2].text == "Ответ модели"
+
+
+def test_a_failed_request_is_shown_and_adds_no_turn_and_a_running_one_can_be_cancelled(
+    qapp, tmp_path, configured, chat_workers, chat_model
+):
+    from diarrhizer.summary import chat
+
+    job = _job_with_protocol(tmp_path)
+    dialog = _open_chat(tmp_path, job)
+    chat_model.replies = [LLMError("Provider 'ChatGPT': codex exited with code 1:\nNot logged in")]
+
+    _ask(dialog, "Вопрос?")
+    chat_workers.instances[0].run_like_the_child()
+    assert "Not logged in" in dialog._status.text() and dialog._send_button.isEnabled()
+    assert chat.list_conversations(job)[0].turns == []
+
+    dialog._send_button.click()  # the question is still in the input
+    dialog._send_button.click()  # now "Отменить"
+    assert chat_workers.instances[1].cancel_called and "отменён" in dialog._status.text()
+    assert dialog._input.toPlainText() == "Вопрос?" and chat.list_conversations(job)[0].turns == []
+
+
+def test_closing_during_a_request_asks_first(qapp, tmp_path, configured, chat_workers, monkeypatch):
+    dialog = _open_chat(tmp_path)
+    dialog.show()
+    _ask(dialog, "Вопрос?")
+
+    _yes(monkeypatch, QMessageBox.StandardButton.No)
+    dialog.reject()
+    assert dialog.isVisible() and not chat_workers.instances[0].cancel_called
+    _yes(monkeypatch)
+    dialog.reject()
+    assert chat_workers.instances[0].cancel_called and not dialog.isVisible()
+
+
+def test_the_provider_and_model_can_change_in_the_middle_of_a_dialogue(
+    qapp, tmp_path, configured, chat_workers, chat_model
+):
+    dialog = _open_chat(tmp_path)
+    _ask(dialog, "Первый?")
+    chat_workers.instances[0].run_like_the_child()
+
+    dialog._provider_combo.setCurrentIndex(dialog._provider_combo.findData("gw"))
+    dialog._model_field.setText("m-other")
+    _ask(dialog, "Второй?")
+
+    provider_dict = chat_workers.instances[1].args[3]
+    assert (provider_dict["name"], provider_dict["model"]) == ("gw", "m-other")
+    chat_workers.instances[1].run_like_the_child()
+    assert "gw · m-answer" in dialog._history.toPlainText() and "ChatGPT" in dialog._history.toPlainText()
+    assert chat_model.calls[1]["provider"].model == "m-other"
+
+
+def test_the_quick_buttons_put_a_templates_instruction_into_the_input(qapp, tmp_path, configured):
+    dialog = _open_chat(tmp_path)
+
+    assert set(dialog._quick_buttons) == set(TemplateStore.load().templates())
+    dialog._quick_buttons["Мой шаблон"].click()
+
+    assert dialog._input.toPlainText() == "Сделай мой разбор."  # nothing is sent by it
+    assert not dialog._quick_buttons["Мой шаблон"].text().startswith("Сделай")
+
+
+def test_a_context_over_the_limit_is_not_sent_and_the_options_are_buttons(
+    qapp, tmp_path, configured, chat_workers, chat_model
+):
+    from diarrhizer.summary import chat
+
+    _store_providers(Provider(name="small", kind=KIND_OPENAI_API, endpoint="https://api.example.com/v1", model="s",
+                              context_tokens=3000))
+    job = _long_job(tmp_path)
+    dialog = _open_chat(tmp_path, job)
+    dialog._provider_combo.setCurrentIndex(dialog._provider_combo.findData("small"))
+
+    _ask(dialog, "Вопрос?")
+
+    assert chat_workers.instances == []  # nothing was started, nothing sent
+    assert not dialog._warning_box.isHidden()
+    assert "Ничего не отправлено" in dialog._warning_label.text() and "3 000" in dialog._warning_label.text()
+    buttons = [dialog._warning_buttons.itemAt(i).widget().text() for i in range(dialog._warning_buttons.count())]
+    assert [b for b in buttons if b.startswith("Ограничить транскрипт")] and "Сменить модель…" in buttons
+    assert buttons[-1] == "Отмена" and dialog._input.toPlainText() == "Вопрос?"
+
+    window_button = next(dialog._warning_buttons.itemAt(i).widget() for i in range(dialog._warning_buttons.count())
+                         if dialog._warning_buttons.itemAt(i).widget().text().startswith("Ограничить транскрипт"))
+    window_button.click()
+
+    (worker,) = chat_workers.instances
+    start, end = worker.args[6]
+    assert start == 0 and 0 < end < 2400 and dialog._warning_box.isHidden()
+    worker.run_like_the_child()
+    assert "транскрипт ограничен окном 00:00:00" in dialog._status.text()  # said, not silent
+    assert "транскрипт ограничен окном" in dialog._history.toPlainText()
+    (stored,) = chat.list_conversations(job)
+    assert stored.window["end"] == end and stored.turns[0].truncation[0]["kind"] == "window"
+    assert "транскрипт ограничен окном" in dialog._context_label.text()  # and it stays in view
+
+
+def test_leaving_out_the_oldest_turns_is_offered_and_recorded(qapp, tmp_path, configured, chat_workers, chat_model):
+    from diarrhizer.summary import chat
+
+    _store_providers(Provider(name="small", kind=KIND_OPENAI_API, endpoint="https://api.example.com/v1", model="s",
+                              context_tokens=5000))
+    job = _long_job(tmp_path)
+    dialog = _open_chat(tmp_path, job)
+    dialog._provider_combo.setCurrentIndex(dialog._provider_combo.findData("small"))
+    for i in range(3):
+        _ask(dialog, f"Вопрос {i} " + "я" * 400)
+        chat_workers.instances[-1].run_like_the_child()
+    assert dialog._warning_box.isHidden()
+
+    _ask(dialog, "Большой вопрос " + "ю" * 2400)
+    assert not dialog._warning_box.isHidden() and len(chat_workers.instances) == 3
+    drop_button = next(dialog._warning_buttons.itemAt(i).widget() for i in range(dialog._warning_buttons.count())
+                       if dialog._warning_buttons.itemAt(i).widget().text().startswith("Убрать"))
+    drop_button.click()
+
+    worker = chat_workers.instances[3]
+    assert worker.args[5] >= 1
+    worker.run_like_the_child()
+    assert "самые старые ходы" in dialog._status.text() and "не отправлялись" in dialog._status.text()
+    (stored,) = chat.list_conversations(job)
+    assert stored.omitted_turns == worker.args[5] and len(stored.turns) == 4  # still all shown in the history
+    assert dialog._history.toPlainText().count("Вопрос ") >= 3
+
+
+def test_the_switch_model_option_only_asks_to_pick_another_model(qapp, tmp_path, configured, chat_workers):
+    _store_providers(Provider(name="small", kind=KIND_OPENAI_API, endpoint="https://api.example.com/v1", model="s",
+                              context_tokens=3000))
+    dialog = _open_chat(tmp_path, _long_job(tmp_path))
+    dialog._provider_combo.setCurrentIndex(dialog._provider_combo.findData("small"))
+    _ask(dialog, "Вопрос?")
+
+    next(dialog._warning_buttons.itemAt(i).widget() for i in range(dialog._warning_buttons.count())
+         if dialog._warning_buttons.itemAt(i).widget().text() == "Сменить модель…").click()
+
+    assert dialog._warning_box.isHidden() and "другого провайдера или модель" in dialog._status.text()
+    assert chat_workers.instances == []
+
+
+def test_dialogues_can_be_deleted_and_exported(qapp, tmp_path, configured, chat_workers, chat_model, monkeypatch):
+    from diarrhizer.summary import chat
+
+    job = _job_with_protocol(tmp_path)
+    dialog = _open_chat(tmp_path, job)
+    _ask(dialog, "Первый вопрос")
+    chat_workers.instances[0].run_like_the_child()
+    target = tmp_path / "dialogue.md"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *args, **kwargs: (str(target), "")))
+
+    dialog._export_button.click()
+
+    assert "## 1. Первый вопрос" in target.read_text(encoding="utf-8") and str(target) in dialog._status.text()
+    _yes(monkeypatch, QMessageBox.StandardButton.No)
+    dialog._delete_button.click()
+    assert len(chat.list_conversations(job)) == 1
+    _yes(monkeypatch)
+    dialog._delete_button.click()
+    assert chat.list_conversations(job) == [] and dialog._list.count() == 0 and not dialog._delete_button.isEnabled()
+    assert "ещё нет ходов" in dialog._history.toPlainText()
+
+
+def test_the_dialogues_of_a_job_are_listed_and_switched(qapp, tmp_path, configured, chat_workers, chat_model):
+    job = _job_with_protocol(tmp_path)
+    dialog = _open_chat(tmp_path, job)
+    _ask(dialog, "Про людей")
+    chat_workers.instances[0].run_like_the_child()
+    dialog._new_button.click()
+    _ask(dialog, "Про сроки")
+    chat_workers.instances[1].run_like_the_child()
+    assert dialog._list.count() == 2
+
+    first = next(i for i in range(2) if "Про людей" in dialog._list.item(i).text())
+    dialog._list.setCurrentRow(first)
+
+    assert "Про людей" in dialog._history.toPlainText() and "Про сроки" not in dialog._history.toPlainText()
+    assert dialog._totals_label.text().startswith("Итого по диалогу: ходов 1")
+    reopened = _open_chat(tmp_path, job)  # the dialogues are on disk
+    assert reopened._list.count() == 2
+
+
+def test_the_dialog_without_providers_or_a_result_says_so(qapp, tmp_path):
+    dialog = _open_chat(tmp_path)
+    assert not dialog._send_button.isEnabled() and "Провайдеры" in dialog._status.text()
+    empty = tmp_path / "out" / "empty_job"
+    empty.mkdir(parents=True)
+    assert "result.md" in chat_dialog.ChatDialog(None, empty, "x")._status.text()
+
+
+def test_the_result_screen_opens_the_dialogue_for_the_job(qapp, tmp_path, monkeypatch):
+    opened = []
+
+    class Spy:
+        def __init__(self, parent, job_dir, title):
+            opened.append((job_dir, title))
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(result_screen, "ChatDialog", Spy)
+    job = _result_job(tmp_path)
+    screen = result_screen.ResultScreen()
+    screen.load(job)
+    assert not screen._chat_button.isEnabled()  # no protocol yet
+
+    result_screen.reexport(job, {})
+    screen.load(job)
+    screen._chat_button.click()
+
+    assert screen._chat_button.isEnabled() and opened == [(job, "call.wav")]
+
+
+def test_the_provider_form_has_the_context_window_and_cache_prices_and_keeps_them(qapp, summary_stores):
+    tab = summary_settings_screen.ProvidersTab()
+    tab._new(KIND_OPENAI_API)
+    tab._name_field.setText("gw")
+    tab._endpoint_field.setText("https://api.example.com/v1")
+    tab._model_field.setText("m")
+    tab._price_in_field.setText("3")
+    tab._cache_read_field.setText("0.3")
+    tab._cache_write_field.setText("3.75")
+    tab._context_field.setText("200000")
+
+    tab._save_button.click()
+
+    saved = ProviderStore.load().get("gw")
+    assert (saved.price_cache_read, saved.price_cache_write, saved.context_tokens) == (0.3, 3.75, 200000)
+    tab._show("gw")
+    assert (tab._cache_read_field.text(), tab._cache_write_field.text(), tab._context_field.text()) == ("0.3", "3.75", "200000")
+    tab._cache_read_field.setText("")  # editing and saving again must not lose the others
+    tab._save_button.click()
+    again = ProviderStore.load().get("gw")
+    assert (again.price_cache_read, again.price_cache_write, again.context_tokens) == (None, 3.75, 200000)
+
+    tab._context_field.setText("много")
+    tab._save_button.click()
+    assert "нужно число" in tab._status.text() and ProviderStore.load().get("gw").context_tokens == 200000
+
+
+def test_a_subscription_provider_has_a_context_window_too(qapp, summary_stores):
+    tab = summary_settings_screen.ProvidersTab()
+    _preset(tab, KIND_CODEX_CLI)
+    tab._context_field.setText("272000")
+    tab._save_button.click()
+    assert ProviderStore.load().get("ChatGPT").context_tokens == 272000
+
+
+def test_the_chat_words_say_what_was_left_out_and_what_the_dialogue_used():
+    assert chat_text.truncation([]) == "" and chat_text.truncation(None) == ""
+    text = chat_text.truncation([
+        {"kind": "omitted_turns", "count": 2, "of": 5},
+        {"kind": "window", "start": 0.0, "end": 600.0, "kept": 10, "of": 40},
+    ])
+    assert "самые старые ходы (2 из 5) не отправлялись" in text
+    assert "окном 00:00:00–00:10:00 (10 из 40 реплик)" in text
+    assert chat_text.totals({"turns": 0}) == "Ходов пока нет."
+    assert chat_text.totals({"turns": 1, "input_tokens": 10, "output_tokens": 2, "cached_tokens": 0,
+                             "cache_write_tokens": 0, "cost_usd": None}) == "Итого по диалогу: ходов 1, вход 10, выход 2"
+    assert "автоматический" in chat_text.how_context_works(Provider(name="g", kind=KIND_OPENAI_API,
+                                                                    endpoint="https://x/v1", model="m"), True)
+    assert "точкой кэша" in chat_text.how_context_works(
+        Provider(name="a", kind=KIND_ANTHROPIC_API, endpoint="https://x", model="m", api_key_env="K"), True)
+
+
+def test_the_chat_task_reports_the_turn_or_the_failure(tmp_path, configured, chat_model):
+    from diarrhizer.summary import chat
+
+    job = _job_with_protocol(tmp_path)
+    conversation = chat.create_conversation(job, PromptTemplate(name="Т", prompt="Итоги."),
+                                            Provider(name="gw", kind=KIND_OPENAI_API, endpoint="https://x/v1", model="m"))
+    provider = Provider(name="gw", kind=KIND_OPENAI_API, endpoint="https://x/v1", model="m").to_dict()
+    queue = _Queue()
+
+    child_tasks.run_chat_task(queue, str(job), conversation.id, "Вопрос?", provider)
+
+    ((kind, result),) = queue.items
+    assert kind == "finished" and result["conversation_id"] == conversation.id
+    assert result["turn"]["answer"] == "Ответ модели" and result["turn"]["usage"]["cache_write_tokens"] == 100
+
+    queue = _Queue()
+    chat_model.replies = [LLMError("Provider 'gw': HTTP 401")]
+    child_tasks.run_chat_task(queue, str(job), conversation.id, "Ещё?", provider)
+    assert queue.items == [("failed", "LLMError", "Provider 'gw': HTTP 401")]
+
+    queue = _Queue()
+    child_tasks.run_chat_task(queue, str(job), "nope", "Вопрос?", provider)
+    assert queue.items[0][:2] == ("failed", "FileNotFoundError")

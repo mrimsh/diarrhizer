@@ -71,7 +71,8 @@ class _QueueLogHandler(logging.Handler):
 #   imports torch/whisperx itself and a re-check sees packages installed since the GUI started.
 #   run_summary_task() / run_provider_check_task() run summary.service.summarize_job() / check_provider()
 #   with a template and provider passed as dicts (and the user's note for the run); being a process, the model
-#   call can be cancelled.
+#   call can be cancelled. run_chat_task() asks the next question of a stored dialogue (summary.chat.ask) and
+#   reports the new turn.
 #   run_account_task() runs one account action of a subscription provider (status, sign in, sign out, model
 #   list, limits - ADAPTER:LLM_ACCOUNTS); a sign-in reports the address to open as an ("event", ...) message.
 # @inputs: queue, mode + run_pipeline() kwargs (picklable) | queue | job_dir + template/provider dicts + note | provider dict + env
@@ -127,6 +128,29 @@ def run_summary_task(queue, job_dir: str, template: dict, provider: dict, note: 
         queue.put(("failed", type(exc).__name__, f"{type(exc).__name__}: {exc}"))
         return
     queue.put(("finished", result))
+
+
+def run_chat_task(
+    queue, job_dir: str, conversation_id: str, question: str, provider: dict, keep_session: bool = True,
+    drop_turns: int = 0, window: "tuple | None" = None,
+) -> None:
+    """Ask the next question of a dialogue (summary.chat.ask); reports the turn as a dict."""
+    _ensure_std_streams()
+    from diarrhizer.summary import chat
+    from diarrhizer.summary.providers import Provider
+
+    try:
+        turn = chat.ask(
+            job_dir, conversation_id, question, Provider.from_dict(provider), keep_cli_session=keep_session,
+            drop_turns=drop_turns, window=tuple(window) if window else None,
+        )
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:  # RuntimeError covers adapters.llm.LLMError
+        queue.put(("failed", type(exc).__name__, str(exc)))
+        return
+    except Exception as exc:  # matches cli.py's catch-all for unexpected failures
+        queue.put(("failed", type(exc).__name__, f"{type(exc).__name__}: {exc}"))
+        return
+    queue.put(("finished", {"conversation_id": conversation_id, "turn": turn.to_dict()}))
 
 
 def run_provider_check_task(queue, provider: dict, env: dict) -> None:

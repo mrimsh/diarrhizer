@@ -381,7 +381,7 @@ ValueError: Requested float16 compute type, but the target device or backend do 
 
 ## Summaries: sign-in, models and limits of ChatGPT / Claude providers
 
-Where the **Саммаризация → Провайдеры** screen shows an error, this is what usually stands behind it.
+Where the **Работа с языковой моделью → Провайдеры** screen shows an error, this is what usually stands behind it.
 
 | What you see | Why | What to do |
 |--------------|-----|------------|
@@ -401,7 +401,7 @@ because Anthropic does not allow other applications to offer a Claude.ai sign-in
 
 ## `command 'codex' not found` although Codex is installed
 
-**Symptom** (the account box of a provider on **Саммаризация → Провайдеры**, or a failed summary):
+**Symptom** (the account box of a provider on **Работа с языковой моделью → Провайдеры**, or a failed summary):
 
 ```
 Вход не выполнен: Provider 'ChatGPT': command 'codex' not found - it is not on PATH. ...
@@ -464,7 +464,7 @@ apps do not include it): install it (`npm install -g @openai/codex`, needs Node.
 
 **3. Tell Diarrhizer where it is** - either way works:
 
-- **A. The full path in the provider (simplest).** **Саммаризация → Провайдеры** → the provider → field
+- **A. The full path in the provider (simplest).** **Работа с языковой моделью → Провайдеры** → the provider → field
   **Команда** → paste the full path → **Сохранить** → **Проверить вход** in the account box. Spaces in the path
   are fine, and so are the quotes that Explorer's "Copy as path" adds. Downside: the Codex desktop app's folder
   name changes with updates - after an update the path goes stale, repeat the step (or use B).

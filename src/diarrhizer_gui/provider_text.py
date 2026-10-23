@@ -56,7 +56,12 @@ def number(value: int) -> str:
 def usage_text(usage: Optional[dict]) -> str:
     if not usage or not (usage.get("input_tokens") or usage.get("output_tokens")):
         return ""
-    cached = f" (из кэша {number(usage['cached_tokens'])})" if usage.get("cached_tokens") else ""
+    parts = [
+        f"{label} {number(usage[key])}"
+        for key, label in (("cached_tokens", "из кэша"), ("cache_write_tokens", "записано в кэш"))
+        if usage.get(key)
+    ]
+    cached = f" ({', '.join(parts)})" if parts else ""
     text = f"токены: вход {number(usage.get('input_tokens', 0))}{cached}, выход {number(usage.get('output_tokens', 0))}"
     if usage.get("reasoning_tokens"):
         text += f" (из них рассуждение {number(usage['reasoning_tokens'])})"

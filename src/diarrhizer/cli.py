@@ -80,7 +80,7 @@ def _run_summarize(args: argparse.Namespace) -> int:
                 model = f", model {provider.model}" if provider.model else ""
                 print(f" {mark} {name} ({provider.kind}{model})")
             if not providers.providers:
-                print("   none - add one in the GUI (Саммаризация → Провайдеры) or edit that file")
+                print("   none - add one in the GUI (Работа с языковой моделью → Провайдеры) or edit that file")
             return 0
 
         if not args.job:
@@ -111,13 +111,29 @@ def _run_summarize(args: argparse.Namespace) -> int:
 # [SEMANTIC-END] CLI:SUMMARIZE
 
 
+def _seconds(text: str) -> float:
+    """HH:MM:SS, MM:SS or plain seconds -> seconds; ValueError says what is wrong."""
+    try:
+        parts = [float(part) for part in text.strip().split(":")]
+    except ValueError:
+        raise ValueError(f"Not a time: {text!r} (use HH:MM:SS, MM:SS or seconds)") from None
+    if not 1 <= len(parts) <= 3:
+        raise ValueError(f"Not a time: {text!r} (use HH:MM:SS, MM:SS or seconds)")
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60 + part
+    return seconds
+
+
 # [SEMANTIC-BEGIN] CLI:CHAT
 # @purpose: Ask a model questions about a finished job's transcript, in a dialogue that is kept with the job
 # @description: `chat <job> "<question>"` starts a new dialogue (the template - default or --template - gives the
 #   instruction, --note/--note-file the note, fixed for the whole dialogue) and asks its first question, or, with
 #   --conversation <id> / --last, asks the next question of an existing one (--provider / --model may differ from
 #   the earlier turns'). The answer is stored in the job's chat/ folder; --print also prints it, and what the turn
-#   used (tokens with the cache parts, cost, session or whole history sent) is always printed. --list shows the
+#   used (tokens with the cache parts, cost, session or whole history sent) is always printed. A request whose
+#   estimated size is over the provider's context_tokens is not sent: the error lists the options, and --drop-turns /
+#   --window / another provider take one. --list shows the
 #   job's dialogues, --export <path|-> writes one as Markdown, --delete <id> removes one. summarize is unchanged.
 # @inputs: args.job, args.question, args.conversation, args.last, args.template, args.provider, args.model, args.note,
 #   args.note_file, args.title, args.no_session, args.print, args.list, args.export, args.delete
@@ -179,8 +195,17 @@ def _run_chat(args: argparse.Namespace) -> int:
             provider = providers.resolve(args.provider or conversation.provider.get("name"))
         if args.model:
             provider = dataclasses.replace(provider, model=args.model)
+        window = None
+        if args.window:
+            first, _, last = args.window.partition("-")
+            window = (_seconds(first), _seconds(last))
         print(f"Asking '{provider.name}'...")
-        turn = chat.ask(job_dir, conversation.id, question, provider, keep_cli_session=not args.no_session)
+        turn = chat.ask(job_dir, conversation.id, question, provider, keep_cli_session=not args.no_session,
+                        drop_turns=args.drop_turns or 0, window=window)
+    except chat.ContextTooLong as e:  # a ValueError: says what to do instead of sending blindly
+        print(f"Error: {e}\nNothing was sent. Repeat with --drop-turns N, --window START-END or another --provider/--model.",
+              file=sys.stderr)
+        return 1
     except (FileNotFoundError, ValueError, LLMError, OSError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
@@ -433,7 +458,7 @@ def main() -> int:
         "--provider",
         default=None,
         help="Provider name from summary_providers.json (default: its default provider); "
-             "providers are added in the GUI (Саммаризация → Провайдеры)"
+             "providers are added in the GUI (Работа с языковой моделью → Провайдеры)"
     )
     note_group = summarize_parser.add_mutually_exclusive_group()
     note_group.add_argument(
@@ -491,6 +516,12 @@ def main() -> int:
     chat_parser.add_argument("--title", default=None, help="New dialogue: its title (default: the first question)")
     chat_parser.add_argument("--no-session", action="store_true",
                              help="Do not keep a Codex CLI session: send the whole dialogue every turn")
+    chat_parser.add_argument("--drop-turns", type=int, default=None, metavar="N",
+                             help="Leave this many more of the oldest turns out of the request from now on "
+                                  "(the answer to a 'context too long' error)")
+    chat_parser.add_argument("--window", default=None, metavar="START-END",
+                             help="Keep only this part of the transcript from now on, e.g. 00:00:00-00:45:00 "
+                                  "(HH:MM:SS, MM:SS or seconds)")
     chat_parser.add_argument("--print", action="store_true", help="Also print the answer (it is always stored)")
     chat_parser.add_argument("--list", action="store_true", help="List the job's dialogues and exit")
     chat_parser.add_argument("--export", default=None, metavar="PATH",

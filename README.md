@@ -199,7 +199,7 @@ python -m diarrhizer_gui.app
   **Пересчитать спикеров** re-runs diarization with another speaker count (or adds speakers to a
   recognition-only job) while keeping the transcript; **Саммаризация…** makes a summary of the
   transcript (see below).
-* **Саммаризация** — prompt templates and model providers for summaries (see
+* **Работа с языковой моделью** — prompt templates and model providers for summaries (see
   [Summaries](#summaries)).
 * **Модели**, **Доктор**, **Настройки** — model cache, environment checks (run in the background;
   the sidebar shows a ⚠ badge if something required is missing), defaults, HF token, FFmpeg path,
@@ -461,7 +461,7 @@ other values stand in the request: write a **wildcard**, `{{name}}`, and its val
 * Providers are stored in `summary_providers.json` — see `summary_providers.example.json`.
   `DIARRHIZER_SUMMARY_PROVIDERS_FILE` / `DIARRHIZER_SUMMARY_TEMPLATES_FILE` move the two files.
 
-**GUI.** The **Саммаризация** screen has two tabs, "Шаблоны промптов" and "Провайдеры" (**Проверить**
+**GUI.** The **Работа с языковой моделью** screen has two tabs, "Шаблоны промптов" and "Провайдеры" (**Проверить**
 sends a one-word test request with the form's current values and shows what it used). On a job's **Результат** screen,
 **Саммаризация…** opens a dialog: pick a template and a provider, optionally write a **Заметка** for this
 run (it goes where the template has `{{note}}`; it is empty each time the dialog opens, and a warning appears
@@ -471,6 +471,21 @@ of the request and the note it was made with, keeps the job's earlier summaries 
 **Показать запрос** shows the request text as the model would get it, without sending it. Every request,
 sign-in and model query runs in a separate process and can be cancelled.
 
+**Dialogue.** The Result screen's **Диалог с моделью…** opens a conversation with the model about the job's
+transcript (the same dialogues as `chat` below, stored in the job's `chat/` folder): a list of the job's
+dialogues (new, delete, export to Markdown), the turns, an input for the question, a choice of template,
+provider and model that may change in the middle, and a button per template that puts its instruction into
+the input as a quick question. The screen says which context is used (the job, its size in characters and
+estimated tokens, the provider's limit) and how this provider handles it - its prompt cache, a kept Codex CLI
+session, or the whole history sent again - and after every turn shows its tokens (from the cache, written to
+the cache), cost and what was sent, and the dialogue's total. The request runs in the background with a
+waiting indicator and a cancel button; the answer arrives whole (no streaming). **Before** sending, the size of
+the request is estimated (characters / 3, rounded up - an estimate, not a count) and compared with the
+provider's **Окно контекста** (a provider setting, empty = not checked: no provider reports it, Codex's model
+list has no such field). Over the limit nothing is sent, and a panel offers buttons: cut the transcript to a
+time window (its beginning, as much as fits), leave out the oldest turns (the transcript stays), or change the
+model. Whatever a turn left out is written under it in the history and kept in its record - never silently.
+The provider form also has the cache prices and this window.
 The template editor lists all the wildcards beside the prompt (a click inserts one at the cursor), marks them
 in the text, refuses to save a template with an unknown one and only warns about a missing `{{transcript}}`;
 **Показать собранный запрос…** builds the request of the form's prompt (saved or not) for a finished job of
@@ -501,7 +516,10 @@ python -m diarrhizer chat ".\out\meeting_20260101_120000" --list
 python -m diarrhizer chat ".\out\meeting_20260101_120000" --last --export ".\dialogue.md"
 ```
 
-A new dialogue takes `--template`, `--provider`, `--note` / `--note-file` (the note is fixed for the whole
+When a provider has a context window set and the request is estimated to exceed it, `chat` sends nothing and
+says so; `--drop-turns N` (leave that many more of the oldest turns out from now on) or
+`--window 00:00:00-00:45:00` (keep only that part of the transcript from now on) takes one of the ways out, a
+different `--provider` / `--model` the third. A new dialogue takes `--template`, `--provider`, `--note` / `--note-file` (the note is fixed for the whole
 dialogue) and `--title`; with no question it carries out the template's instruction. `--conversation <id>` or
 `--last` continues one; `--provider` / `--model` may change the provider for a turn (each turn records its own),
 `--delete <id>` removes one. After every turn the command prints what it used - tokens with the cache parts, cost,
