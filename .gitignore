@@ -75,3 +75,7 @@ checkpoints/
 .cache/
 .hf/
 .huggingface/
+
+# ===== Realtime research prototypes: local recordings & runs =====
+prototypes/realtime/_local/
+prototypes/realtime/**/_local/
