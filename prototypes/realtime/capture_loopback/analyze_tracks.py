@@ -6,7 +6,7 @@ Per window (default 1 s):
   active_mic / active_loop    RMS above the threshold
   both                        both active (overlap: the two tracks speak at once)
   echo                        mic window contains a delayed copy of the loopback window:
-                              peak of the normalised cross-correlation within +-300 ms > 0.35 (speakers -> mic path)
+                              peak of the normalised cross-correlation within +-maxlag (0.3 s) > 0.35 (speakers -> mic path)
 Prints shares of the active windows. Use it on a test call with yourself to see whether the loopback
 signal also lands in the microphone track (open speakers) or not (headphones).
 """
@@ -19,11 +19,12 @@ ap.add_argument("mic"); ap.add_argument("loop")
 ap.add_argument("--win", type=float, default=1.0)
 ap.add_argument("--thr", type=float, default=0.003)
 ap.add_argument("--xthr", type=float, default=0.35)
+ap.add_argument("--maxlag", type=float, default=0.3, help="max delay of an echo to look for, s (a client/server echo may be 0.3-2 s)")
 a = ap.parse_args()
 m, sr = sf.read(a.mic, dtype="float32"); l, sr2 = sf.read(a.loop, dtype="float32")
 assert sr == sr2
 n = min(len(m), len(l)); m, l = m[:n], l[:n]
-W = int(a.win * sr); L = int(0.3 * sr)
+W = int(a.win * sr); L = int(a.maxlag * sr)
 
 def ncc_peak(x, y):
     """max |normalised cross-correlation| of x against y for lags in [-L, L]"""
