@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Diarrhizer capture - options</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 16px; max-width: 560px; }
+  label { display: block; margin: 10px 0 2px; }
+  input[type=text], input[type=password] { width: 100%; padding: 4px; }
+  button { margin: 8px 8px 0 0; padding: 6px 10px; }
+  #msg { margin-top: 12px; white-space: pre-wrap; color: #444; }
+</style>
+<h3>Receiver</h3>
+<label>Port on 127.0.0.1 <input id="port" type="text" value="8765"></label>
+<label>Shared secret (file <code>prototypes/realtime/_local/receiver_secret.txt</code>) <input id="secret" type="password"></label>
+<label><input id="pt" type="checkbox" checked> keep playing the captured tab to me (otherwise the tab goes silent)</label>
+<button id="save">Save</button>
+<h3>Microphone</h3>
+<button id="grant">Grant microphone to the extension (one time)</button>
+<h3>DOM probe (optional)</h3>
+<p>Asks Chrome for access to the call sites and registers a content script that records only counts and timings of participant / active-speaker elements (no names).</p>
+<button id="probe_on">Enable on call sites</button>
+<button id="probe_off">Disable</button>
+<div id="msg"></div>
+<script src="options.js"></script>
