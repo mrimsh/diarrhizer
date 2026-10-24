@@ -79,3 +79,5 @@ checkpoints/
 # ===== Realtime research prototypes: local recordings & runs =====
 prototypes/realtime/_local/
 prototypes/realtime/**/_local/
+
+latest_silero_models.yml
