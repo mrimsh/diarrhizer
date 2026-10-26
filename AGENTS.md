@@ -38,6 +38,7 @@ The goal is a clean, extensible core (CLI now, GUI later) without unnecessary co
 - `src/diarrhizer/summary/*` — summaries of a finished job: prompt templates and their `{{wildcards}}` (`wildcards.py`), providers, the service (an on-demand add-on, not a pipeline stage)
 - `src/diarrhizer/diagnostics/doctor.py` — environment checks (Windows is sensitive)
 - `docs/architecture.md` — pipeline and artifacts overview
+- `docs/realtime.md` and `prototypes/realtime/` — research on live-call capture, streaming ASR and live summaries; research material, not part of the product (nothing in `src/` imports it)
 
 ---
 

@@ -11,8 +11,8 @@ import json, os, subprocess, sys, time
 import numpy as np, soundfile as sf
 
 out = sys.argv[1] if len(sys.argv) > 1 else "../_local/mute_test"
-phases = [(0, 15, "ВСЁ ВКЛЮЧЕНО, говорите"), (15, 30, "ВЫКЛЮЧИТЕ МИКРОФОН ТОЛЬКО В MEET (кнопка на fifine не нажата), говорите"),
-          (30, 45, "ВКЛЮЧИТЕ обратно, говорите"), (45, 60, "НАЖМИТЕ КНОПКУ НА МИКРОФОНЕ fifine (в Meet микрофон включён), говорите"),
+phases = [(0, 15, "ВСЁ ВКЛЮЧЕНО, говорите"), (15, 30, "ВЫКЛЮЧИТЕ МИКРОФОН ТОЛЬКО В MEET (кнопка на микрофоне не нажата), говорите"),
+          (30, 45, "ВКЛЮЧИТЕ обратно, говорите"), (45, 60, "НАЖМИТЕ КНОПКУ НА МИКРОФОНЕ (в Meet микрофон включён), говорите"),
           (60, 80, "ОТПУСТИТЕ кнопку, всё включено, говорите")]
 sys.stdout.reconfigure(encoding="utf-8")
 p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "capture.py"),

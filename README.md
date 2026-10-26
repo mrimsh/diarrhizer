@@ -618,6 +618,7 @@ See `docs/troubleshooting.md` for detailed diagnostics.
 * External integrations (adapters): [`src/diarrhizer/adapters/`](src/diarrhizer/adapters/) — including `llm.py`, the summary providers
 * Summaries: [`src/diarrhizer/summary/`](src/diarrhizer/summary/) — templates, providers, and the service that ties a job to them
 * Diagnostics: [`src/diarrhizer/diagnostics/doctor.py`](src/diarrhizer/diagnostics/doctor.py)
+* Research on working with calls in real time (not part of the product): [`docs/realtime.md`](docs/realtime.md)
 
 ---
 
