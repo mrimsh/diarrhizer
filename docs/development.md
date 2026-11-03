@@ -44,6 +44,7 @@ outside the checkout. No CUDA inference runs on hosted CI. [Checkout](https://gi
 and [setup-python](https://github.com/actions/setup-python) are the official actions.
 The repository checker registers documentary semantic anchors explicitly; `ARTIFACTS:LAYOUT`
 refers to the artifact layout in [architecture.md](architecture.md). It does not validate external URLs.
+Python syntax and semantic references are checked in both `src/` and `tools/`.
 
 ## Separate realtime research environment
 
@@ -77,3 +78,8 @@ checkout or copy the desired local files yourself. Secrets are never copied auto
 ## Synthetic ASR baseline
 
 See [quality-baseline.md](quality-baseline.md) for generation, measurements and their limits.
+The expanded corpus covers RU/EN, numbers/names, silence, noise, pauses, quiet stereo and two voices.
+Unit regressions include real tiny local CTC checkpoints with exact tensor/logit comparisons; corpus
+metrics and transforms use small synthetic arrays. No downloaded checkpoints are needed for pytest.
+Requalify the private Transformers loader contract with these tests and the cached-checkpoint audit
+before changing the supported ML pins.

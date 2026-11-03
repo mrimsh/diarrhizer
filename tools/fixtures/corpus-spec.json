@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "units": [
+    {"id":"ru_clean","voice":"Microsoft Irina Desktop","text":"Это тестовая запись. Мы проверяем распознавание речи и сохранение текста. Завтра команда обсудит результаты проекта."},
+    {"id":"en_clean","voice":"Microsoft Zira Desktop","text":"This is a synthetic recording. We are checking speech recognition and word timing. Tomorrow the team will review the project."},
+    {"id":"ru_numbers","voice":"Microsoft Irina Desktop","text":"Анна и Марат назначили встречу на двенадцатое ноября. Бюджет проекта составляет двадцать пять тысяч рублей."},
+    {"id":"en_numbers","voice":"Microsoft Zira Desktop","text":"Anna and Mark scheduled the meeting for November twelfth. The project budget is twenty five thousand dollars."},
+    {"id":"ru_pause_a","voice":"Microsoft Irina Desktop","text":"Первая часть записи закончена."},
+    {"id":"ru_pause_b","voice":"Microsoft Irina Desktop","text":"После паузы начинается обсуждение следующего вопроса."},
+    {"id":"en_turn_a","voice":"Microsoft Zira Desktop","text":"I will prepare the draft on Monday. Please check the figures before lunch."},
+    {"id":"en_turn_b","voice":"Microsoft David Desktop","text":"I will review the figures and send the final version on Tuesday."}
+  ],
+  "cases": [
+    {"id":"ru_clean","language":"ru","parts":[{"unit":"ru_clean"}]},
+    {"id":"en_clean","language":"en","parts":[{"unit":"en_clean"}]},
+    {"id":"ru_numbers_names","language":"ru","parts":[{"unit":"ru_numbers"}]},
+    {"id":"en_numbers_names","language":"en","parts":[{"unit":"en_numbers"}]},
+    {"id":"ru_pause","language":"ru","parts":[{"unit":"ru_pause_a"},{"unit":"ru_pause_b","gap_before":2.0}]},
+    {"id":"ru_noise_12db","language":"ru","snr_db":12,"seed":1729,"parts":[{"unit":"ru_clean"}]},
+    {"id":"ru_quiet_stereo","language":"ru","gain_db":-18,"stereo":true,"parts":[{"unit":"ru_clean"}]},
+    {"id":"en_turns","language":"en","parts":[{"unit":"en_turn_a","speaker":"A"},{"unit":"en_turn_b","speaker":"B","gap_before":0.7}]},
+    {"id":"en_overlap","language":"en","score_text":false,"parts":[{"unit":"en_turn_a","speaker":"A"},{"unit":"en_turn_b","speaker":"B","at":2.5}]},
+    {"id":"silence","language":"ru","duration":8,"parts":[]}
+  ]
+}

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Quality C1 continuation (2026-11-04)
+
+- Validated legacy alignment weight-norm loading, exact tensor checks and model/revision provenance;
+  genuine checkpoint mismatches retain ASR text with a failed status. ASR cache version is now 3.
+- Skipped alignment model loading for empty ASR (`not_needed`); retained meaningful VAD version warnings.
+- Expanded to ten synthetic RU/EN cases with independent SAPI word onsets, deterministic transforms
+  and hashes; added repeated multi-model suites, conditional speaker scoring and explicit coverage.
+- Measured CPU/CUDA ASR and two-speaker diarization; documented checkpoint evidence and quality limits.
+- Added local checkpoint/metric/corpus regressions and extended semantic checks to Python tools.
+
 ### Stabilization A1–A5 (2026-11-03)
 
 - Separate API key variables, shared-key diagnostics and safe provider renaming.

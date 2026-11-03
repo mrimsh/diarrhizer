@@ -3,12 +3,14 @@
 New pipeline JSON (`meta/run.json`, ASR, diarization, merge and exported JSON), summary metadata and
 chat files have `schema_version: 1`. It identifies this additive envelope, independently of a stage's
 `metadata.cache_version` used to invalidate algorithm caches. Existing unversioned jobs remain readable;
-ASR/merge cache invalidation from cycle A still applies. This is not a migration to a new transcript shape.
+ASR cache version is `3` (validated loading), merge is `2`. Only stages in the requested range check caches.
+This is not a migration to a new transcript shape.
 
 `provenance` records Python and installed package versions without importing ML libraries. In exported
 JSON it is under `metadata`; in other artifacts it is top-level. ASR retains model name, requested and
-effective settings, alignment status and warnings. Exact downloaded model revisions are not yet recorded;
-package versions alone do not guarantee identical weights. Exports aggregate ASR/merge warnings and
+effective settings, alignment status and warnings. `metadata.alignment_model` records the HF alignment
+revision and loading audit, or a torchaudio bundle name with `revision: null`. ASR/diarization model
+revisions are not yet recorded; package versions alone do not guarantee identical weights. Exports aggregate ASR/merge warnings and
 record `metadata.source_sha256` for the merged JSON. Summary metadata records source and rendered-request
 hashes, template text, warnings and the complete context estimate. Chat snapshots the transcript hash and
 records the budget per turn. These are diagnostics, not signatures or evidence of ASR accuracy.

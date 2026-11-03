@@ -30,6 +30,7 @@ def backend(monkeypatch, tmp_path):
                              load_align_model=lambda *args: (object(), {}),
                              align=lambda segments, *args, **kwargs: {"segments": segments})
     monkeypatch.setitem(sys.modules, "whisperx", module)
+    monkeypatch.setattr("diarrhizer.adapters.whisperx.load_alignment_model", lambda *args: module.load_align_model(*args))
     audio = tmp_path / "synthetic.wav"
     audio.write_bytes(b"mock decoder input")
     return module, calls, transcriptions, audio
@@ -75,6 +76,41 @@ def test_alignment_failure_preserves_raw_text_and_reports_quality(backend):
     assert result["text"] == "hello"
     assert result["alignment_status"] == "failed"
     assert any("alignment failure" in message for message in result["warnings"])
+
+
+def test_empty_asr_does_not_load_an_alignment_model(backend, monkeypatch):
+    module, _, _, audio = backend
+    adapter = WhisperXAdapter(device="cpu")
+    adapter._load_whisperx(None, None, 5, None)
+    adapter._whisper_model.transcribe = lambda *args, **kwargs: {"language": "ru", "segments": []}
+    monkeypatch.setattr("diarrhizer.adapters.whisperx.load_alignment_model", lambda *args: pytest.fail("empty ASR"))
+    result = adapter.transcribe(audio)
+    assert result["text"] == "" and result["words"] == []
+    assert result["alignment_status"] == "not_needed" and result["alignment_model"] is None
+
+
+def test_alignment_loader_rejection_preserves_asr(backend, monkeypatch):
+    _, _, _, audio = backend
+    def fail(*args):
+        raise ValueError("Alignment checkpoint mismatch: lm_head.weight")
+    monkeypatch.setattr("diarrhizer.adapters.whisperx.load_alignment_model", fail)
+    result = WhisperXAdapter(device="cpu").transcribe(audio)
+    assert result["text"] == "hello" and result["alignment_status"] == "failed"
+    assert "lm_head.weight" in " ".join(result["warnings"])
+
+
+def test_failed_loading_is_not_downgraded_to_partial_for_untimed_raw_words(backend, monkeypatch):
+    _, _, _, audio = backend
+    adapter = WhisperXAdapter(device="cpu")
+    adapter._load_whisperx(None, None, 5, None)
+    adapter._whisper_model.transcribe = lambda *a, **kw: {"language": "ru", "segments": [
+        {"text": "hello", "start": 0, "end": 1, "words": [{"word": "hello"}]}]}
+    def fail(*args):
+        raise ValueError("missing weight")
+    monkeypatch.setattr("diarrhizer.adapters.whisperx.load_alignment_model", fail)
+    result = adapter.transcribe(audio)
+    assert result["alignment_status"] == "failed" and result["text"] == "hello"
+    assert result["words"][0]["start"] is None
 
 
 def test_backend_type_error_is_not_retried_with_options_silently_removed(backend):

@@ -168,8 +168,16 @@ Contains segments and/or words with timestamps (WhisperX alignment result).
 `adapters/transcript_result.py` preserves nested word ownership as `segment_index` and normalizes
 unknown, non-finite or reversed word times to `null`. ASR metadata separates requested options
 from `effective_settings`, and includes `alignment_status` (`aligned`, `partial`, `failed`,
-`unavailable`) and `warnings`. The pinned batched WhisperX backend takes beam size and initial
+`unavailable`, `not_needed` for empty ASR) and `warnings`. The pinned batched WhisperX backend takes beam size and initial
 prompt at model loading; unsupported controls are reported rather than silently discarded.
+
+`adapters/alignment.py` validates Hugging Face CTC loading using a local subclass of the pinned
+Transformers 4.39.3 loader. Complete legacy weight-norm pairs are renamed before its key inventory;
+converted tensors must match exactly, and missing/unexpected/mismatched weights reject alignment.
+There is no warning filter, global monkeypatch or model-cache rewrite. The torchaudio registry uses
+its existing strict bundle loader. `metadata.alignment_model` records backend/name, HF commit revision
+and load audit; torchaudio has no HF revision. ASR cache version 3 requests this contract on recalculation.
+See [checkpoint validation and measured limits](quality-baseline.md).
 
 ### Diarization output
 
@@ -209,7 +217,7 @@ Malformed critical metadata is an error; broken optional derived artifacts can s
 `meta/run.json.source_fingerprint` contains the resolved path, size, `mtime_ns` and SHA-256 of the
 original bytes. Conversion checks path/size/hash, then freshness/profile/format; a relocated source
 is deliberately treated as new. Legacy conversion without this identity is invalidated once.
-ASR and merge use `metadata.cache_version = 2` to invalidate pre-fix artifacts. These checks run
+ASR uses `metadata.cache_version = 3`, merge uses `2` to invalidate pre-fix artifacts. These checks run
 only for stages within the requested range, so opening a result or export-only runs remain cheap.
 
 Plans in `GUI:JOB_PLANS` only read files. The runner backs up `speakers.json` immediately before
@@ -739,6 +747,7 @@ src/diarrhizer/
 │       ├── merge.py        # Merge ASR with speaker labels
 │       └── export.py       # Export to MD/TXT/SRT/JSON
 ├── adapters/               # External library wrappers
+│   ├── alignment.py        # Validated alignment checkpoint loading and model provenance
 │   ├── ffmpeg.py
 │   ├── llm.py              # One request to a summary provider: codex/claude CLIs, OpenAI/Anthropic HTTP APIs
 │   ├── llm_accounts.py     # Sign-in, account, model list and limits of a provider (vendors' own interfaces)

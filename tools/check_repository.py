@@ -21,7 +21,7 @@ def check(root=ROOT):
         path = root / relative
         if not path.is_file():
             continue
-        if relative.startswith("src/") and path.suffix == ".py":
+        if relative.startswith(("src/", "tools/")) and path.suffix == ".py":
             content = path.read_text(encoding="utf-8-sig")
             try:
                 ast.parse(content, filename=relative)

@@ -373,7 +373,7 @@ Conversion checks the source's resolved path, size and full SHA-256 as well as a
 Changing bytes with an older/preserved modification time is detected; moving an identical source
 to another path deliberately counts as a new input. Legacy jobs without a source fingerprint are
 converted once when `convert` is in range. ASR and merge likewise invalidate results predating
-their corrected contracts (`metadata.cache_version = 2`). Opening results or running only `export`
+their corrected contracts (`metadata.cache_version`: ASR `3`, merge `2`). Opening results or running only `export`
 does not launch recognition. To repair an old transcript, start at `transcribe`; to repair only
 speaker merging from an existing transcript, start at `merge`.
 
@@ -394,6 +394,11 @@ temperature/previous-text/VAD switches remain accepted for compatibility, but un
 produce warnings. `vad_min_silence_ms` is unsupported and produces a warning; `--asr-hotwords-file`
 is rejected with a suggestion to use an initial prompt. Requested values remain in ASR metadata;
 `effective_settings`, `alignment_status` and `warnings` describe actual processing.
+
+Alignment loading validates legacy weight-norm keys before model use. ASR metadata also records
+`alignment_model` with the backend, model name, Hugging Face revision and loading audit. A genuinely
+incompatible checkpoint produces `alignment_status: failed` and preserves the ASR text. Empty ASR
+uses `not_needed` without loading alignment. See the [checkpoint checks and expanded quality corpus](docs/quality-baseline.md).
 
 Words whose alignment times are missing or invalid keep `null` timestamps and their source
 `segment_index`. If words cannot reproduce a whole segment in chronological order, merge keeps

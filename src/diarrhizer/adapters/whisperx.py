@@ -10,6 +10,7 @@ import gc
 import torch
 
 from diarrhizer.adapters.transcript_result import extract_transcript_fields
+from diarrhizer.adapters.alignment import load_alignment_model
 from diarrhizer.export.speakers import normalize_speaker_id
 
 
@@ -26,6 +27,8 @@ def _release_cuda() -> None:
 #   Beam size and initial prompt go to load_model(asr_options). Unsupported batched-backend
 #   temperature/previous-text/VAD controls produce warnings and explicit effective settings.
 #   Alignment failure and partial timing are returned as quality metadata, never silently hidden.
+#   ADAPTER:ALIGNMENT_LOAD validates checkpoint keys and records the alignment model/load provenance.
+#   Empty ASR skips alignment (not_needed); failed loading remains failed even when raw words lack times.
 # @inputs: audio_path, language, device, compute_type, beam_size, temperature, initial_prompt, vad_params
 # @outputs: Transcript dictionary with segments, word-level timestamps and quality metadata
 # @sideEffects: Loads WhisperX model into memory (GPU/CPU); unload() releases it and empties the CUDA cache
@@ -233,15 +236,14 @@ class WhisperXAdapter:
             # Align words if language detected
             alignment_result = result
             alignment_status = "unavailable"
+            alignment_model_info = None
             align_model = None
-            if detected_language and detected_language != "unknown":
+            if not any(segment.get("text", "").strip() for segment in result.get("segments", [])):
+                alignment_status = "not_needed"
+            elif detected_language and detected_language != "unknown":
                 try:
-                    # Load alignment model
-                    # Note: whisperx 3.7+ API changed - language_code is positional, device is required
-                    align_model, metadata = self._whisperx.load_align_model(
-                        detected_language,
-                        self._device
-                    )
+                    align_model, metadata = load_alignment_model(detected_language, self._device)
+                    alignment_model_info = metadata.get("model_info")
                     # Align words
                     alignment_result = self._whisperx.align(
                         result["segments"],
@@ -267,7 +269,8 @@ class WhisperXAdapter:
                 warnings.append("Word alignment changed transcript text; original ASR segments are preserved.")
             untimed = sum(w["start"] is None or w["end"] is None for w in extracted["words"])
             if untimed:
-                alignment_status = "partial"
+                if alignment_status != "failed":
+                    alignment_status = "partial"
                 warnings.append(f"{untimed} word(s) have no valid alignment timestamps; text is preserved.")
             elif alignment_status == "aligned" and extracted["text"] and not extracted["words"]:
                 alignment_status = "partial"
@@ -280,6 +283,7 @@ class WhisperXAdapter:
                 "language": detected_language,
                 "effective_settings": effective,
                 "alignment_status": alignment_status,
+                "alignment_model": alignment_model_info,
                 "warnings": warnings,
             }
 

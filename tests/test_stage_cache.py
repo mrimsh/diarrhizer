@@ -85,6 +85,9 @@ def test_transcribe_cache_valid_when_asr_config_matches(tmp_path):
     assert TranscribeStage().is_cache_valid(job) is True
     path = job_dir / "asr" / "transcript.json"
     data = json.loads(path.read_text(encoding="utf-8"))
+    data["metadata"]["cache_version"] = 2  # Before validated alignment loading/provenance.
+    _write(path, data)
+    assert TranscribeStage().is_cache_valid(job) is False
     del data["metadata"]["cache_version"]
     _write(path, data)
     assert TranscribeStage().is_cache_valid(job) is False
@@ -99,3 +102,21 @@ def test_diarize_cache_invalid_when_speaker_range_changes(tmp_path):
     })
     job = _job(tmp_path, job_dir, min_speakers=2, max_speakers=4)
     assert DiarizeStage().is_cache_valid(job) is False
+
+
+def test_transcribe_persists_alignment_model_provenance(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    job_dir = tmp_path / "job"
+    _write(job_dir / "audio" / "normalized.wav", b"wav")
+    info = {"name": "test/model", "revision": "synthetic-revision", "backend": "huggingface",
+            "loading": {"all_keys_matched": True, "renamed_tensors_verified": 2}}
+    unloaded = []
+    adapter = SimpleNamespace(transcribe=lambda **kw: {"segments": [], "alignment_model": info,
+                                                       "alignment_status": "aligned"},
+                              unload=lambda: unloaded.append(True))
+    monkeypatch.setattr("diarrhizer.pipeline.stages.transcribe.WhisperXAdapter", lambda **kw: adapter)
+    TranscribeStage().run(_job(tmp_path, job_dir))
+    data = json.loads((job_dir / "asr/transcript.json").read_text(encoding="utf-8"))
+    assert data["metadata"]["alignment_model"] == info
+    assert data["metadata"]["cache_version"] == 3 and unloaded == [True]

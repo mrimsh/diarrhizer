@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 #   Once a keep_wav=false audio format dropped the WAV, decodes the archive copy instead
 #   (find_job_audio); cache staleness stays keyed on the WAV, so dropping it never invalidates the transcript.
 #   Metadata distinguishes requested options from effective backend settings and records alignment warnings.
-#   cache_version=2 invalidates results predating this backend contract, only when transcribe is in range.
+#   cache_version=3 requires validated alignment loading and model provenance when transcribe is in range.
 #   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/asr/transcript.json, artifacts/asr/transcript.txt (readable paragraphs, no speakers)
@@ -38,7 +38,7 @@ class TranscribeStage:
 
     # Stage name for identification
     NAME = "transcribe"
-    CACHE_VERSION = 2  # Effective decoding options and nullable word times/ownership.
+    CACHE_VERSION = 3  # Validated alignment loading and model provenance.
 
     # Output paths relative to job directory
     ASR_DIR = "asr"
@@ -235,6 +235,7 @@ class TranscribeStage:
                 "duration_seconds": duration,
                 "effective_settings": result.get("effective_settings", {}),
                 "alignment_status": result.get("alignment_status", "unknown"),
+                "alignment_model": result.get("alignment_model"),
                 "warnings": result.get("warnings", []),
             },
         }

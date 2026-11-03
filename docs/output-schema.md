@@ -321,5 +321,12 @@ Ivan: Did you get my e-mail?
 
 ## Related Documentation
 
+The intermediate `asr/transcript.json` has a separate `metadata.alignment_model` object with `name`,
+`backend`, `revision` and `loading`. HF loading records `weight_norm_renamed`, `all_keys_matched` and
+`renamed_tensors_verified`; torchaudio records its bundle loader without an HF revision. It is `null`
+when no model was loaded. `alignment_status: not_needed` denotes empty ASR; `failed` preserves source
+text and records the failure in warnings. Cache version `3` rebuilds older ASR when that stage is run.
+These fields do not change the exported segment/word shape or schema version `1`.
+
 - [Architecture](architecture.md) — Pipeline overview
 - [Merge Stage](../src/diarrhizer/pipeline/stages/merge.py) — How segments are merged
