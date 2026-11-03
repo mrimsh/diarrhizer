@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "dataset": "VoxConverse v0.3 dev, first three recording IDs alphabetically",
+  "reference_revision": "24bf60be297701cd7e4ef18550c6d390c1b87365",
+  "reference_source": "https://github.com/joonson/voxconverse",
+  "audio_archive": "https://www.robots.ox.ac.uk/~vgg/data/voxconverse/data/voxconverse_dev_wav.zip",
+  "license": "CC-BY-4.0",
+  "cases": [
+    {
+      "id": "abjxc",
+      "duration_seconds": 68.376,
+      "audio_bytes": 2188110,
+      "audio_sha256": "cadade53326e91918b482a41ab81817fc57bbaf35f809e5d7cc20e0c19d9ab2f",
+      "reference_sha256": "13cc19d2180889b786cf0fb86b522b95902d20fae27b7384ea943c7877286f9c"
+    },
+    {
+      "id": "afjiv",
+      "duration_seconds": 151.248,
+      "audio_bytes": 4840014,
+      "audio_sha256": "208eb00b0dfca6bd149837ca6bc736983f45b4dfe8606973460bd2cadf5f902f",
+      "reference_sha256": "58a764b4b5864b14dd39d91e420370d1f45cabc4bcf354a8e7516538b996d51f"
+    },
+    {
+      "id": "ahnss",
+      "duration_seconds": 664.2939375,
+      "audio_bytes": 21257484,
+      "audio_sha256": "54467015dcfebfce8af475f2ea6e38b6cf06fe00378916471df2ec1b222167b4",
+      "reference_sha256": "9a09a7c39311b9f0e4209f6a58930e35327c8fa9f36b671c1a1a19972d514e71"
+    }
+  ]
+}

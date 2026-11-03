@@ -1,5 +1,9 @@
 # Quality baseline and alignment loading
 
+Full duration-based DER on independent human-speech RTTM, including overlap, is now available separately:
+[diarization quality and protocol](diarization-quality.md). The synthetic ASR results below remain useful
+for text/timing regressions and do not substitute for that annotated corpus.
+
 ## C1 continuation, 2026-11-04
 
 ### Checkpoint warnings: cause, fix and evidence
@@ -93,7 +97,8 @@ Metrics and limits:
   Overlap has no single reference text order and is deliberately unscored for text/timing/WDER. Utterance
   envelopes include silence and cannot substitute for speech-activity annotations needed by DER.
 - PyTorch peak allocation excludes CTranslate2/context and is not total VRAM. Full RAM/VRAM sampling,
-  human speech, channel-separated calls, overlap-aware scoring/DER and release thresholds remain open.
+  channel-separated calls and release thresholds remain open. Human-speech DER with overlap is covered
+  by the separate [annotated corpus](diarization-quality.md), not these synthetic word markers.
 
 ### Measured results
 

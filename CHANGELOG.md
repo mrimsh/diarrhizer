@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Quality C1: annotated DER (2026-11-04)
+
+- Full duration-based DER using explicit RTTM/UEM, Hungarian speaker mapping and overlap included
+  by default; reports false alarms, misses, confusion and additive overlap/non-overlap breakdowns.
+- Re-scoring saved raw hypotheses, explicit collar/overlap policies and weighted corpus aggregation.
+- Pinned VoxConverse dev mini references with attribution/hashes, bounded audio download and a fresh
+  convert+diarize benchmark without reference speaker counts or ASR dependence.
+- Regression coverage for analytical metrics, simultaneous speakers, corpus integrity and failed runs;
+  documented measured results and limitations. No runtime dependencies or product cache changes.
+
 ### Quality C1 continuation (2026-11-04)
 
 - Validated legacy alignment weight-norm loading, exact tensor checks and model/revision provenance;

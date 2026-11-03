@@ -83,3 +83,11 @@ Unit regressions include real tiny local CTC checkpoints with exact tensor/logit
 metrics and transforms use small synthetic arrays. No downloaded checkpoints are needed for pytest.
 Requalify the private Transformers loader contract with these tests and the cached-checkpoint audit
 before changing the supported ML pins.
+
+## Annotated diarization baseline
+
+See [diarization-quality.md](diarization-quality.md) for full DER, overlap breakdown, strict scoring
+policy and a pinned public human-speech corpus. Analytic DER, RTTM/UEM, corpus validation and download
+boundary tests run without network or models. Downloaded audio and model runs are explicit manual checks.
+Reference RTTM uses LF via `.gitattributes` to preserve source hashes on Windows. No new dependencies
+are needed: the scorer uses the existing pinned pyannote.metrics/core packages.

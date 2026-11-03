@@ -690,6 +690,8 @@ By MRIMSH, L. L. MRIMSH and all other LLMs
 ## License
 
 [MIT](LICENSE), copyright 2026 MRIMSH.
+Third-party VoxConverse benchmark annotations retain their separate
+[CC-BY-4.0 license and attribution](tools/fixtures/voxconverse-dev-mini/README.md).
 
 ### Reliability and recovery
 
@@ -697,3 +699,5 @@ Doctor profiles, supported installs and wheel configuration: [development guide]
 Artifact versions, job write locks and `python -m diarrhizer recover "out/<job>"`:
 [artifact contracts](docs/artifact-contracts.md). Reproducible synthetic ASR measurement:
 [quality baseline](docs/quality-baseline.md).
+Full DER with overlap, independent RTTM/UEM references and a reproducible VoxConverse mini-corpus:
+[diarization evaluation](docs/diarization-quality.md).

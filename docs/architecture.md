@@ -707,6 +707,12 @@ How the GUI runs things (`src/diarrhizer_gui/`):
 
 ## 10. Implicit Quality Requirements
 
+Offline quality tooling lives in `tools/`; no product stage imports it. Duration-based DER uses raw
+`diar/diarization.json` before merge, independent reference RTTM and explicit UEM. This preserves
+overlapping tracks that single-speaker export segments cannot represent. The corpus runner executes
+`convert → diarize` with declared speaker bounds, without ASR or reference-derived speaker counts.
+See [DER protocol and overlap breakdown](diarization-quality.md); product schemas/caches are unchanged.
+
 - Every stage must log:
   - input/output artifact paths,
   - key parameters,
