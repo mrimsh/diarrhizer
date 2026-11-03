@@ -7,11 +7,32 @@ over a .env value, matching common dotenv convention.
 import os
 import re
 from pathlib import Path
+from diarrhizer.utils import write_text_atomic
 
 # src/diarrhizer/env_file.py -> src/diarrhizer -> src -> repo root.
 # Works for this project's editable install: diarrhizer.__file__ points
 # at the real source tree, not a site-packages copy.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_SOURCE_CHECKOUT = (REPO_ROOT / "pyproject.toml").is_file() and (REPO_ROOT / "src" / "diarrhizer").is_dir()
+
+
+# [SEMANTIC-BEGIN] CONFIG:DIRECTORY
+# @purpose: Keep editable configuration in its checkout and installed-wheel data in the user profile
+# @description: DIARRHIZER_CONFIG_DIR overrides the root; per-file overrides remain authoritative.
+#   Existing checkout files stay in place; installing a wheel never copies secrets automatically.
+# @inputs: environment and package layout
+# @outputs: config directory, without creating it
+# @sideEffects: None
+# @see: CONFIG:ENV, SUMMARY:STORE
+def config_dir() -> Path:
+    override = os.environ.get("DIARRHIZER_CONFIG_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    if _SOURCE_CHECKOUT:
+        return REPO_ROOT
+    local = os.environ.get("LOCALAPPDATA")
+    return Path(local) / "Diarrhizer" if local else Path.home() / ".config" / "diarrhizer"
+# [SEMANTIC-END] CONFIG:DIRECTORY
 
 _LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
@@ -31,6 +52,13 @@ def read_env_file(path: Path) -> dict:
     return values
 
 
+# [SEMANTIC-BEGIN] CONFIG:ENV_WRITE
+# @purpose: Update local secrets without exposing a truncated .env on process interruption
+# @inputs: local .env path and key/value updates
+# @outputs: preserved unrelated lines and updated values
+# @sideEffects: Atomically replaces .env; no secret values are logged
+# @errors: OSError for unreadable/unwritable files
+# @see: CONFIG:ENV, UTILS:ATOMIC_IO
 def write_env_file(path: Path, updates: dict) -> None:
     """Update or append keys from `updates`, preserving every other line
     (including comments and unrelated keys, e.g. DIARRHIZER_DEVICE) as-is.
@@ -54,7 +82,8 @@ def write_env_file(path: Path, updates: dict) -> None:
         if key not in seen:
             output.append(f"{key}={value}")
 
-    path.write_text("\n".join(output) + "\n", encoding="utf-8")
+    write_text_atomic(path, "\n".join(output) + "\n")
+# [SEMANTIC-END] CONFIG:ENV_WRITE
 
 
 def apply_env_file(path: Path) -> None:
@@ -64,19 +93,19 @@ def apply_env_file(path: Path) -> None:
 
 
 # [SEMANTIC-BEGIN] CONFIG:ENV
-# @purpose: Load project .env files into the process environment
-# @description: Precedence is process env > cwd .env > repo-root .env. Used by
+# @purpose: Load local .env files into the process environment
+# @description: Precedence is process env > cwd .env > config directory .env. Used by
 #   both the CLI (doctor/run) and the GUI so HF_TOKEN / DIARRHIZER_FFMPEG_PATH
 #   from a local .env are visible without a manual export.
-# @inputs: optional extra paths; defaults to repo-root .env then cwd .env
+# @inputs: CONFIG:DIRECTORY and cwd .env files
 # @outputs: None (mutates os.environ via setdefault)
 # @sideEffects: Reads .env files, sets missing os.environ keys
 # @errors: None (missing files are ignored)
 # @see: CLI:ENTRY, DIAGNOSTICS:DOCTOR
 def load_project_env() -> None:
-    """Load repo-root .env, then cwd .env, without overriding existing vars."""
+    """Load config .env, then cwd .env, without overriding existing vars."""
     values: dict[str, str] = {}
-    repo_env = REPO_ROOT / ".env"
+    repo_env = config_dir() / ".env"
     cwd_env = Path.cwd() / ".env"
     if repo_env.exists():
         values.update(read_env_file(repo_env))

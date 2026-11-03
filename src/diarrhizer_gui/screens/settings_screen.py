@@ -43,7 +43,7 @@ from diarrhizer_gui.screens.new_job_screen import (
     load_audio_format_store,
 )
 
-ENV_PATH = env_file.REPO_ROOT / ".env"
+ENV_PATH = env_file.config_dir() / ".env"
 
 # Encoder -> usual extension; picking an encoder fills the extension in.
 CODEC_EXTENSIONS = {

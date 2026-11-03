@@ -14,6 +14,8 @@ The export stage produces four output files:
 
 All of them are rendered from the same merged segments. `result.json` keeps them as they are;
 `result.md`/`result.txt` join consecutive segments of the same speaker into *turns* (see below).
+New exports also publish `export/manifest.json` with hashes after all four files are written.
+See [artifact contracts and recovery](artifact-contracts.md) for pending journals and legacy compatibility.
 
 ---
 
@@ -23,6 +25,7 @@ All of them are rendered from the same merged segments. `result.json` keeps them
 
 ```json
 {
+  "schema_version": 1,
   "metadata": {
     "input_file": "string",
     "created_at": "ISO 8601 datetime string",
@@ -32,7 +35,10 @@ All of them are rendered from the same merged segments. `result.json` keeps them
       "min_speakers": "integer",
       "max_speakers": "integer"
     },
-    "speakers": {"Speaker_00": "display name"}
+    "speakers": {"Speaker_00": "display name"},
+    "provenance": {"python": "version", "packages": {"whisperx": "version"}},
+    "source_sha256": "SHA-256 of merged JSON text",
+    "warnings": []
   },
   "segments": [
     {
@@ -67,6 +73,9 @@ All of them are rendered from the same merged segments. `result.json` keeps them
 | `created_at` | string | ISO 8601 timestamp when export was generated |
 | `config` | object | Summary of pipeline configuration used |
 | `speakers` | object | Normalized speaker ID → display name mapping; empty when unnamed |
+| `provenance` | object | Python and installed package versions; no model revision guarantee |
+| `source_sha256` | string | SHA-256 of the UTF-8 merged source JSON text |
+| `warnings` | array of strings | Application warnings from ASR and merge, including alignment fallback |
 
 #### `config` object
 
@@ -112,6 +121,8 @@ ASR word records; it is not required in the exported words after merging/splitti
 
 ## Example
 
+Illustrative source hash (zeros); real exports compute it from merged JSON.
+
 ```json
 {
   "metadata": {
@@ -122,7 +133,19 @@ ASR word records; it is not required in the exported words after merging/splitti
       "device": "cuda",
       "min_speakers": 2,
       "max_speakers": 6
-    }
+    },
+    "speakers": {
+      "Speaker_00": "Alice",
+      "Speaker_01": "Bob"
+    },
+    "provenance": {
+      "python": "3.12.13",
+      "packages": {
+        "whisperx": "3.3.1"
+      }
+    },
+    "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "warnings": []
   },
   "segments": [
     {
@@ -131,12 +154,43 @@ ASR word records; it is not required in the exported words after merging/splitti
       "speaker_id": "Speaker_00",
       "text": "Hello, how are you today?",
       "words": [
-        {"start": 0.0, "end": 0.8, "word": "Hello,", "speaker_id": "Speaker_00"},
-        {"start": 0.8, "end": 1.2, "word": "how", "speaker_id": "Speaker_00"},
-        {"start": 1.2, "end": 1.6, "word": "are", "speaker_id": "Speaker_00"},
-        {"start": 1.6, "end": 2.2, "word": "you", "speaker_id": "Speaker_00"},
-        {"start": 2.2, "end": 3.0, "word": "today?", "speaker_id": "Speaker_00"}
-      ]
+        {
+          "start": 0.0,
+          "end": 0.8,
+          "word": "Hello,",
+          "speaker_id": "Speaker_00",
+          "speaker_name": "Alice"
+        },
+        {
+          "start": 0.8,
+          "end": 1.2,
+          "word": "how",
+          "speaker_id": "Speaker_00",
+          "speaker_name": "Alice"
+        },
+        {
+          "start": 1.2,
+          "end": 1.6,
+          "word": "are",
+          "speaker_id": "Speaker_00",
+          "speaker_name": "Alice"
+        },
+        {
+          "start": 1.6,
+          "end": 2.2,
+          "word": "you",
+          "speaker_id": "Speaker_00",
+          "speaker_name": "Alice"
+        },
+        {
+          "start": 2.2,
+          "end": 3.0,
+          "word": "today?",
+          "speaker_id": "Speaker_00",
+          "speaker_name": "Alice"
+        }
+      ],
+      "speaker_name": "Alice"
     },
     {
       "start": 5.5,
@@ -144,15 +198,53 @@ ASR word records; it is not required in the exported words after merging/splitti
       "speaker_id": "Speaker_01",
       "text": "I'm doing great, thanks for asking.",
       "words": [
-        {"start": 5.5, "end": 6.0, "word": "I'm", "speaker_id": "Speaker_01"},
-        {"start": 6.0, "end": 6.8, "word": "doing", "speaker_id": "Speaker_01"},
-        {"start": 6.8, "end": 7.5, "word": "great,", "speaker_id": "Speaker_01"},
-        {"start": 7.5, "end": 8.5, "word": "thanks", "speaker_id": "Speaker_01"},
-        {"start": 8.5, "end": 9.2, "word": "for", "speaker_id": "Speaker_01"},
-        {"start": 9.2, "end": 10.2, "word": "asking.", "speaker_id": "Speaker_01"}
-      ]
+        {
+          "start": 5.5,
+          "end": 6.0,
+          "word": "I'm",
+          "speaker_id": "Speaker_01",
+          "speaker_name": "Bob"
+        },
+        {
+          "start": 6.0,
+          "end": 6.8,
+          "word": "doing",
+          "speaker_id": "Speaker_01",
+          "speaker_name": "Bob"
+        },
+        {
+          "start": 6.8,
+          "end": 7.5,
+          "word": "great,",
+          "speaker_id": "Speaker_01",
+          "speaker_name": "Bob"
+        },
+        {
+          "start": 7.5,
+          "end": 8.5,
+          "word": "thanks",
+          "speaker_id": "Speaker_01",
+          "speaker_name": "Bob"
+        },
+        {
+          "start": 8.5,
+          "end": 9.2,
+          "word": "for",
+          "speaker_id": "Speaker_01",
+          "speaker_name": "Bob"
+        },
+        {
+          "start": 9.2,
+          "end": 10.2,
+          "word": "asking.",
+          "speaker_id": "Speaker_01",
+          "speaker_name": "Bob"
+        }
+      ],
+      "speaker_name": "Bob"
     }
-  ]
+  ],
+  "schema_version": 1
 }
 ```
 

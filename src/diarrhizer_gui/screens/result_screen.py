@@ -51,6 +51,7 @@ from diarrhizer.export.plain_transcript import format_plain_transcript
 from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.export.turns import format_timestamp, format_turn_line, group_turns, speaking_time
 from diarrhizer.utils import write_json_atomic
+from diarrhizer.artifacts import job_write_lock
 from diarrhizer.pipeline.settings import read_segments, read_object, read_job_settings
 from diarrhizer_gui.job_queue import QueuedRun
 from diarrhizer_gui.job_scan import rediarize_plan
@@ -222,6 +223,7 @@ class RediarizeDialog(QDialog):
 # [SEMANTIC-BEGIN] GUI:RESULT_SCREEN
 # @purpose: Display a validated transcript and safely edit speaker names
 # @description: Switching/reloading results and closing the window ask to save/discard/cancel dirty names.
+#   An unopened result has no dirty state; saves hold the per-job OS write lock through re-export.
 #   Invalid transcript JSON is shown as a readable error. Failed writes keep edits available to retry.
 #   Diarization requests only enqueue work; the runner backs up names when the stage actually starts.
 # @inputs: job artifacts and user edits
@@ -313,6 +315,7 @@ class ResultScreen(QWidget):
         self._speakers_hint.setStyleSheet("color: #7d8394;")
 
         self._save_button = QPushButton("Сохранить имена")
+        self._save_button.setEnabled(False)
         self._save_button.setToolTip("Записать speakers.json и сразу обновить result.md/.txt/.srt/.json")
         self._save_button.clicked.connect(self._save_names)
         self._rediarize_button = QPushButton("Пересчитать спикеров…")
@@ -594,8 +597,9 @@ class ResultScreen(QWidget):
             return
         names = self._current_names()
         try:
-            write_json_atomic(self._job_dir / "speakers.json", names)
-            reexport(self._job_dir, names)
+            with job_write_lock(self._job_dir):
+                write_json_atomic(self._job_dir / "speakers.json", names)
+                reexport(self._job_dir, names)
         except Exception as exc:  # show anything - the names stay on screen to retry
             QMessageBox.warning(self, "Не удалось сохранить", f"{type(exc).__name__}: {exc}")
             return
@@ -605,7 +609,7 @@ class ResultScreen(QWidget):
 
     def _names_settled(self, what: str) -> bool:
         """The model reads the saved result.md: names typed but not saved would be missing from it. False = stop."""
-        if not self._save_button.isEnabled():
+        if self._job_dir is None or not self._save_button.isEnabled():
             return True
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)

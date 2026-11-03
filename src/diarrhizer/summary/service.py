@@ -15,10 +15,12 @@ from pathlib import Path
 
 from diarrhizer.adapters import llm, llm_accounts
 from diarrhizer.summary import wildcards
+from diarrhizer.summary.context_budget import ContextOption, ContextTooLong, check_request
 from diarrhizer.summary.provider_info import Limits
 from diarrhizer.summary.providers import KIND_CODEX_CLI, Provider
 from diarrhizer.summary.templates import PromptTemplate
-from diarrhizer.utils import read_json, write_json_atomic, write_text_atomic
+from diarrhizer.utils import read_json
+from diarrhizer.artifacts import SCHEMA_VERSION, locked_job, digest, provenance, write_bundle, recover_bundles, bundle_valid
 
 logger = logging.getLogger("diarrhizer.summary")
 
@@ -55,6 +57,8 @@ def read_transcript(job_dir: str | Path) -> str:
         ValueError: the transcript is empty
     """
     path = Path(job_dir) / TRANSCRIPT_PATH
+    if not bundle_valid(Path(job_dir) / "export", "manifest.json"):
+        raise ValueError("Export is incomplete or changed; run --from-stage export to recover it before sending")
     if not path.exists():
         raise FileNotFoundError(
             f"{path} not found - the job has no result yet (finish it, or re-run its export stage)"
@@ -124,26 +128,36 @@ def preview_prompt(
 #   describe_usage() shows those that are known) and the plan's limits (from the reply for Claude; read from Codex right after the request, a
 #   failure to read them is only logged). Nothing is written when the provider fails, and earlier summaries
 #   are never overwritten (a name
-#   clash within the same second gets a _2, _3 suffix). The transcript's size is not checked: a model
-#   whose context is too small answers with an error that is passed on as is.
+#   clash within the same second gets a _2, _3 suffix). The full rendered prompt, framing and response
+#   reserve use LLM:CONTEXT_BUDGET, as chat does; exceeding a known limit stops before the provider call.
 #   list_summaries() reads the .json files back, newest first, for the GUI and the CLI; a summary stored
 #   before the user's fields and wildcards were recorded lists with them empty, and summary_title() adds the
 #   start of the note to a summary's line. preview_prompt() builds the request text for a prompt (saved or not)
-#   and a note without sending anything.
+#   and a note without sending anything. The per-job OS lock spans read/request/write; a recoverable bundle
+#   publishes response/metadata with schema, provenance and hashes. Retry recovers a journal without a model call.
 # @inputs: job_dir, PromptTemplate, Provider, optional note
 # @outputs: dict with path (the .md), meta_path, text, warnings and the stored metadata (incl. user_fields, wildcards_used, model, usage, cost_usd, cost_note, limits)
 # @sideEffects: Sends the transcript to the provider (and, for Codex, asks its app-server for the limits); writes summary/*.md and summary/*.json atomically
 # @errors: FileNotFoundError/ValueError (no or empty result.md; UnknownWildcardError for a template that names an unknown wildcard), adapters.llm.LLMError (provider failed)
 # @see: ADAPTER:LLM, ADAPTER:LLM_ACCOUNTS, CONFIG:PROVIDER_INFO, CONFIG:SUMMARY_TEMPLATES, CONFIG:SUMMARY_PROVIDERS, SUMMARY:WILDCARDS, STAGE:EXPORT, CLI:SUMMARIZE, GUI:SUMMARY_DIALOG
+@locked_job
 def summarize_job(
     job_dir: str | Path, template: PromptTemplate, provider: Provider, note: str | None = None
 ) -> dict:
     job_dir = Path(job_dir)
+    recovered = recover_bundles(job_dir / SUMMARY_DIR)
+    if recovered:
+        raise ValueError("Recovered a previously completed summary. Open the saved result; request again only for a new summary.")
     transcript = read_transcript(job_dir)
     rendered = wildcards.render_prompt(
         template.prompt, wildcards.PromptContext(transcript, note or "", job_dir), template.name
     )
     prompt = rendered.text
+    budget = check_request([prompt], provider)
+    if budget.exceeds:
+        budget.options = [ContextOption("shorten", "shorten the template, note or transcript"),
+                          ContextOption("switch_model", "use a model with a larger context")]
+        raise ContextTooLong(budget, provider.name)
     logger.info(
         "[summary] %s: template '%s', provider '%s' (%s), transcript %d chars",
         job_dir.name, template.name, provider.name, provider.kind, len(transcript),
@@ -158,6 +172,11 @@ def summarize_job(
 
     now = datetime.now()
     meta = {
+        "schema_version": SCHEMA_VERSION,
+        "provenance": provenance(),
+        "source_sha256": digest(transcript),
+        "request_sha256": digest(prompt),
+        "warnings": rendered.warnings,
         "created_at": now.isoformat(timespec="seconds"),
         "template": template.name,
         "prompt": template.prompt,
@@ -166,6 +185,7 @@ def summarize_job(
         "provider": {"name": provider.name, "kind": provider.kind, "model": provider.model},
         "source": TRANSCRIPT_PATH,
         "transcript_chars": len(transcript),
+        "context_budget": budget.to_dict(),
         "duration_seconds": round(duration, 1),
         "truncated": reply.truncated,
         "model": reply.model or provider.model,
@@ -175,8 +195,10 @@ def summarize_job(
         "limits": limits.to_dict() if limits else None,
     }
     md_path = _new_summary_path(job_dir, now, template.name)
-    write_text_atomic(md_path, reply.text + "\n")
-    write_json_atomic(md_path.with_suffix(".json"), meta)
+    import json
+    write_bundle(md_path.parent, {md_path.name: reply.text + "\n",
+                                 md_path.with_suffix(".json").name: json.dumps(meta, ensure_ascii=False, indent=2)},
+                 md_path.stem + ".manifest.json", {"kind": "summary", "source_sha256": digest(transcript)})
     logger.info("[summary] Saved %s (%.1fs)", md_path, duration)
     return {
         **meta,
@@ -234,9 +256,11 @@ def list_summaries(job_dir: str | Path) -> list[dict]:
     folder = Path(job_dir) / SUMMARY_DIR
     summaries = []
     for meta_path in sorted(folder.glob("*.json"), reverse=True):
+        if meta_path.name.startswith(".") or meta_path.name.endswith(".manifest.json"):
+            continue
         meta = read_json(meta_path)
         md_path = meta_path.with_suffix(".md")
-        if isinstance(meta, dict) and md_path.exists():
+        if isinstance(meta, dict) and md_path.exists() and bundle_valid(folder, md_path.stem + ".manifest.json"):
             summaries.append({
                 "user_fields": {}, "wildcards_used": [], **meta, "path": str(md_path), "meta_path": str(meta_path),
             })

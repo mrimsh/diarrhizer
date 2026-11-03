@@ -9,6 +9,7 @@ from diarrhizer.adapters.ffmpeg import FFmpegAdapter
 from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat, archive_path
 from diarrhizer.pipeline.cache import config_mismatch, is_stale, source_fingerprint
 from diarrhizer.utils import read_json, write_json_atomic
+from diarrhizer.artifacts import SCHEMA_VERSION, provenance
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 #   (the runner refreshes the keys of later stages that ran with other settings - PIPELINE:RUNNER).
 #   Cache compares a full source SHA-256, resolved path and size; legacy jobs without identity
 #   are reconverted once when conversion is requested. A relocated source is a new input.
+#   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
 # @inputs: job.input_path, config.audio_profile, config.audio_format
 # @outputs: artifacts/audio/normalized.wav, meta/run.json, optional artifacts/audio/archive.<ext>, and for
 #   split-stereo also artifacts/audio/normalized_left.wav / normalized_right.wav (+ archive_left/right.<ext>)
@@ -163,6 +165,8 @@ class ConvertStage:
 
         # Write metadata
         meta_info = {
+            "schema_version": SCHEMA_VERSION,
+            "provenance": provenance(),
             "stage": self.NAME,
             "input_path": str(input_path),
             "source_fingerprint": fingerprint,

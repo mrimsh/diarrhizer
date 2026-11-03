@@ -73,6 +73,24 @@ def _job_with_protocol(tmp_path: Path) -> Path:
     return job
 
 
+def test_summary_gui_refuses_full_budget_before_starting_worker(qapp, summary_stores, fake_worker, tmp_path):
+    _store_providers(Provider(name="small", kind=KIND_OPENAI_API, endpoint="https://example.invalid/v1",
+                              model="fake", context_tokens=100, max_tokens=50))
+    job = _job_with_protocol(tmp_path)
+    dialog = summary_dialog.SummaryDialog(None, job, "synthetic")
+    dialog._note_edit.setPlainText("я" * 1000)
+    dialog._create_or_cancel()
+    assert not fake_worker.instances
+    assert "Лимит превышен" in dialog._status.text()
+    preview = prompt_preview_dialog.PromptPreviewDialog(
+        None, "{{transcript}} {{note}}", "synthetic", [("synthetic", job)],
+        note="я" * 1000, provider=dialog._current_provider(),
+    )
+    assert "резерв ответа 50" in preview._info.text()
+    preview.close()
+    dialog.close()
+
+
 class FakeWorker(QObject):
     """Stands in for LlmWorker: records what it was asked and lets the test decide the outcome."""
 
@@ -2056,7 +2074,7 @@ def test_leaving_out_the_oldest_turns_is_offered_and_recorded(qapp, tmp_path, co
     from diarrhizer.summary import chat
 
     _store_providers(Provider(name="small", kind=KIND_OPENAI_API, endpoint="https://api.example.com/v1", model="s",
-                              context_tokens=5000))
+                              context_tokens=5000, max_tokens=64))
     job = _long_job(tmp_path)
     dialog = _open_chat(tmp_path, job)
     dialog._provider_combo.setCurrentIndex(dialog._provider_combo.findData("small"))

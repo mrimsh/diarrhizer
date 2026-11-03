@@ -8,7 +8,6 @@ turns so far and the new question, so a provider's prompt cache can serve the pr
 
 import copy
 import logging
-import math
 import re
 import time
 import uuid
@@ -20,10 +19,13 @@ from typing import Optional
 from diarrhizer.adapters import llm
 from diarrhizer.adapters.llm import Block, Message
 from diarrhizer.summary import service, wildcards
+from diarrhizer.summary.context_budget import (ContextCheck, ContextOption, ContextTooLong,
+                                              check_request, estimate_tokens, MESSAGE_OVERHEAD, REQUEST_OVERHEAD)
 from diarrhizer.export.turns import format_timestamp
 from diarrhizer.summary.providers import KIND_CODEX_CLI, Provider
 from diarrhizer.summary.templates import PromptTemplate
 from diarrhizer.utils import read_json, write_json_atomic, write_text_atomic
+from diarrhizer.artifacts import SCHEMA_VERSION, locked_job, provenance, digest
 
 logger = logging.getLogger("diarrhizer.summary")
 
@@ -32,48 +34,8 @@ CHAT_DIR = "chat"
 FIRST_QUESTION = "Выполни инструкцию из шаблона."
 _ID_RE = re.compile(r"^[\w-]+$")
 _TITLE_CHARS = 60
-# The size of a text in tokens is estimated, not counted: characters / CHARS_PER_TOKEN, rounded up. Cyrillic runs
-# about 2-3 characters to a token and English about 4; 3 is the compromise, a little high for English, which is the
-# safe side for a limit check. The estimate is for comparing with a limit, nothing else.
-CHARS_PER_TOKEN = 3.0
 _FENCE_OPEN, _FENCE_CLOSE = "<transcript>\n", "\n</transcript>"
 _ENTRY_START = re.compile(r"^\[(\d+):(\d\d):(\d\d)")  # a transcript line begins "[HH:MM:SS → HH:MM:SS] **Name:** ..."
-
-
-def estimate_tokens(chars: int) -> int:
-    """About how many tokens `chars` characters of text are (see CHARS_PER_TOKEN)."""
-    return math.ceil(chars / CHARS_PER_TOKEN)
-
-
-@dataclass
-class ContextOption:
-    """One way out of a context that is too long, for the caller to offer."""
-
-    kind: str  # "window" | "drop_turns" | "switch_model"
-    label: str  # English, for the CLI; an interface words it itself from kind and data
-    data: dict = field(default_factory=dict)  # window: {"start", "end", "kept", "of"}; drop_turns: {"count"}
-
-
-@dataclass
-class ContextCheck:
-    estimated_tokens: int
-    limit: Optional[int]  # None: no limit known, nothing is checked
-    options: list = field(default_factory=list)  # of ContextOption, when the context is too long
-
-    @property
-    def exceeds(self) -> bool:
-        return self.limit is not None and self.estimated_tokens > self.limit
-
-
-class ContextTooLong(ValueError):
-    """The request would go over the model's context limit; nothing was sent. `options` are ways to shrink it."""
-
-    def __init__(self, check: ContextCheck, provider_name: str):
-        self.check = check
-        super().__init__(
-            f"The context is about {check.estimated_tokens:,} tokens, over the {check.limit:,} set for "
-            f"'{provider_name}'. Options: " + "; ".join(option.label for option in check.options)
-        )
 
 
 def _provider_dict(provider: Provider) -> dict:
@@ -99,6 +61,7 @@ class Turn:
     cache_available: Optional[bool] = None
     estimated_tokens: Optional[int] = None  # the request's size before sending, by estimate_tokens()
     context_limit: Optional[int] = None  # the limit it was checked against (None = not checked)
+    context_budget: dict = field(default_factory=dict)
     truncation: list = field(default_factory=list)  # what this request left out, if anything - never silent
 
     def to_dict(self) -> dict:
@@ -127,6 +90,9 @@ class Conversation:
     session_turns: int = 0  # how many turns that session has seen: it is resumed only if it saw all of them
     omitted_turns: int = 0  # the oldest turns that are no longer sent (they stay stored and shown)
     window: Optional[dict] = None  # {"start", "end", "kept", "of"}: the transcript in the prefix was cut to a time window
+    schema_version: int = SCHEMA_VERSION
+    provenance: dict = field(default_factory=dict)
+    source_sha256: str = ""
 
     def to_dict(self) -> dict:
         data = dict(self.__dict__)
@@ -184,8 +150,10 @@ def _note_precedes_transcript(prompt: str, note: str) -> bool:
 #   a provider's prompt cache needs; a note that stands before the transcript makes the prefix differ between
 #   dialogues, and says so in a warning. Provider and model may change from turn to turn (each turn records its
 #   own). A Codex CLI session is kept and resumed only while it has seen every turn; otherwise the whole
-#   history is sent and a new session starts. A failed request adds nothing. Files are written atomically.
-#   Before sending, the request's size is estimated (estimate_tokens) and compared with the provider's
+#   history is sent and a new session starts. A failed request adds nothing. A per-job OS lock spans
+#   read/request/write; files are replaced atomically with schema, source hash and package provenance.
+#   Before sending, all message text, framing and reserved response are estimated (LLM:CONTEXT_BUDGET)
+#   and compared with the provider's
 #   context_tokens (none set = not checked); over it ask() raises ContextTooLong with the ways out - a transcript
 #   window, fewer old turns, another model - and sends nothing; taking one is asking again with window= /
 #   drop_turns=. What is cut stays recorded (the dialogue's window / omitted_turns, every turn's truncation).
@@ -195,6 +163,7 @@ def _note_precedes_transcript(prompt: str, note: str) -> bool:
 # @sideEffects: Sends the transcript to the provider (as a summary does); writes and deletes files in chat/
 # @errors: FileNotFoundError/ValueError (no or empty result.md, unknown dialogue, unknown wildcard, bad id), adapters.llm.LLMError
 # @see: SUMMARY:JOB, SUMMARY:WILDCARD_BLOCKS, ADAPTER:LLM, CLI:CHAT
+@locked_job
 def create_conversation(
     job_dir: str | Path, template: PromptTemplate, provider: Provider, note: str | None = None, title: str = ""
 ) -> Conversation:
@@ -227,6 +196,8 @@ def create_conversation(
         updated_at=now.isoformat(timespec="milliseconds"),  # finer than a turn's time: the order of "last used"
         prefix=prefix,
         warnings=warnings,
+        provenance=provenance(),
+        source_sha256=digest(transcript),
     )
     _save(job_dir, conversation)
     logger.info("[chat] %s: dialogue %s, template '%s', transcript %d chars", job_dir.name, conversation.id,
@@ -234,6 +205,7 @@ def create_conversation(
     return conversation
 
 
+@locked_job
 def ask(
     job_dir: str | Path,
     conversation_id: str,
@@ -297,6 +269,7 @@ def ask(
         cache_available=reply.cache_available,
         estimated_tokens=check.estimated_tokens,
         context_limit=check.limit,
+        context_budget=check.to_dict(),
         truncation=truncation_notes(conversation),
     )
     if sessions and reply.session_id:
@@ -372,7 +345,8 @@ def truncation_notes(conversation: Conversation) -> list[dict]:
 
 
 def _size(conversation: Conversation, question: str) -> int:
-    return estimate_tokens(sum(len(message.text) for message in conversation.messages(question)))
+    messages = conversation.messages(question)
+    return estimate_tokens(sum(len(m.text) for m in messages)) + REQUEST_OVERHEAD + MESSAGE_OVERHEAD * len(messages)
 
 
 def _options(conversation: Conversation, question: str, limit: int) -> list[ContextOption]:
@@ -383,7 +357,7 @@ def _options(conversation: Conversation, question: str, limit: int) -> list[Cont
     over = _size(conversation, question) - limit
     saved = 0
     for count, turn in enumerate(sent, 1):
-        saved += estimate_tokens(len(turn.question) + len(turn.answer))
+        saved += estimate_tokens(len(turn.question) + len(turn.answer)) + 2 * MESSAGE_OVERHEAD
         if saved >= over:
             options.append(ContextOption(
                 "drop_turns", f"leave out the {count} oldest turn(s) (the transcript stays)", {"count": count}))
@@ -434,10 +408,22 @@ def _prepare(
                              f"{len(conversation.turns) - conversation.omitted_turns} sent")
         conversation.omitted_turns += drop_turns
     limit = context_limit if context_limit is not None else provider.context_tokens
-    estimated = _size(conversation, question)
-    check = ContextCheck(estimated, limit)
+    check = check_request((m.text for m in conversation.messages(question)), provider, context_limit)
     if check.exceeds:
-        check.options = _options(conversation, question, limit)
+        check.options = _options(conversation, question, limit - check.reserved_output_tokens)
+        # Heuristic suggestions are offered only after rechecking the actual candidate request.
+        valid = []
+        for option in check.options:
+            candidate = copy.deepcopy(conversation)
+            if option.kind == "drop_turns":
+                candidate.omitted_turns += option.data["count"]
+            elif option.kind == "window":
+                _apply_window(candidate, option.data["start"], option.data["end"])
+            if option.kind == "switch_model" or not check_request(
+                (m.text for m in candidate.messages(question)), provider, context_limit
+            ).exceeds:
+                valid.append(option)
+        check.options = valid
     return conversation, question, check
 
 
@@ -501,6 +487,7 @@ def list_conversations(job_dir: str | Path) -> list[Conversation]:
     return sorted(conversations, key=lambda c: (c.updated_at, c.id), reverse=True)
 
 
+@locked_job
 def delete_conversation(job_dir: str | Path, conversation_id: str) -> None:
     """Remove a dialogue's file (and its exported Markdown, if there is one).
 
@@ -546,6 +533,7 @@ def export_markdown(conversation: Conversation) -> str:
     return "\n".join(lines) + "\n"
 
 
+@locked_job
 def export_conversation(job_dir: str | Path, conversation_id: str, path: str | Path | None = None) -> Path:
     """Write the dialogue as Markdown (default: chat/<id>.md) and return the file."""
     job_dir = Path(job_dir)

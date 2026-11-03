@@ -4,7 +4,7 @@ Research prototypes for working with calls in real time (Telemost, Google Meet, 
 The findings are collected in [`docs/realtime.md`](../../docs/realtime.md).
 
 * Nothing here is imported from `src/` and nothing here is packaged. No dependencies are added to `pyproject.toml`;
-  the libraries a prototype needs are pinned in [`requirements.txt`](requirements.txt) and installed into `.venvcuda` only.
+  the libraries a prototype needs are pinned in [`requirements.txt`](requirements.txt) and installed into a separate `.venv-research`; see [environment setup](../../docs/development.md).
 * Recordings, runs and browser profiles go to `prototypes/realtime/_local/` (git-ignored, together with `*.wav`).
   Never record calls of other people; use your own test material and a call with yourself.
 
@@ -20,7 +20,7 @@ The findings are collected in [`docs/realtime.md`](../../docs/realtime.md).
 | `analyze_tracks.py` | activity of "me" / "others" and echo (loopback signal leaking into the mic track) |
 | `process_loopback_check.py`, `process_loopback_control.py` | feasibility of per-process capture (`proc-tap`) incl. a negative control |
 
-Run (from `prototypes/realtime/capture_loopback`, interpreter `..\..\..\.venvcuda\Scripts\python.exe`, set `PYTHONUTF8=1`):
+Run (from `prototypes/realtime/capture_loopback`, interpreter `..\..\..\.venv-research\Scripts\python.exe`, set `PYTHONUTF8=1`):
 
 ```
 python list_devices.py

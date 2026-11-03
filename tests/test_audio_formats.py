@@ -3,6 +3,7 @@ JSON profile store, name resolution, and locating a job's audio.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -241,12 +242,12 @@ def test_find_job_audio_is_none_without_audio(tmp_path):
 
 def test_default_store_lives_at_the_repo_root(monkeypatch):
     monkeypatch.delenv(ENV_AUDIO_FORMATS_FILE)
-    assert audio_formats.store_path() == audio_formats.REPO_ROOT / "audio_formats.json"
+    assert audio_formats.store_path() == Path(__file__).resolve().parents[1] / "audio_formats.json"
 
 
 def test_example_profiles_file_is_a_valid_store():
     """audio_formats.example.json is what the README tells people to copy."""
-    store = AudioFormatStore.load(audio_formats.REPO_ROOT / "audio_formats.example.json")
+    store = AudioFormatStore.load(Path(__file__).resolve().parents[1] / "audio_formats.example.json")
 
     assert store.default().name == "call-archive"
     assert store.get("call-archive").encoder_args() == [

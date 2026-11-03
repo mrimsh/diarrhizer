@@ -67,9 +67,9 @@ def destination(provider: Provider) -> str:
 #   "Заметка (необязательно)" field - empty each time the dialog opens, never remembered - is passed to the
 #   run as the note for {{note}}; when the chosen template has no {{note}} a warning next to the field says the
 #   note will be added at the end of the request. "Показать запрос" opens GUI:PROMPT_PREVIEW for this job, the
-#   template and the note. "Создать саммари"
+#   template, note and full context budget. Oversized requests are refused before starting a worker. "Создать саммари"
 #   starts an LlmWorker (run_summary_task) and turns into "Отменить" while it runs - cancelling or closing the
-#   dialog kills the child and its tree and stores nothing. A note under the buttons says exactly where the
+#   dialog kills the child and its tree; already journaled responses can be recovered locally. A note under the buttons says exactly where the
 #   transcript will be sent. Finished summaries are listed newest first from summary/*.json (a line carries the
 #   start of the note the summary was made with) and rendered as
 #   Markdown, with the whole note under them; the raw text can be copied or opened as a file. What a request used is shown as far as the
@@ -261,6 +261,7 @@ class SummaryDialog(QDialog):
         PromptPreviewDialog(
             self, template.prompt, template.name, [(self._job_title, self._job_dir)],
             note=self._note_edit.toPlainText(),
+            provider=self._current_provider(),
         ).exec()
 
     # --- creating a summary ----------------------------------------------------------
@@ -273,6 +274,16 @@ class SummaryDialog(QDialog):
         if provider is None:
             return
         template = self._current_template()
+        try:
+            from diarrhizer.summary.context_budget import check_request, describe
+            rendered = service.preview_prompt(self._job_dir, template.prompt, self._note_edit.toPlainText(), template.name)
+            budget = check_request([rendered.text], provider)
+            if budget.exceeds:
+                self._set_status(describe(budget), ok=False)
+                return
+        except (OSError, ValueError) as exc:
+            self._set_status(str(exc), ok=False)
+            return
         worker = LlmWorker(
             run_summary_task,
             (str(self._job_dir), template.to_dict(), provider.to_dict(), self._note_edit.toPlainText()),

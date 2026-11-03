@@ -321,6 +321,24 @@ def test_summarize_uses_the_default_template_and_provider(run_cli, job_dir, mode
     assert len(service.list_summaries(job_dir)) == 1
 
 
+def test_preview_displays_full_budget_without_calling_model(run_cli, job_dir, model, configured):
+    code, out, err = run_cli(job_dir, "--preview", "--note", "Запомни сроки")
+    assert code == 0, err
+    assert "резерв ответа" in out and "Запомни сроки" in out
+    assert model.prompts == [] and not (job_dir / "summary").exists()
+
+
+def test_preview_and_send_refuse_the_same_oversized_prompt(run_cli, job_dir, model, configured):
+    providers = ProviderStore.load()
+    providers.put(Provider(name="small", kind=KIND_CODEX_CLI, context_tokens=100, max_tokens=50))
+    providers.save()
+    for mode in (("--preview",), ()):
+        code, out, err = run_cli(job_dir, "--provider", "small", "--note", "x" * 1000, *mode)
+        assert code == 1
+        assert "Лимит превышен" in out or "Nothing was sent" in err
+    assert model.prompts == [] and not (job_dir / "summary").exists()
+
+
 def test_summarize_takes_the_template_and_provider_by_name_and_can_print(run_cli, job_dir, model, configured):
     model.reply = LLMReply("Готово: итоги")
     code, out, _err = run_cli(job_dir / "export" / "result.md", "--template", "Мой шаблон",

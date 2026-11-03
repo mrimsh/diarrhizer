@@ -92,7 +92,7 @@ or WhisperX fails at startup with a `ModuleNotFoundError` pointing to `pkg_resou
 
 2. **Or install setuptools directly:**
    ```powershell
-   pip install "setuptools<81"
+   python -m pip install "setuptools<81"
    ```
 
 **Why `setuptools<81`?** Versions 81+ dropped `pkg_resources`. WhisperX 3.3.1 still depends on it, so a compatible `setuptools` version must be present in the environment. The constraint file pins `setuptools<81` to ensure this.
@@ -128,14 +128,14 @@ Model was trained with pyannote.audio 0.0.1, yours is 3.4.0. Bad things might ha
    ```cmd
    # Deactivate and remove existing venv
    deactivate
-   rmdir /s .venv
+   Remove-Item -LiteralPath .\.venv -Recurse
    
    # Create fresh environment
    python -m venv .venv
    .\.venv\Scripts\Activate.ps1
-   pip install -U pip
+   python -m pip install -U pip
    python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt
-   pip install -e .
+   python -m pip install -e .
    ```
 
 **Key constraints in `requirements/constraints-stable.txt`:**
@@ -190,7 +190,7 @@ Model was trained with pyannote.audio 0.0.1, yours is 3.4.0. Bad things might ha
 Reinstall torch with the correct CUDA version. The stable supported path uses CUDA 12.1 (cuDNN 8):
 
 ```powershell
-pip uninstall torch torchaudio
+python -m pip uninstall torch torchaudio
 python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
 ```
 
@@ -252,7 +252,7 @@ Run these to diagnose:
 python -c "import torch; print('torch:', torch.__version__); print('CUDA:', torch.version.cuda); print('available:', torch.cuda.is_available())"
 
 # 2. Check all relevant package versions
-pip show whisperx faster-whisper ctranslate2 pyannote.audio torch torchaudio
+python -m pip show whisperx faster-whisper ctranslate2 pyannote.audio torch torchaudio
 
 # 3. Check which cuDNN DLLs are actually in the torch package
 dir .venv\Lib\site-packages\torch\lib\cudnn*.dll
@@ -271,7 +271,7 @@ Recreate your venv with the correct pins:
 
 ```powershell
 deactivate
-rmdir /s .venv
+Remove-Item -LiteralPath .\.venv -Recurse
 
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -279,18 +279,18 @@ python -m pip install -U pip
 
 # For GPU (CUDA 12.1, cuDNN 8):
 python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
-pip install -e .
+python -m pip install -e .
 
 # Or for CPU:
 python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
-pip install -e .
+python -m pip install -e .
 ```
 
 **Option B — Manual fix (if you can't recreate the venv):**
 
 ```powershell
-pip uninstall torch torchaudio
-pip install torch==2.3.1+cu121 torchaudio==2.3.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+python -m pip uninstall torch torchaudio
+python -m pip install torch==2.3.1+cu121 torchaudio==2.3.1+cu121 --index-url https://download.pytorch.org/whl/cu121
 ```
 
 **Option C — Use CPU for verification:**
@@ -327,7 +327,7 @@ Pip's dependency resolver does not retroactively downgrade packages when you cha
 torchcodec provides fast audio decoding. Install it with:
 
 ```cmd
-pip install torchcodec
+python -m pip install torchcodec
 ```
 
 **Fallback:** If torchcodec fails to install, Diarrhizer will automatically use waveform preload (slower but functional). No action needed.
@@ -343,9 +343,9 @@ pip install torchcodec
 WARNING:root:Word alignment failed: load_align_model() got an unexpected keyword argument 'language'
 ```
 
-**Solution:** This is usually caused by WhisperX API changes. The fix has been applied in Diarrhizer v0.1.1+. If you see this error, ensure you're using the latest version:
+**Solution:** This is usually caused by WhisperX API changes. The adapter in this checkout uses the WhisperX 3.3.1 contract. Reinstall the supported constraints and this checkout; no published v0.1.1 release is assumed:
 ```cmd
-pip install -U diarrhizer
+python -m pip install -c requirements/constraints-stable.txt -e .
 ```
 
 ---

@@ -13,6 +13,7 @@ from typing import Protocol, Sequence
 from diarrhizer.pipeline.stages.merge import DEFAULT_MIN_TURN_DURATION
 from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat, resolve_audio_format
 from diarrhizer.utils import read_json, write_json_atomic
+from diarrhizer.artifacts import locked_job, job_write_lock, recover_bundles
 from diarrhizer.pipeline.settings import FULL_STAGES, read_job_settings, recorded_stage_names, build_stages, set_aside_speaker_names
 
 # Configure logging
@@ -30,9 +31,9 @@ logger = logging.getLogger(__name__)
 #   stage's optional finalize(job) hook runs (regardless of from_stage - it acts on the job's recorded
 #   state, e.g. convert dropping a working WAV that the audio format says not to keep); a failure
 #   there is logged, not raised, since the job itself already completed. Inputs are validated before
-#   the job folder is created, and so is every in-range stage's optional preflight(job) hook (a stage
+#   stage artifacts are written, and so is every in-range stage's optional preflight(job) hook (a stage
 #   that will have to run but cannot - diarization without an HF token - fails in seconds, not after
-#   the transcription). new_job_dir() picks a not-yet-existing folder for callers that start several
+#   the transcription). new_job_dir() atomically reserves a fresh folder for callers that start several
 #   jobs in a row (GUI queue, CLI batch) and pass it as job_dir. The stage names a run was given are
 #   carried as PipelineConfig.stages (convert records them for resuming). Convert records the whole job
 #   config in meta/run.json; every later stage that actually ran (not cached, not skipped) then
@@ -207,7 +208,7 @@ def generate_job_id(input_path: str | Path) -> str:
 
 
 def new_job_dir(out_dir: str | Path, input_path: str | Path) -> Path:
-    """A job directory under out_dir for input_path that does not exist yet.
+    """Atomically reserve a fresh job directory, avoiding concurrent name collisions.
 
     generate_job_id() has one-second resolution, so two files with the same
     name queued back to back (a batch, or a job that failed instantly) could
@@ -215,12 +216,16 @@ def new_job_dir(out_dir: str | Path, input_path: str | Path) -> Path:
     start several jobs pass the result to run_pipeline(job_dir=...).
     """
     base = Path(out_dir) / generate_job_id(input_path)
+    base.parent.mkdir(parents=True, exist_ok=True)
     candidate = base
     suffix = 2
-    while candidate.exists():
-        candidate = base.with_name(f"{base.name}_{suffix}")
-        suffix += 1
-    return candidate
+    while True:
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            candidate = base.with_name(f"{base.name}_{suffix}")
+            suffix += 1
 
 
 # [SEMANTIC-END] PIPELINE:RUNNER
@@ -286,11 +291,14 @@ _RESUMABLE_SETTINGS = (
 # @description: Omitted parameters restore recorded settings; explicit None clears nullable values.
 #   Omitted stages restore the recorded list. Planning and validation precede output changes.
 #   Explicit names are saved when export is reached; an empty map prevents stale names returning on resume.
+#   Existing jobs are write-locked before settings are read; fresh jobs reserve their name atomically
+#   before preflight (empty reservations are removed on failure). Export journals are recovered under the lock before any stage can reuse the bundle.
 # @inputs: input/out paths, optional job/stages, explicit configuration overrides
 # @outputs: per-stage results and artifacts
 # @sideEffects: Reads saved settings, then executes pipeline stages with disk/GPU effects
 # @errors: ValueError, OSError, RuntimeError for invalid settings or stage failures
 # @see: CONFIG:RESUME, CONFIG:PIPELINE, PIPELINE:RUNNER, PIPELINE:BUILD_STAGES
+@locked_job
 def run_pipeline(
     *,
     input_path: str | Path | None = None,
@@ -407,6 +415,7 @@ def _run_pipeline(
     Returns:
         Dictionary with pipeline execution results
     """
+    fresh_job = job_dir is None
     input_path = Path(input_path) if input_path is not None else None
     out_dir = Path(out_dir)
 
@@ -525,153 +534,168 @@ def _run_pipeline(
         config=config,
     )
 
-    # Pre-flight: a stage that will have to run but cannot (e.g. diarization
-    # without an HF token) fails now, not after an hour of transcription -
-    # and before the job folder is created.
-    for index, stage in enumerate(stages):
-        preflight = getattr(stage, "preflight", None)
-        if preflight is not None and from_index <= index <= to_index:
-            preflight(job)
+    if fresh_job:
+        job_dir = new_job_dir(out_dir, input_path)
+        job_id = job_dir.name
+        config.job_id = job_id
+        job.job_dir = job_dir
 
-    job_dir.mkdir(parents=True, exist_ok=True)
+    with job_write_lock(job_dir):
+        # Reserve fresh names before preflight so a colliding older job cannot
+        # make a stage mistake its cache for this new job's artifacts.
+        try:
+            for index, stage in enumerate(stages):
+                preflight = getattr(stage, "preflight", None)
+                if preflight is not None and from_index <= index <= to_index:
+                    preflight(job)
+        except Exception:
+            if fresh_job:
+                try:
+                    job_dir.rmdir()  # Only our empty reservation; never remove contents.
+                except OSError:
+                    pass
+            raise
 
-    logger.info(f"=" * 50)
-    logger.info(f"Diarrhizer Pipeline")
-    logger.info(f"=" * 50)
-    logger.info(f"Input: {input_path}")
-    logger.info(f"Output: {job_dir}")
-    logger.info(f"Job ID: {job_id}")
-    logger.info(f"Language: {language}")
-    logger.info(f"Device: {device}")
-    logger.info(f"Speakers: {min_speakers}-{max_speakers}")
-    logger.info(
-        f"Audio format: {audio_format.name}"
-        + ("" if audio_format.keeps_wav else " (working WAV not kept)")
-    )
-    if from_stage or to_stage:
-        logger.info(f"Stage range: {from_stage or stage_names[0]} -> {to_stage or stage_names[-1]}")
-    if force:
-        logger.info(f"FORCE: Recomputing all stages")
-    elif force_stage:
-        logger.info(f"FORCE: Recomputing stage '{force_stage}' only")
-    logger.info(f"=" * 50)
+        job_dir.mkdir(parents=True, exist_ok=True)
 
-    # Run stages sequentially
-    results: list[dict] = []
-    start_time = datetime.now()
+        recover_bundles(job_dir / "export")
+        logger.info(f"=" * 50)
+        logger.info(f"Diarrhizer Pipeline")
+        logger.info(f"=" * 50)
+        logger.info(f"Input: {input_path}")
+        logger.info(f"Output: {job_dir}")
+        logger.info(f"Job ID: {job_id}")
+        logger.info(f"Language: {language}")
+        logger.info(f"Device: {device}")
+        logger.info(f"Speakers: {min_speakers}-{max_speakers}")
+        logger.info(
+            f"Audio format: {audio_format.name}"
+            + ("" if audio_format.keeps_wav else " (working WAV not kept)")
+        )
+        if from_stage or to_stage:
+            logger.info(f"Stage range: {from_stage or stage_names[0]} -> {to_stage or stage_names[-1]}")
+        if force:
+            logger.info(f"FORCE: Recomputing all stages")
+        elif force_stage:
+            logger.info(f"FORCE: Recomputing stage '{force_stage}' only")
+        logger.info(f"=" * 50)
 
-    for index, stage in enumerate(stages):
-        stage_name = getattr(stage, "NAME", "unknown")
+        # Run stages sequentially
+        results: list[dict] = []
+        start_time = datetime.now()
 
-        # Stages outside [from_stage, to_stage] are skipped entirely - not
-        # run, not cache-checked - as opposed to stages inside the range,
-        # which still go through the normal is_stale-based caching below
-        # rather than being unconditionally recomputed.
-        if index < from_index or index > to_index:
-            logger.info(
-                f"\n--- Stage: {stage_name} (skipped, outside stage range) ---",
-                extra={"stage": stage_name},
-            )
-            results.append({"stage": stage_name, "status": "skipped"})
-            continue
+        for index, stage in enumerate(stages):
+            stage_name = getattr(stage, "NAME", "unknown")
 
-        logger.info(f"\n--- Stage: {stage_name} ---", extra={"stage": stage_name})
-
-        # Determine if this stage should be forced
-        should_force = force or (force_stage == stage_name)
-
-        if stage_name == "export" and preserve_speakers:
-            write_json_atomic(job_dir / "speakers.json", config.speakers or {})
-
-        # Check cache before running (skip if not forced and cache is valid)
-        if not should_force and stage.is_cache_valid(job):
-            # Get this stage's own output paths for the log message. Using
-            # get_output_paths() (not get_artifact_paths()) matters here:
-            # get_artifact_paths() also includes this stage's *inputs*, which
-            # belong to earlier stages.
-            outputs = stage.get_output_paths(job_dir)
-            # Find the first existing artifact for the log
-            artifact_path = None
-            if isinstance(outputs, dict):
-                for path in outputs.values():
-                    if isinstance(path, Path) and path.exists():
-                        artifact_path = path
-                        break
-            if artifact_path:
+            # Stages outside [from_stage, to_stage] are skipped entirely - not
+            # run, not cache-checked - as opposed to stages inside the range,
+            # which still go through the normal is_stale-based caching below
+            # rather than being unconditionally recomputed.
+            if index < from_index or index > to_index:
                 logger.info(
-                    f"Stage {stage_name}: using cached output from {artifact_path}",
+                    f"\n--- Stage: {stage_name} (skipped, outside stage range) ---",
                     extra={"stage": stage_name},
                 )
-            else:
-                logger.info(
-                    f"Stage {stage_name}: using cached output", extra={"stage": stage_name}
-                )
-            results.append({
-                "stage": stage_name,
-                "status": "cached",
-            })
-            continue
-
-        # Only a stage that actually runs changes the saved name mapping.
-        # Pending/cancelled jobs and cached diarization leave it untouched.
-        if stage_name == "diarize":
-            set_aside_speaker_names(job_dir)
-            if not preserve_speakers:
-                config.speakers = None
-
-        # If forcing, delete this stage's own outputs first to avoid partial
-        # state. Deliberately uses get_output_paths(), not get_artifact_paths():
-        # the latter also includes this stage's *inputs* (other stages'
-        # outputs), which must never be deleted here.
-        if should_force:
-            logger.info(
-                f"Stage {stage_name}: forcing recompute (--force flag)",
-                extra={"stage": stage_name},
-            )
-            outputs = stage.get_output_paths(job_dir)
-            if isinstance(outputs, dict):
-                for path in outputs.values():
-                    if isinstance(path, Path) and path.exists():
-                        try:
-                            path.unlink()
-                            logger.debug(f"Deleted {path}")
-                        except OSError as e:
-                            logger.warning(f"Could not delete {path}: {e}")
-        else:
-            logger.info(f"Stage {stage_name}: running...", extra={"stage": stage_name})
-
-        # Run the stage
-        try:
-            result = stage.run(job)
-            results.append(result)
-        except Exception as e:
-            print(f"[{stage_name}] Error: {e}")
-            raise
-        _record_stage_settings(job_dir, stage_name, config)
-
-    # The job is complete only once the last stage ran (or was cached) - a
-    # --to-stage run that stops early leaves intermediate files for later stages.
-    if stages and to_index == len(stages) - 1:
-        for stage in stages:
-            finalize = getattr(stage, "finalize", None)
-            if finalize is None:
+                results.append({"stage": stage_name, "status": "skipped"})
                 continue
+
+            logger.info(f"\n--- Stage: {stage_name} ---", extra={"stage": stage_name})
+
+            # Determine if this stage should be forced
+            should_force = force or (force_stage == stage_name)
+
+            if stage_name == "export" and preserve_speakers:
+                write_json_atomic(job_dir / "speakers.json", config.speakers or {})
+
+            # Check cache before running (skip if not forced and cache is valid)
+            if not should_force and stage.is_cache_valid(job):
+                # Get this stage's own output paths for the log message. Using
+                # get_output_paths() (not get_artifact_paths()) matters here:
+                # get_artifact_paths() also includes this stage's *inputs*, which
+                # belong to earlier stages.
+                outputs = stage.get_output_paths(job_dir)
+                # Find the first existing artifact for the log
+                artifact_path = None
+                if isinstance(outputs, dict):
+                    for path in outputs.values():
+                        if isinstance(path, Path) and path.exists():
+                            artifact_path = path
+                            break
+                if artifact_path:
+                    logger.info(
+                        f"Stage {stage_name}: using cached output from {artifact_path}",
+                        extra={"stage": stage_name},
+                    )
+                else:
+                    logger.info(
+                        f"Stage {stage_name}: using cached output", extra={"stage": stage_name}
+                    )
+                results.append({
+                    "stage": stage_name,
+                    "status": "cached",
+                })
+                continue
+
+            # Only a stage that actually runs changes the saved name mapping.
+            # Pending/cancelled jobs and cached diarization leave it untouched.
+            if stage_name == "diarize":
+                set_aside_speaker_names(job_dir)
+                if not preserve_speakers:
+                    config.speakers = None
+
+            # If forcing, delete this stage's own outputs first to avoid partial
+            # state. Deliberately uses get_output_paths(), not get_artifact_paths():
+            # the latter also includes this stage's *inputs* (other stages'
+            # outputs), which must never be deleted here.
+            if should_force and stage_name != "export":
+                logger.info(
+                    f"Stage {stage_name}: forcing recompute (--force flag)",
+                    extra={"stage": stage_name},
+                )
+                outputs = stage.get_output_paths(job_dir)
+                if isinstance(outputs, dict):
+                    for path in outputs.values():
+                        if isinstance(path, Path) and path.exists():
+                            try:
+                                path.unlink()
+                                logger.debug(f"Deleted {path}")
+                            except OSError as e:
+                                logger.warning(f"Could not delete {path}: {e}")
+            else:
+                logger.info(f"Stage {stage_name}: running...", extra={"stage": stage_name})
+
+            # Run the stage
             try:
-                finalize(job)
-            except OSError as e:
-                logger.warning(f"Stage {getattr(stage, 'NAME', 'unknown')}: cleanup failed: {e}")
+                result = stage.run(job)
+                results.append(result)
+            except Exception as e:
+                print(f"[{stage_name}] Error: {e}")
+                raise
+            _record_stage_settings(job_dir, stage_name, config)
 
-    end_time = datetime.now()
-    total_duration = (end_time - start_time).total_seconds()
+        # The job is complete only once the last stage ran (or was cached) - a
+        # --to-stage run that stops early leaves intermediate files for later stages.
+        if stages and to_index == len(stages) - 1:
+            for stage in stages:
+                finalize = getattr(stage, "finalize", None)
+                if finalize is None:
+                    continue
+                try:
+                    finalize(job)
+                except OSError as e:
+                    logger.warning(f"Stage {getattr(stage, 'NAME', 'unknown')}: cleanup failed: {e}")
 
-    logger.info(f"\n{'=' * 50}")
-    logger.info(f"Pipeline completed in {total_duration:.2f}s")
-    logger.info(f"Output directory: {job_dir}")
-    logger.info(f"{'=' * 50}")
+        end_time = datetime.now()
+        total_duration = (end_time - start_time).total_seconds()
 
-    return {
-        "job_id": job_id,
-        "job_dir": str(job_dir),
-        "stages": results,
-        "total_duration_seconds": total_duration,
-    }
+        logger.info(f"\n{'=' * 50}")
+        logger.info(f"Pipeline completed in {total_duration:.2f}s")
+        logger.info(f"Output directory: {job_dir}")
+        logger.info(f"{'=' * 50}")
+
+        return {
+            "job_id": job_id,
+            "job_dir": str(job_dir),
+            "stages": results,
+            "total_duration_seconds": total_duration,
+        }

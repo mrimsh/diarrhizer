@@ -55,7 +55,7 @@ def main() -> int:
     from diarrhizer_gui.child_process import kill_all
     from diarrhizer_gui.main_window import MainWindow
 
-    # Same load as the CLI (repo-root .env, then cwd .env; process env wins).
+    # Same load as the CLI (config directory .env, then cwd .env; process env wins).
     # Children inherit os.environ, so they see the same token/paths.
     env_file.load_project_env()
 

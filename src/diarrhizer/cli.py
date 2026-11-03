@@ -43,6 +43,7 @@ def _configure_logging() -> None:
 #   (SUMMARY:WILDCARDS) are filled in; --note / --note-file (mutually exclusive) give the text for {{note}}
 #   and --list-wildcards shows the wildcards (names and descriptions) and exits. The reply is stored in the
 #   job's summary/ folder; --print also writes it to stdout, --list shows the available templates and providers.
+#   --preview prints the rendered prompt and complete budget without sending/writing; known overflow exits 1.
 # @inputs: args.job, args.template, args.provider, args.note, args.note_file, args.print, args.list, args.list_wildcards
 # @outputs: summary/<timestamp>_<template>.md (+ .json) in the job folder; its path on stdout
 # @sideEffects: Sends the transcript to the provider (subscription CLI or HTTPS API); writes files
@@ -90,10 +91,17 @@ def _run_summarize(args: argparse.Namespace) -> int:
         template = templates.resolve(args.template)
         provider = providers.resolve(args.provider)
         note = service.read_note_file(args.note_file) if args.note_file else (args.note or "")
+        if args.preview:
+            from diarrhizer.summary.context_budget import check_request, describe
+            rendered = service.preview_prompt(job_dir, template.prompt, note, template.name)
+            budget = check_request([rendered.text], provider)
+            print(rendered.text)
+            print("\n" + describe(budget))
+            return 1 if budget.exceeds else 0
         with_note = f" and a note ({len(note.strip())} chars)" if note.strip() else ""
         print(f"Summarizing {job_dir.name} with template '{template.name}'{with_note} via '{provider.name}'...")
         result = service.summarize_job(job_dir, template, provider, note=note)  # warnings: logged by the service
-    except (FileNotFoundError, ValueError, LLMError, OSError) as e:
+    except (FileNotFoundError, ValueError, LLMError, OSError, RuntimeError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
@@ -206,7 +214,7 @@ def _run_chat(args: argparse.Namespace) -> int:
         print(f"Error: {e}\nNothing was sent. Repeat with --drop-turns N, --window START-END or another --provider/--model.",
               file=sys.stderr)
         return 1
-    except (FileNotFoundError, ValueError, LLMError, OSError) as e:
+    except (FileNotFoundError, ValueError, LLMError, OSError, RuntimeError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
@@ -218,17 +226,22 @@ def _run_chat(args: argparse.Namespace) -> int:
     if args.print:
         sys.stdout.buffer.write(("\n" + turn.answer + "\n").encode("utf-8"))
     if args.export:
-        if args.export == "-":
-            sys.stdout.buffer.write(chat.export_markdown(chat.load_conversation(job_dir, conversation.id)).encode("utf-8"))
-        else:
-            print(f"Exported: {chat.export_conversation(job_dir, conversation.id, args.export)}")
+        try:
+            if args.export == "-":
+                sys.stdout.buffer.write(chat.export_markdown(chat.load_conversation(job_dir, conversation.id)).encode("utf-8"))
+            else:
+                print(f"Exported: {chat.export_conversation(job_dir, conversation.id, args.export)}")
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"Turn saved, but export failed: {exc}", file=sys.stderr)
+            return 1
     return 0
 # [SEMANTIC-END] CLI:CHAT
 
 
 # [SEMANTIC-BEGIN] CLI:ENTRY
 # @purpose: CLI entry point for Diarrhizer commands
-# @description: Provides doctor, run, summarize and chat commands for diagnostics, processing, summaries and dialogues
+# @description: Provides doctor profiles, run, summarize/preview and chat; recover completes export/summary journals
+#   under a job lock without inference or provider calls.
 # @sideEffects: Loads project .env, parses args, runs diagnostics or pipeline, configures a StreamHandler
 #   (stdout, "%(message)s") on the "diarrhizer" package logger so stage/pipeline
 #   progress logged via logging (see PIPELINE:RUNNER) prints like the old print()s did
@@ -251,6 +264,8 @@ def main() -> int:
         "doctor",
         help="Run environment diagnostics"
     )
+    recover_parser = subparsers.add_parser("recover", help="Finish interrupted local artifact writes without calling a model")
+    recover_parser.add_argument("job", help="Existing job directory")
 
     # Run command
     #
@@ -432,6 +447,9 @@ def main() -> int:
              "the audio format's own setting (ignored for the wav format, which only has that file)"
     )
 
+    doctor_parser.add_argument("--profile", choices=["full", "asr", "export", "summary"], default="full",
+                               help="Check only the capabilities needed (default: full)")
+
     # Summarize command
     summarize_parser = subparsers.add_parser(
         "summarize",
@@ -474,6 +492,7 @@ def main() -> int:
         action="store_true",
         help="Also print the summary to stdout (it is always saved in the job's summary/ folder)"
     )
+    summarize_parser.add_argument("--preview", action="store_true", help="Print the complete request and context budget without sending or saving")
     summarize_parser.add_argument(
         "--list",
         action="store_true",
@@ -533,11 +552,19 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "doctor":
-        return 0 if run_doctor_checks() else 1
+        return 0 if (run_doctor_checks() if args.profile == "full" else run_doctor_checks(args.profile)) else 1
     elif args.command == "summarize":
         return _run_summarize(args)
     elif args.command == "chat":
         return _run_chat(args)
+    elif args.command == "recover":
+        from diarrhizer.artifacts import recover_job
+        try:
+            print(json.dumps(recover_job(args.job)))
+            return 0
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
     elif args.command == "run":
         # [SEMANTIC-BEGIN] CLI:RUN
         # @purpose: Run the processing pipeline for one or several media files

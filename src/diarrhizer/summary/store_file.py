@@ -11,13 +11,20 @@ import os
 from pathlib import Path
 from typing import Any
 
-from diarrhizer.env_file import REPO_ROOT
+from diarrhizer.env_file import config_dir
 
 
+# [SEMANTIC-BEGIN] SUMMARY:STORE
+# @purpose: Resolve and validate local template/provider stores without silently dropping corrupt data
+# @inputs: per-file environment override, store filename and expected section
+# @outputs: config path or validated default name and entries
+# @sideEffects: Reads JSON; never writes secrets or repairs malformed input
+# @errors: ValueError for unreadable/invalid stores
+# @see: CONFIG:DIRECTORY
 def resolve_path(env_var: str, filename: str) -> Path:
-    """The env var's path if set, else <repo root>/<filename>."""
+    """The env var's path if set, else <config directory>/<filename>."""
     override = os.environ.get(env_var)
-    return Path(override) if override else REPO_ROOT / filename
+    return Path(override) if override else config_dir() / filename
 
 
 def read_entries(path: Path, section: str, label: str) -> tuple[str, dict[str, dict[str, Any]]]:
@@ -30,7 +37,7 @@ def read_entries(path: Path, section: str, label: str) -> tuple[str, dict[str, d
         return "", {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, ValueError) as e:
         raise ValueError(f"Cannot read {label} file {path}: {e}") from e
     if not isinstance(data, dict) or not isinstance(data.get(section, {}), dict):
         raise ValueError(f"{label.capitalize()} file {path} must be an object with a '{section}' object")
@@ -39,3 +46,4 @@ def read_entries(path: Path, section: str, label: str) -> tuple[str, dict[str, d
         if not isinstance(entry, dict):
             raise ValueError(f"{path}: '{name}' must be an object")
     return str(data.get("default") or ""), entries
+# [SEMANTIC-END] SUMMARY:STORE

@@ -23,6 +23,8 @@ coverage.xml
 # ===== Virtual environments =====
 .venv/
 .venvcuda/
+.venv-check/
+.venv-research/
 venv/
 ENV/
 
@@ -63,6 +65,14 @@ checkpoints/
 *.webm
 *.avi
 *.mov
+*.aac
+*.ogg
+*.oga
+*.opus
+*.wma
+*.amr
+*.3gp
+*.m4v
 
 # ===== Large model files (avoid committing) =====
 *.bin
@@ -81,3 +91,4 @@ prototypes/realtime/_local/
 prototypes/realtime/**/_local/
 
 latest_silero_models.yml
+.pytest_cache_clean/

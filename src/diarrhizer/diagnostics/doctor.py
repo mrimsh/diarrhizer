@@ -3,6 +3,7 @@
 import os
 import shutil
 import sys
+from functools import partial
 from pathlib import Path
 from typing import List, Tuple
 
@@ -15,11 +16,11 @@ from diarrhizer.summary.templates import TemplateStore
 # Checks whose failure only costs speed or an optional add-on (summaries), not
 # correctness: reported as WARN and not counted against the result (doctor's
 # exit code, the GUI's badge).
-OPTIONAL_CHECKS = {"torchcodec", "Summarization"}
+OPTIONAL_CHECKS = {"torchcodec", "Summarization", "CUDA"}
 
 
-def is_blocking_failure(name: str, passed: bool) -> bool:
-    return not passed and name not in OPTIONAL_CHECKS
+def is_blocking_failure(name: str, passed: bool, profile: str = "full") -> bool:
+    return not passed and (name not in OPTIONAL_CHECKS or (profile == "summary" and name == "Summarization"))
 
 
 # [SEMANTIC-BEGIN] DIAGNOSTICS:DOCTOR
@@ -28,18 +29,32 @@ def is_blocking_failure(name: str, passed: bool) -> bool:
 #   encoder is in this FFmpeg build), summarization setup (templates/providers files parse, every provider's
 #   CLI is on PATH / API key is set), torch/torchaudio, CUDA, cuDNN, torchcodec, HF token, and critical ML imports.
 #   Shared API key variables are reported as optional warnings, without exposing their values.
-#   A failed check in OPTIONAL_CHECKS (torchcodec: only a faster decoder; Summarization: an add-on) is a
+#   A failed check in OPTIONAL_CHECKS (torchcodec: faster decoder; Summarization: add-on; CUDA: CPU works) is a
 #   warning, not a failure. run_all_checks() is the shared, print-free list the GUI runs (in a child process).
+#   Profiles select only the capabilities needed: full, asr (no HF token), export (no ML/FFmpeg),
+#   summary (provider setup is required). The default full profile preserves existing GUI behavior.
+#   Each check is isolated so a DLL/import failure cannot hide the remaining diagnostics.
 # @sideEffects: Reads environment variables, audio_formats.json and the summary_*.json files, runs
 #   `ffmpeg -encoders`, imports optional modules, scans torch/lib for cuDNN DLLs
 # @errors: Prints warnings for missing dependencies; returns False if any non-optional check failed
 # @see: CLI:ENTRY, ADAPTER:FFMPEG, CONFIG:ENV, CONFIG:AUDIO_FORMATS, CONFIG:SUMMARY_PROVIDERS, GUI:CHILD_TASKS
-def run_all_checks() -> List[Tuple[str, bool, str]]:
+def run_all_checks(profile: str = "full") -> List[Tuple[str, bool, str]]:
     """Run every check, in display order, without printing."""
-    return [check() for check in ALL_CHECKS]
+    return [_run_check(check) for check in _profile_checks(profile)]
 
 
-def run_doctor_checks() -> bool:
+def _run_check(check):
+    try:
+        return check()
+    except Exception as exc:
+        function = getattr(check, "func", check)
+        name = {"check_torchcodec": "torchcodec", "check_summarization": "Summarization"}.get(
+            function.__name__, function.__name__.removeprefix("check_").replace("_", " ")
+        )
+        return name, False, f"{type(exc).__name__}: {exc}"
+
+
+def run_doctor_checks(profile: str = "full") -> bool:
     """Run all diagnostic checks and print results.
 
     Returns:
@@ -50,20 +65,20 @@ def run_doctor_checks() -> bool:
     print("=" * 50)
 
     results: List[Tuple[str, bool, str]] = []
-    for check in ALL_CHECKS:
-        name, passed, message = check()
+    for check in _profile_checks(profile):
+        name, passed, message = _run_check(check)
         results.append((name, passed, message))
         if passed:
             status = "[PASS]"
         else:
-            status = "[WARN]" if name in OPTIONAL_CHECKS else "[FAIL]"
+            status = "[FAIL]" if is_blocking_failure(name, passed, profile) else "[WARN]"
         print(f"{status}: {name}")
         if message:
             print(f"       {message}")
 
     print("=" * 50)
     passed_count = sum(1 for _, p, _ in results if p)
-    warnings = sum(1 for name, p, _ in results if not p and name in OPTIONAL_CHECKS)
+    warnings = sum(1 for name, p, _ in results if not p and not is_blocking_failure(name, p, profile))
     total_count = len(results)
     print(
         f"Results: {passed_count}/{total_count} checks passed"
@@ -75,10 +90,10 @@ def run_doctor_checks() -> bool:
         print("\n" + "=" * 50)
         print("RECOMMENDED ACTION:")
         print("  Rebuild environment with stable constraints:")
-        print("    pip install -c requirements/constraints-stable.txt -r requirements/base.txt")
+        print("    python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt")
         print("  Or reinstall PyTorch with a compatible version.")
     print("=" * 50)
-    return not any(is_blocking_failure(name, passed) for name, passed, _ in results)
+    return not any(is_blocking_failure(name, passed, profile) for name, passed, _ in results)
 
 
 def check_python_version() -> Tuple[str, bool, str]:
@@ -162,7 +177,7 @@ def check_audio_formats() -> Tuple[str, bool, str]:
     return (name, True, f"Default '{default.name}' ({default.codec}), {len(store.formats())} profiles{note}")
 
 
-def check_summarization() -> Tuple[str, bool, str]:
+def check_summarization(*, required: bool = False) -> Tuple[str, bool, str]:
     """Check summary_templates.json / summary_providers.json parse and every provider is usable.
 
     A CLI provider needs its command on PATH, an API provider needs its key in
@@ -189,7 +204,8 @@ def check_summarization() -> Tuple[str, bool, str]:
     if problems:
         return (name, False, "; ".join(problems))
     if not providers.providers:
-        return (name, True, f"{len(templates.templates())} templates, no providers configured (optional)")
+        suffix = "configure a provider to summarize" if required else "optional"
+        return (name, not required, f"{len(templates.templates())} templates, no providers configured ({suffix})")
     return (name, True, f"{len(templates.templates())} templates, providers: {', '.join(providers.names())}")
 
 
@@ -220,11 +236,13 @@ def check_torch() -> Tuple[str, bool, str]:
 
 
 def check_cuda() -> Tuple[str, bool, str]:
-    """Check CUDA availability and device count."""
+    """Validate CUDA builds; CPU builds are supported when processing with --device cpu."""
     try:
         import torch
+        if torch.version.cuda is None:
+            return ("CUDA", False, "CPU-only torch; use --device cpu (CUDA inference unavailable)")
         if not torch.cuda.is_available():
-            return ("CUDA", False, "CUDA not available (torch compiled without CUDA)")
+            return ("CUDA", False, "CUDA build installed but no usable CUDA device; check driver/device")
         
         device_count = torch.cuda.device_count()
         if device_count == 0:
@@ -354,6 +372,19 @@ ALL_CHECKS = [
     check_critical_imports,
     check_hf_token,
 ]
+
+
+def _profile_checks(profile: str):
+    if profile == "full":
+        return ALL_CHECKS
+    if profile == "asr":
+        return [check_python_version, check_ffmpeg, check_audio_formats, check_torch,
+                check_cuda, check_cudnn, check_torchcodec, check_critical_imports]
+    if profile == "export":
+        return [check_python_version]
+    if profile == "summary":
+        return [check_python_version, partial(check_summarization, required=True)]
+    raise ValueError(f"Unknown doctor profile: {profile}")
 
 
 if __name__ == "__main__":

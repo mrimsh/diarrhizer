@@ -2,6 +2,7 @@
 
 from diarrhizer.env_file import (  # noqa: F401
     REPO_ROOT,
+    config_dir,
     apply_env_file,
     load_project_env,
     read_env_file,

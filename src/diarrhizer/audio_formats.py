@@ -19,10 +19,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from diarrhizer.env_file import REPO_ROOT
+from diarrhizer.env_file import config_dir
 from diarrhizer.utils import write_json_atomic
 
-# Overrides where user profiles are stored (default: <repo root>/audio_formats.json).
+# Overrides where user profiles are stored (default: <config directory>/audio_formats.json).
 ENV_AUDIO_FORMATS_FILE = "DIARRHIZER_AUDIO_FORMATS_FILE"
 
 # Job-dir layout, relative to job_dir.
@@ -234,9 +234,9 @@ DEFAULT_FORMAT_NAME = WAV_FORMAT.name
 
 
 def store_path() -> Path:
-    """Where user profiles live: DIARRHIZER_AUDIO_FORMATS_FILE, else <repo root>/audio_formats.json."""
+    """Where user profiles live: DIARRHIZER_AUDIO_FORMATS_FILE, else <config directory>/audio_formats.json."""
     override = os.environ.get(ENV_AUDIO_FORMATS_FILE)
-    return Path(override) if override else REPO_ROOT / "audio_formats.json"
+    return Path(override) if override else config_dir() / "audio_formats.json"
 
 
 @dataclass

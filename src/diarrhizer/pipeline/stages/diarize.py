@@ -10,6 +10,7 @@ from diarrhizer.adapters.whisperx import WhisperXDiarizeAdapter
 from diarrhizer.audio_formats import find_job_audio
 from diarrhizer.pipeline.cache import config_mismatch, is_stale
 from diarrhizer.utils import read_json, write_json_atomic
+from diarrhizer.artifacts import SCHEMA_VERSION, provenance
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 #   (find_job_audio); cache staleness stays keyed on the WAV, so dropping it never invalidates diarization.
 #   preflight() (called by the runner before any stage runs) fails fast when diarization will have to
 #   run - not cached, or forced - and no HF token is set, instead of failing after the transcription.
+#   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/diar/diarization.json
 # @sideEffects: Loads pyannote model, writes diarization JSON to disk, unloads the
@@ -167,6 +169,8 @@ class DiarizeStage:
 
         # Prepare diarization data
         diar_data = {
+            "schema_version": SCHEMA_VERSION,
+            "provenance": provenance(),
             "stage": self.NAME,
             "segments": result.get("segments", []),
             "num_speakers": result.get("num_speakers", 0),

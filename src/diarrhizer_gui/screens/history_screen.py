@@ -558,7 +558,7 @@ class HistoryScreen(QWidget):
             return
         try:
             delete_job(Path(self._path_field.text()), job.job_dir)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "Не удалось удалить", str(exc))
         self.refresh()
 # [SEMANTIC-END] GUI:HISTORY_TABLE

@@ -87,6 +87,7 @@ def test_each_stage_emits_at_least_one_record_with_stage_in_extra(fixed_job, col
         input_path=input_file,
         out_dir=out_dir,
         stages=[MergeStage(), ExportStage()],
+        job_dir=job_dir,
     )
 
     stages_seen = {
@@ -105,6 +106,7 @@ def test_no_progress_is_printed_to_stdout(fixed_job, collected_records, capsys):
         input_path=input_file,
         out_dir=out_dir,
         stages=[MergeStage(), ExportStage()],
+        job_dir=job_dir,
     )
 
     captured = capsys.readouterr()

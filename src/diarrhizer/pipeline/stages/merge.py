@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.pipeline.cache import config_mismatch, is_stale
 from diarrhizer.utils import read_json, write_json_atomic
+from diarrhizer.artifacts import SCHEMA_VERSION, provenance
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 #   is split at that boundary (MERGE:SPEAKER_TURNS).
 #   Partial or inconsistent alignment retains the original segment text unsplit and records a warning.
 #   cache_version=2 invalidates results predating text-preserving merge, only when merge is in range.
+#   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
 # @inputs: artifacts/asr/transcript.json (required), artifacts/diar/diarization.json (optional)
 # @outputs: artifacts/merged/segments.json
 # @sideEffects: Reads JSON files, writes merged segments to disk,
@@ -119,6 +121,8 @@ class MergeStage:
 
         # Prepare output data
         output_data = {
+            "schema_version": SCHEMA_VERSION,
+            "provenance": provenance(),
             "stage": self.NAME,
             "segments": merged_segments,
             "num_segments": len(merged_segments),

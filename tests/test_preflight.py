@@ -51,7 +51,9 @@ def test_missing_token_fails_before_any_stage_runs(tmp_path):
         run_pipeline(input_path=media, out_dir=out, stages=[first, DiarizeStage()])
 
     assert first.ran is False
-    assert not out.exists() or not any(out.iterdir())
+    # OS lock files may persist beside jobs; failed preflight must leave no job/artifact directory.
+    from diarrhizer.artifacts import LOCK_DIR
+    assert not out.exists() or not any(path.name != LOCK_DIR for path in out.iterdir())
 
 
 def _seed_cached_diarization(job_dir):

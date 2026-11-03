@@ -10,6 +10,7 @@ from diarrhizer.audio_formats import find_job_audio
 from diarrhizer.export.plain_transcript import format_plain_transcript
 from diarrhizer.pipeline.cache import config_mismatch, is_stale, prompt_digest
 from diarrhizer.utils import read_json, write_json_atomic, write_text_atomic
+from diarrhizer.artifacts import SCHEMA_VERSION, provenance
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 #   (find_job_audio); cache staleness stays keyed on the WAV, so dropping it never invalidates the transcript.
 #   Metadata distinguishes requested options from effective backend settings and records alignment warnings.
 #   cache_version=2 invalidates results predating this backend contract, only when transcribe is in range.
+#   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/asr/transcript.json, artifacts/asr/transcript.txt (readable paragraphs, no speakers)
 # @sideEffects: Loads WhisperX model, writes transcript JSON to disk, unloads the
@@ -206,6 +208,8 @@ class TranscribeStage:
 
         # Prepare transcript data with full ASR configuration
         transcript_data = {
+            "schema_version": SCHEMA_VERSION,
+            "provenance": provenance(),
             "stage": self.NAME,
             "model": self._model,
             "compute_type": self._compute_type,

@@ -367,7 +367,7 @@ class ChatDialog(QDialog):
             conversation = chat.create_conversation(
                 self._job_dir, template, provider, note=self._note_field.text()
             )
-        except (FileNotFoundError, ValueError, OSError) as e:
+        except (FileNotFoundError, ValueError, OSError, RuntimeError) as e:
             self._set_status(str(e), ok=False)
             return None
         self._conversation = conversation
@@ -387,7 +387,7 @@ class ChatDialog(QDialog):
             return
         try:
             chat.delete_conversation(self._job_dir, self._conversation.id)
-        except (FileNotFoundError, OSError) as e:
+        except (FileNotFoundError, OSError, RuntimeError) as e:
             self._set_status(str(e), ok=False)
             return
         self._conversation = None
@@ -404,7 +404,7 @@ class ChatDialog(QDialog):
             return
         try:
             written = chat.export_conversation(self._job_dir, self._conversation.id, path)
-        except (FileNotFoundError, ValueError, OSError) as e:
+        except (FileNotFoundError, ValueError, OSError, RuntimeError) as e:
             self._set_status(str(e), ok=False)
             return
         self._set_status(f"Диалог сохранён: {written}", ok=True)

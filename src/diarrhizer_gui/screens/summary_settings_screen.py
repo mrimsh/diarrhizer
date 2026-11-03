@@ -62,7 +62,7 @@ from diarrhizer_gui.screens.account_panel import AccountPanel
 from diarrhizer_gui.screens.model_combo import ModelCombo
 from diarrhizer_gui.screens.prompt_preview_dialog import PromptPreviewDialog, completed_jobs
 
-ENV_PATH = env_file.REPO_ROOT / ".env"
+ENV_PATH = env_file.config_dir() / ".env"
 
 OK_COLOR = "#2f7d52"
 ERROR_COLOR = "#b23b35"

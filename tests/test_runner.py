@@ -102,6 +102,7 @@ def fixed_job(tmp_path):
 
 
 def _run(input_file, out_dir, **kwargs):
+    kwargs.setdefault("job_dir", out_dir / "input_20260101_000000")
     return run_pipeline(
         input_path=input_file,
         out_dir=out_dir,
@@ -283,6 +284,7 @@ def test_pipeline_runs_merge_and_export_without_diarization(tmp_path):
         result = run_pipeline(
             input_path=input_file,
             out_dir=out_dir,
+            job_dir=job_dir,
             stages=[MergeStage(), ExportStage()],
         )
 

@@ -8,6 +8,7 @@ paths, so adding a format is just appending an Exporter entry.
 """
 
 import json
+import pytest
 
 from diarrhizer.pipeline.runner import JobContext, PipelineConfig
 from diarrhizer.pipeline.stages.export import Exporter, ExportStage
@@ -44,6 +45,24 @@ def test_run_writes_one_file_per_registered_exporter(tmp_path):
     data = json.loads((job.job_dir / "export" / "result.json").read_text(encoding="utf-8"))
     assert data["segments"][0]["text"] == "hello"
     assert data["metadata"]["speakers"] == {}
+    assert data["schema_version"] == 1
+    assert data["metadata"]["provenance"]["python"]
+    assert len(data["metadata"]["source_sha256"]) == 64
+
+
+def test_render_failure_preserves_every_previous_export(tmp_path, monkeypatch):
+    from diarrhizer.artifacts import bundle_valid
+    job = _job(tmp_path)
+    stage = ExportStage()
+    stage.run(job)
+    before = {path.name: path.read_bytes() for path in (job.job_dir / "export").iterdir()}
+    def fail(*args):
+        raise ValueError("synthetic render failure")
+    monkeypatch.setattr(ExportStage, "EXPORTERS", (*stage.EXPORTERS, Exporter("broken", fail, "export/broken.txt")))
+    with pytest.raises(ValueError, match="render failure"):
+        stage.run(job)
+    assert {path.name: path.read_bytes() for path in (job.job_dir / "export").iterdir()} == before
+    assert bundle_valid(job.job_dir / "export", "manifest.json")
 
 
 # --- get_output_paths/get_artifact_paths derive from EXPORTERS -----------

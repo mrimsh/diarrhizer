@@ -121,10 +121,10 @@ def test_new_job_dir_never_reuses_an_existing_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "generate_job_id", lambda input_path: "call_20260101_000000")
     first = runner.new_job_dir(tmp_path, "call.wav")
     assert first == tmp_path / "call_20260101_000000"
-    first.mkdir()
+    assert first.is_dir()
     second = runner.new_job_dir(tmp_path, "call.wav")
     assert second == tmp_path / "call_20260101_000000_2"
-    second.mkdir()
+    assert second.is_dir()
     assert runner.new_job_dir(tmp_path, "call.wav") == tmp_path / "call_20260101_000000_3"
 
 

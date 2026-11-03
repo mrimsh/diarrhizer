@@ -11,19 +11,19 @@ This document is intentionally concise. It defines the "skeleton" so the project
 
 | Component | Status | Location |
 |-----------|--------|----------|
-| CLI entry point | ✅ Implemented | [`src/diarrhizer/cli.py`](src/diarrhizer/cli.py) |
-| `doctor` command | ✅ Implemented | [`src/diarrhizer/diagnostics/doctor.py`](src/diarrhizer/diagnostics/doctor.py) |
-| `run` command | ✅ Implemented | [`src/diarrhizer/cli.py`](src/diarrhizer/cli.py) (lines 77-107) |
-| Pipeline runner | ✅ Implemented | [`src/diarrhizer/pipeline/runner.py`](src/diarrhizer/pipeline/runner.py) |
-| Convert stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/convert.py`](src/diarrhizer/pipeline/stages/convert.py) |
-| Transcribe stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/transcribe.py`](src/diarrhizer/pipeline/stages/transcribe.py) |
-| WhisperX adapter | ✅ Implemented | [`src/diarrhizer/adapters/whisperx.py`](src/diarrhizer/adapters/whisperx.py) |
-| FFmpeg adapter | ✅ Implemented | [`src/diarrhizer/adapters/ffmpeg.py`](src/diarrhizer/adapters/ffmpeg.py) |
-| Diarize stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/diarize.py`](src/diarrhizer/pipeline/stages/diarize.py) |
-| Merge stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/merge.py`](src/diarrhizer/pipeline/stages/merge.py) |
-| Export modules | ✅ Implemented | [`src/diarrhizer/export/`](src/diarrhizer/export/) |
-| Desktop GUI | ✅ Implemented | [`src/diarrhizer_gui/`](src/diarrhizer_gui/) — see [GUI](#gui) |
-| Summaries (templates, providers, `summarize` command) | ✅ Implemented | [`src/diarrhizer/summary/`](src/diarrhizer/summary/), [`src/diarrhizer/adapters/llm.py`](src/diarrhizer/adapters/llm.py) — see [Summaries](#summaries) |
+| CLI entry point | ✅ Implemented | [`src/diarrhizer/cli.py`](../src/diarrhizer/cli.py) |
+| `doctor` command | ✅ Implemented | [`src/diarrhizer/diagnostics/doctor.py`](../src/diarrhizer/diagnostics/doctor.py) |
+| `run` command | ✅ Implemented | [`src/diarrhizer/cli.py`](../src/diarrhizer/cli.py) |
+| Pipeline runner | ✅ Implemented | [`src/diarrhizer/pipeline/runner.py`](../src/diarrhizer/pipeline/runner.py) |
+| Convert stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/convert.py`](../src/diarrhizer/pipeline/stages/convert.py) |
+| Transcribe stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/transcribe.py`](../src/diarrhizer/pipeline/stages/transcribe.py) |
+| WhisperX adapter | ✅ Implemented | [`src/diarrhizer/adapters/whisperx.py`](../src/diarrhizer/adapters/whisperx.py) |
+| FFmpeg adapter | ✅ Implemented | [`src/diarrhizer/adapters/ffmpeg.py`](../src/diarrhizer/adapters/ffmpeg.py) |
+| Diarize stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/diarize.py`](../src/diarrhizer/pipeline/stages/diarize.py) |
+| Merge stage | ✅ Implemented | [`src/diarrhizer/pipeline/stages/merge.py`](../src/diarrhizer/pipeline/stages/merge.py) |
+| Export modules | ✅ Implemented | [`src/diarrhizer/export/`](../src/diarrhizer/export/) |
+| Desktop GUI | ✅ Implemented | [`src/diarrhizer_gui/`](../src/diarrhizer_gui/) — see [GUI](#gui) |
+| Summaries (templates, providers, `summarize` command) | ✅ Implemented | [`src/diarrhizer/summary/`](../src/diarrhizer/summary/), [`src/diarrhizer/adapters/llm.py`](../src/diarrhizer/adapters/llm.py) — see [Summaries](#summaries) |
 
 ---
 
@@ -47,7 +47,7 @@ This reduces coupling and simplifies updates or replacements.
 
 ## 2. Data Flow
 
-Planned high-level flow:
+Implemented high-level flow:
 
 ```
 [Input media file]
@@ -357,7 +357,7 @@ Therefore, a `doctor` command is provided to verify these conditions before runn
 
 ### Doctor Checks (Implemented)
 
-The [`doctor`](src/diarrhizer/diagnostics/doctor.py) command performs these checks:
+The [`doctor`](../src/diarrhizer/diagnostics/doctor.py) command performs these checks:
 
 1. **Python version** — verifies Python 3.11 or 3.12 (whisperx 3.3.1 declares `Requires-Python <3.13`, torch 2.3.1 has no wheels past 3.12)
 2. **FFmpeg** — checks availability via `DIARRHIZER_FFMPEG_PATH` or PATH
@@ -615,21 +615,18 @@ export/result.md ──► SUMMARY:JOB ──► ADAPTER:LLM ──► provider 
   model that answered, `usage` (with the cache parts), `cost_usd`, and the `context_mode` / `context_chars` /
   `cache_available` of the reply (CLI session or whole history). A Codex session is kept and resumed only while it
   has seen every turn (`session_turns`); after another provider answered, the history goes whole into a new one.
-  A failed request adds no turn. **Long contexts:** before sending, the request's size is estimated
-  (`estimate_tokens`: characters / 3, rounded up - a deliberately simple estimate, a little high for English, to be
-  compared with a limit and nothing else) and compared with `Provider.context_tokens` (an optional setting: no
-  provider reports a window - Codex's `model/list` has no such field - so there is no `ModelOption` field for it
-  either); no limit, no check. Over it `ask` raises `ContextTooLong` (nothing sent, nothing stored) whose
+  A failed request adds no turn. A per-job OS lock spans read/request/write. **Long contexts:**
+  the shared [context budget](llm-context.md) includes all rendered messages, framing and response reserve.
+  Summary and chat compare it with optional `Provider.context_tokens` before sending. Unknown limits
+  remain advisory. Over a configured limit, `ask` raises `ContextTooLong` (nothing sent, nothing stored) whose
   `check.options` are: `window` (the beginning of the transcript, as much as fits, cut at a timestamp), `drop_turns`
   (the fewest oldest turns that make it fit, the transcript stays) and `switch_model`; taking one is asking again
   with `window=(start, end)` / `drop_turns=n`. A window is applied to the stored prefix's transcript block (so the
   cache restarts from a new prefix), omitted turns stay stored; both are kept in the dialogue
   (`window`, `omitted_turns`), written into every later turn's `truncation` and shown in the GUI - never silent. A
   dialogue with something cut out keeps no CLI session (the session would still hold what was cut).
-  `check_context` gives the verdict without sending; `conversation_totals` the dialogue's sums. Export to Markdown: `export_markdown` / `export_conversation`. `summarize_job`
-  is untouched; the first turn of a dialogue with an empty question is the "summary".
-- **Not done on purpose:** splitting a transcript that exceeds a model's context window (the provider's
-  error is passed on as is), streaming, and chat-style follow-ups.
+  `check_context` gives the verdict without sending; `conversation_totals` the dialogue's sums. Export to Markdown: `export_markdown` / `export_conversation`. `summarize_job` uses the same budget; the first turn of a dialogue with an empty question is the "summary".
+- **Not implemented:** automatic chunking of oversized transcripts and streaming responses. Chat follow-ups are implemented.
 
 GUI: the **Работа с языковой моделью** screen (`screens/summary_settings_screen.py`, `GUI:SUMMARY_SETTINGS`) edits both
 stores. A subscription provider there has an account box (`screens/account_panel.py`, `GUI:ACCOUNT_PANEL`):
@@ -718,10 +715,15 @@ How the GUI runs things (`src/diarrhizer_gui/`):
 
 ```
 src/diarrhizer/
-├── cli.py                  # CLI entry point (doctor, run, summarize)
+├── cli.py                  # CLI entry point (doctor, run, summarize, chat, recover)
+├── artifacts.py            # Versioned envelopes, OS write locks and recoverable bundles
+├── env_file.py             # Shared configuration paths and .env I/O
 ├── diagnostics/
 │   └── doctor.py           # Environment diagnostics
 ├── summary/                # Summaries of a finished job (stdlib only)
+│   ├── context_budget.py   # Full rendered request, framing and response reserve
+│   ├── chat.py             # Persisted multi-turn dialogues
+│   ├── wildcards.py        # Rendering shared prompt placeholders
 │   ├── templates.py        # Prompt templates + their JSON store
 │   ├── providers.py        # Model providers + their JSON store
 │   ├── provider_info.py    # What a provider reports: account, models, usage, limits
@@ -729,6 +731,7 @@ src/diarrhizer/
 │   └── service.py          # result.md + template + provider -> summary/ files
 ├── pipeline/
 │   ├── runner.py           # Pipeline orchestration
+│   ├── settings.py         # Recorded settings, CLI/GUI resume and explicit overrides
 │   └── stages/             # Individual processing stages
 │       ├── convert.py      # FFmpeg normalization
 │       ├── transcribe.py   # WhisperX ASR + alignment
@@ -762,3 +765,9 @@ src/diarrhizer_gui/
 └── screens/                # New Job, Monitor, History (+ restart_dialog), Result, Models, Doctor, Settings,
                             # Summarization (+ account_panel, model_combo, summary_dialog)
 ```
+
+## Versioned artifacts and recovery
+
+See [artifact contracts](artifact-contracts.md) for schema envelopes, provenance, job locks, manifests,
+journals and `diarrhizer recover`. [Development](development.md) describes installed-wheel configuration,
+doctor profiles and the Windows checks. [Context budgets](llm-context.md) are shared by summary/chat and UI.

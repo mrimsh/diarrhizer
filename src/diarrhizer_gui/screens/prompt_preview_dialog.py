@@ -49,7 +49,8 @@ def completed_jobs(settings: QSettings) -> tuple[list[tuple[str, Path]], Path]:
 #   template's prompt is taken as text, so a template that is not saved yet can be previewed. Problems are
 #   said in words in the box's place: no finished job, no result.md, an unknown wildcard (named, with its
 #   line); a template without {{transcript}} or a note without {{note}} gets the same warnings as in the
-#   editor and the summary dialog. Reads the job's files; opens no network connection.
+#   editor and the summary dialog. With a provider, shows LLM:CONTEXT_BUDGET including response reserve.
+#   Reads the job's files; opens no network connection.
 # @inputs: prompt text, template name, [(title, job folder)], optional starting note
 # @outputs: None (the dialog only shows)
 # @sideEffects: Reads the job's export/result.md and the files the wildcards read
@@ -64,11 +65,13 @@ class PromptPreviewDialog(QDialog):
         jobs: list[tuple[str, Path]],
         note: str = "",
         empty_hint: str = "",
+        provider=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Собранный запрос")
         self.resize(860, 680)
         self._prompt = prompt
+        self._provider = provider
         self._template_name = template_name
         self._empty_hint = empty_hint or "Нет готовых заданий: сначала обработайте запись."
 
@@ -149,5 +152,9 @@ class PromptPreviewDialog(QDialog):
             )
             if message
         ]
+        if self._provider is not None:
+            from diarrhizer.summary.context_budget import check_request, describe
+            budget = check_request([rendered.text], self._provider)
+            warnings.append(describe(budget))
         self._say("\n".join([f"{size} симв. Ничего не отправлено.", *warnings]), WARN_COLOR if warnings else None)
 # [SEMANTIC-END] GUI:PROMPT_PREVIEW

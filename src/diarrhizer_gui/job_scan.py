@@ -21,6 +21,7 @@ from typing import Optional
 
 from diarrhizer.audio_formats import find_job_audio
 from diarrhizer.export.speakers import normalize_speaker_id
+from diarrhizer.artifacts import LOCK_DIR, job_write_lock, bundle_valid
 from diarrhizer.pipeline.runner import STAGE_SETTINGS
 from diarrhizer.pipeline.settings import RECORDED_RUN_KEYS, read_job_settings, set_aside_speaker_names
 
@@ -108,12 +109,22 @@ def _read_meta(job_dir: Path) -> dict:
     return _read_json(job_dir / "meta" / "run.json")
 
 
+# [SEMANTIC-BEGIN] GUI:JOB_ARTIFACTS
+# @purpose: Discover job state and delete an explicitly selected job without racing its writer
+# @description: Main artifacts define completed stages; export manifests reject incomplete bundles.
+#   Legacy exports remain readable. Hidden OS lock files are not jobs; deletion acquires the job lock.
+# @inputs: output root and job directories
+# @outputs: stage state, history rows or removal of a selected job
+# @sideEffects: Reads artifacts; delete_job removes the selected directory
+# @errors: ValueError for invalid deletion target; RuntimeError when job is busy; OSError for disk failures
+# @see: ARTIFACTS:WRITE_LOCK, ARTIFACTS:BUNDLE, GUI:JOB_PLANS
 def stage_done(job_dir: Path) -> dict:
-    """{stage name: its main artifact exists}."""
+    """{stage name: its main artifact exists}; exports must also have a valid bundle."""
     done = {name: (job_dir / rel_path).exists() for name, rel_path in STAGE_ARTIFACTS}
     # An audio format with keep_wav=false drops normalized.wav once the job
     # completes and keeps audio/archive.<ext> instead - still converted.
     done["convert"] = find_job_audio(job_dir) is not None
+    done["export"] = done["export"] and bundle_valid(job_dir / "export", "manifest.json")
     return done
 
 
@@ -204,7 +215,8 @@ def delete_job(out_dir: Path, job_dir: Path) -> None:
     """
     if job_dir.parent.resolve() != out_dir.resolve() or not job_dir.is_dir():
         raise ValueError(f"Not a job folder under {out_dir}: {job_dir}")
-    shutil.rmtree(job_dir)
+    with job_write_lock(job_dir):
+        shutil.rmtree(job_dir)
 
 
 def scan_jobs(out_dir: Path) -> list:
@@ -219,7 +231,7 @@ def scan_jobs(out_dir: Path) -> list:
 
     summaries = []
     for job_dir in out_dir.iterdir():
-        if not job_dir.is_dir():
+        if job_dir.name == LOCK_DIR or not job_dir.is_dir():
             continue
 
         meta = _read_meta(job_dir)
@@ -243,7 +255,7 @@ def scan_jobs(out_dir: Path) -> list:
         )
 
         result_path = job_dir / "export" / "result.md"
-        complete = result_path.exists()
+        complete = result_path.exists() and bundle_valid(job_dir / "export", "manifest.json")
 
         summaries.append(
             JobSummary(
@@ -276,6 +288,9 @@ def _recorded_run_kwargs(job_dir: Path, meta: dict) -> dict:
     return {"job_dir": job_dir, "out_dir": job_dir.parent,
             "input_path": meta.get("input_path"), **read_job_settings(job_dir, meta)}
 
+
+
+# [SEMANTIC-END] GUI:JOB_ARTIFACTS
 
 
 # [SEMANTIC-BEGIN] GUI:JOB_PLANS

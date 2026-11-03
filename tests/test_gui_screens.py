@@ -958,6 +958,14 @@ def test_leaving_the_result_screen_releases_the_audio_file(qapp, tmp_path):
     _pump(300)
 
 
+def test_unopened_result_has_no_unsaved_names_prompt(qapp, monkeypatch):
+    screen = result_screen.ResultScreen()
+    monkeypatch.setattr(QMessageBox, "exec", lambda *args: pytest.fail("no job was opened or edited"))
+    assert not screen._save_button.isEnabled()
+    assert screen._names_settled("close")
+    screen.deleteLater()
+
+
 def test_result_screen_ignores_unchanged_ids_saved_by_older_versions(qapp, tmp_path):
     job_dir = _finished_job(tmp_path)
     _write(job_dir / "speakers.json", {"Speaker_00": "Speaker_00", "SPEAKER_01": "Мария"})

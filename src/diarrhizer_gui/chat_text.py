@@ -78,6 +78,8 @@ def too_long(check: chat.ContextCheck, provider_name: str) -> str:
     return (
         f"Контекст ≈ {number(check.estimated_tokens)} токенов, а предел для «{provider_name}» — "
         f"{number(check.limit)}. Ничего не отправлено. Что сделать?"
+        f" Включены запрос {number(check.input_tokens)}, оформление {number(check.overhead_tokens)}"
+        f" и резерв ответа {number(check.reserved_output_tokens)}."
     )
 
 

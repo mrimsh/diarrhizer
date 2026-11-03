@@ -39,7 +39,7 @@ and a CLI (`python -m diarrhizer run …`).
     joined), plus a speaking-time summary per speaker in `.md`
   * `.srt` subtitles (`Name: text` cues, long phrases split at word boundaries)
   * Structured `.json` (every segment and word with timings, for further processing)
-* Caching and resuming: finished stages are never recomputed; an interrupted job continues from
+* Caching and resuming: valid finished stages are reused; an interrupted job continues from
   the first missing stage
 * Summaries of a finished job by a language model, from your own prompt templates, through a
   ChatGPT or Claude subscription or any API with a key (see [Summaries](#summaries))
@@ -86,7 +86,7 @@ hear each one) and the exports are rewritten immediately.
 
 ---
 
-## Installation (Draft)
+## Installation
 
 ### 1) Create a virtual environment
 
@@ -121,14 +121,14 @@ uninstalled) must be deleted and recreated - a venv cannot be switched to anothe
 
 ```powershell
 python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt
-python -m pip install -e .[gui]
+python -m pip install -c requirements/constraints-stable.txt -e .[gui]
 ```
 
 **CUDA option (NVIDIA GPU, CUDA 12.1 cuDNN 8 — stable supported path):**
 
 ```powershell
 python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cuda-cu121.txt
-python -m pip install -e .[gui]
+python -m pip install -c requirements/constraints-stable.txt -e .[gui]
 ```
 
 (`[gui]` adds PySide6 for the desktop GUI; plain `pip install -e .` is enough for the CLI.)
@@ -153,7 +153,7 @@ You should see `cudnn_ops_infer64_8.dll` (cuDNN 8) in the last command. If you s
 
 The token is **not stored in code** and must never be committed.
 Use either a Windows environment variable or a local `.env` file (ignored by git).
-Both `python -m diarrhizer` and the GUI load `.env` automatically (process env wins, then cwd `.env`, then the repo-root `.env`).
+Both `python -m diarrhizer` and the GUI load `.env` automatically (process env wins, then cwd `.env`, then the config directory's `.env`). Editable installs use the repo root; a wheel uses `%LOCALAPPDATA%\Diarrhizer`. See [configuration paths](docs/development.md#installed-wheel-and-configuration).
 
 Example `.env`:
 
@@ -332,7 +332,7 @@ python -m diarrhizer run "D:\records\call.m4a" --audio-format mp3-q5 --keep-wav 
   transcribe/diarize then run again.
 
 **Profiles.** Your own profiles and the default one live in `audio_formats.json`
-in the repo root (gitignored like `.env`; set `DIARRHIZER_AUDIO_FORMATS_FILE` to
+in the config directory (repo root for editable installs; set `DIARRHIZER_AUDIO_FORMATS_FILE` to
 keep it elsewhere). The GUI edits it under Settings → «Хранение аудио», and the
 CLI uses the same default. To write one by hand, start from
 [`audio_formats.example.json`](audio_formats.example.json). Fields: `codec`
@@ -579,9 +579,10 @@ Things to know:
 
 * The transcript text leaves your machine (to OpenAI, Anthropic or the endpoint you configured) — the
   tool is otherwise fully local. A local OpenAI-compatible server (Ollama, LM Studio) keeps it on-prem.
-* The whole transcript goes in one request. A very long recording needs a model with a large enough
-  context window; when it is too small, the provider's own error is shown. A reply cut off at the
-  provider's length limit is flagged (raise `max_tokens` for API providers).
+* The whole transcript goes in one request. Summary and chat check rendered input, framing and response
+  reserve against a configured context window before sending. `summarize --preview` and GUI preview show
+  the same estimate. Unknown limits and provider-added overhead can still cause a provider error.
+  See [context budgets](docs/llm-context.md). Truncated replies are flagged; raise `max_tokens` if appropriate.
 * A subscription request counts against that subscription's usage limits (Codex adds about 14 thousand
   input tokens of its own instructions to even the shortest request).
 
@@ -669,13 +670,11 @@ See `docs/troubleshooting.md` for detailed diagnostics.
 
 ## Roadmap
 
-1. Implement pipeline stages (convert, transcribe, diarize, merge, export)
-2. Implement adapters (FFmpeg, WhisperX, diarization)
-3. Stable CLI + caching + environment diagnostics
-4. UX improvements: speaker name mapping, protocol formatting
-5. GUI + additional features (batch queue, resume, playback, speaker naming)
-6. Summaries from prompt templates (subscription CLIs and API providers)
-7. Next ideas: VTT/DOCX export, per-turn text editing in the GUI, splitting very long transcripts for small-context models
+The pipeline, desktop GUI, batch/resume, playback, speaker naming, summaries and dialogues are implemented.
+
+Next: reproducible environments and quality measurements, recovery-safe artifacts, measured GUI performance,
+then transcript editing and optional realtime integration. See the [audit and prioritized plan](docs/project-audit-2026-11-01.md),
+[development checks](docs/development.md) and [changelog](CHANGELOG.md).
 
 ---
 
@@ -685,4 +684,11 @@ By MRIMSH, L. L. MRIMSH and all other LLMs
 
 ## License
 
-Personal project.
+[MIT](LICENSE), copyright 2026 MRIMSH.
+
+### Reliability and recovery
+
+Doctor profiles, supported installs and wheel configuration: [development guide](docs/development.md).
+Artifact versions, job write locks and `python -m diarrhizer recover "out/<job>"`:
+[artifact contracts](docs/artifact-contracts.md). Reproducible synthetic ASR measurement:
+[quality baseline](docs/quality-baseline.md).

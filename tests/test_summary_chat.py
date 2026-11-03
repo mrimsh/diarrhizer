@@ -487,6 +487,7 @@ def long_job(job_dir, entries=40, chars=297):
 
 
 def limited(tokens, **kwargs) -> Provider:
+    kwargs.setdefault("max_tokens", 64)  # Small mocked replies; context includes this response reserve.
     return Provider(name="gw", kind=KIND_OPENAI_API, endpoint="https://api.example.com/v1", model="m-1",
                     context_tokens=tokens, **kwargs)
 
