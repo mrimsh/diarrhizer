@@ -3,6 +3,7 @@
 import json
 
 from diarrhizer.pipeline.runner import JobContext, PipelineConfig
+from diarrhizer.pipeline.cache import source_fingerprint
 from diarrhizer.pipeline.stages.convert import ConvertStage
 from diarrhizer.pipeline.stages.diarize import DiarizeStage
 from diarrhizer.pipeline.stages.transcribe import TranscribeStage
@@ -39,7 +40,8 @@ def test_convert_cache_valid_when_profile_matches(tmp_path):
     job_dir = tmp_path / "job"
     job = _job(tmp_path, job_dir, audio_profile="raw")
     _write(job_dir / "audio" / "normalized.wav", b"wav")
-    _write(job_dir / "meta" / "run.json", {"config": {"audio_profile": "raw"}})
+    _write(job_dir / "meta" / "run.json", {"config": {"audio_profile": "raw"},
+                                           "source_fingerprint": source_fingerprint(job.input_path)})
     assert ConvertStage().is_cache_valid(job) is True
 
 
@@ -50,6 +52,7 @@ def test_transcribe_cache_invalid_when_model_changes(tmp_path):
         "model": "large-v3",
         "compute_type": None,
         "metadata": {
+            "cache_version": TranscribeStage.CACHE_VERSION,
             "language_setting": "auto",
             "beam_size": 5,
             "temperature": 0.0,
@@ -69,6 +72,7 @@ def test_transcribe_cache_valid_when_asr_config_matches(tmp_path):
         "model": "large-v3",
         "compute_type": None,
         "metadata": {
+            "cache_version": TranscribeStage.CACHE_VERSION,
             "language_setting": "auto",
             "beam_size": 5,
             "temperature": 0.0,
@@ -79,6 +83,11 @@ def test_transcribe_cache_valid_when_asr_config_matches(tmp_path):
     })
     job = _job(tmp_path, job_dir, asr_model="large-v3")
     assert TranscribeStage().is_cache_valid(job) is True
+    path = job_dir / "asr" / "transcript.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["metadata"]["cache_version"]
+    _write(path, data)
+    assert TranscribeStage().is_cache_valid(job) is False
 
 
 def test_diarize_cache_invalid_when_speaker_range_changes(tmp_path):

@@ -22,18 +22,21 @@ logger = logging.getLogger(__name__)
 # @description: Consumes normalized WAV from convert stage and produces transcript with timestamps.
 #   Once a keep_wav=false audio format dropped the WAV, decodes the archive copy instead
 #   (find_job_audio); cache staleness stays keyed on the WAV, so dropping it never invalidates the transcript.
+#   Metadata distinguishes requested options from effective backend settings and records alignment warnings.
+#   cache_version=2 invalidates results predating this backend contract, only when transcribe is in range.
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/asr/transcript.json, artifacts/asr/transcript.txt (readable paragraphs, no speakers)
 # @sideEffects: Loads WhisperX model, writes transcript JSON to disk, unloads the
 #   model and clears the CUDA cache when the stage finishes,
 #   logs progress via logging (INFO, extra={"stage": "transcribe"})
-# @errors: RuntimeError, FileNotFoundError
+# @errors: RuntimeError, FileNotFoundError; ValueError for unsupported hotwords-file requests
 # @see: ADAPTER:WHISPERX_ASR, EXPORT:PLAIN_TRANSCRIPT, STAGE:CONVERT, ARTIFACTS:JOB_AUDIO, PIPELINE:RUNNER
 class TranscribeStage:
     """Stage for transcribing audio using WhisperX."""
 
     # Stage name for identification
     NAME = "transcribe"
+    CACHE_VERSION = 2  # Effective decoding options and nullable word times/ownership.
 
     # Output paths relative to job directory
     ASR_DIR = "asr"
@@ -139,6 +142,8 @@ class TranscribeStage:
         """
         job_dir = job.job_dir
         config = job.config
+        if config.asr_hotwords_file:
+            raise ValueError("asr_hotwords_file is unsupported; use asr_initial_prompt instead")
 
         # The working WAV while it exists, else the archive copy a keep_wav=false
         # format left behind (ARTIFACTS:JOB_AUDIO).
@@ -209,6 +214,7 @@ class TranscribeStage:
             "segments": result.get("segments", []),
             "words": result.get("words", []),
             "metadata": {
+                "cache_version": self.CACHE_VERSION,
                 "input_audio": str(audio_input),
                 "output_path": str(transcript_output),
                 "device": device,
@@ -223,6 +229,9 @@ class TranscribeStage:
                 "start_time": start_time.isoformat(),
                 "end_time": end_time.isoformat(),
                 "duration_seconds": duration,
+                "effective_settings": result.get("effective_settings", {}),
+                "alignment_status": result.get("alignment_status", "unknown"),
+                "warnings": result.get("warnings", []),
             },
         }
 
@@ -291,6 +300,8 @@ class TranscribeStage:
         if not isinstance(data, dict):
             return False
         meta = data.get("metadata") or {}
+        if not isinstance(meta, dict) or meta.get("cache_version") != self.CACHE_VERSION:
+            return False
         stored = {
             "asr_model": data.get("model"),
             "asr_compute_type": data.get("compute_type"),

@@ -3,7 +3,7 @@
 This repository contains **Diarrhizer** — a personal, local (on‑prem) Windows tool for processing call recordings:
 **media file → FFmpeg → WhisperX (ASR + alignment) → diarization (pyannote via WhisperX) → exports (MD/TXT/JSON)**.
 
-The goal is a clean, extensible core (CLI now, GUI later) without unnecessary complexity.
+The goal is a clean, extensible core shared by the CLI and the existing PySide6 GUI, without unnecessary complexity.
 
 ---
 
@@ -33,6 +33,8 @@ The goal is a clean, extensible core (CLI now, GUI later) without unnecessary co
 
 - `src/diarrhizer/cli.py` — CLI entry points (public API surface)
 - `src/diarrhizer/pipeline/runner.py` — pipeline orchestration (stage runner)
+- `src/diarrhizer/pipeline/settings.py` — shared recorded settings for CLI/GUI resume; explicit overrides win
+- `src/diarrhizer_gui/` — desktop screens, queue and child-process workers; planning a run must not mutate job artifacts
 - `src/diarrhizer/pipeline/stages/*` — individual stages (convert/transcribe/diarize/merge/export)
 - `src/diarrhizer/adapters/*` — wrappers around FFmpeg / WhisperX / diarization / language models (`llm.py`: one request; `llm_accounts.py`: sign-in, models and limits of a subscription provider - through the vendors' own tools, never with tokens of ours)
 - `src/diarrhizer/summary/*` — summaries of a finished job: prompt templates and their `{{wildcards}}` (`wildcards.py`), providers, the service (an on-demand add-on, not a pipeline stage)

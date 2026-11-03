@@ -359,8 +359,8 @@ class NewJobScreen(QWidget):
         self._temperature_spin.setSingleStep(0.1)
         self._temperature_spin.setDecimals(1)
 
-        self._condition_checkbox = QCheckBox("Учитывать предыдущий текст (стабильнее декодирование)")
-        self._vad_checkbox = QCheckBox("Включить VAD-фильтр (отсекать тишину)")
+        self._condition_checkbox = QCheckBox("Предыдущий текст (WhisperX не поддерживает)")
+        self._vad_checkbox = QCheckBox("VAD-фильтр (WhisperX всегда использует)")
 
         self._vad_silence_spin = QSpinBox()
         self._vad_silence_spin.setRange(0, 10000)
@@ -393,10 +393,10 @@ class NewJobScreen(QWidget):
         advanced_form = QFormLayout()
         advanced_form.addRow("Compute type:", self._compute_type_combo)
         advanced_form.addRow("Beam size:", self._beam_size_spin)
-        advanced_form.addRow("Temperature:", self._temperature_spin)
+        advanced_form.addRow("Temperature (WhisperX: 0):", self._temperature_spin)
         advanced_form.addRow(self._condition_checkbox)
         advanced_form.addRow(self._vad_checkbox)
-        advanced_form.addRow("Мин. тишина для VAD:", self._vad_silence_spin)
+        advanced_form.addRow("Тишина VAD (не применяется):", self._vad_silence_spin)
         advanced_form.addRow("Промпт/глоссарий:", self._prompt_edit)
         # Everything above is ASR; this one belongs to the merge stage, so it
         # gets its own heading rather than reading as another Whisper knob.

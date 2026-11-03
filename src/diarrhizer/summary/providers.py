@@ -15,6 +15,7 @@ variable its key is read from (the GUI keeps the key itself in the project's
 """
 
 import dataclasses
+import hashlib
 import os
 import re
 from dataclasses import dataclass, field
@@ -44,10 +45,30 @@ _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MAX_NAME_LENGTH = 60
 
 
-def default_key_env(name: str) -> str:
-    """The environment variable a provider named `name` keeps its API key in."""
+# [SEMANTIC-BEGIN] CONFIG:PROVIDER_KEY
+# @purpose: Allocate an API key variable without colliding with other providers
+# @description: Keep readable ASCII slugs; lossy names include a stable digest. Occupied names
+#   are compared case-insensitively for Windows. Existing explicit variables are never renamed.
+# @inputs: provider name, occupied environment variable names
+# @outputs: unused ASCII environment variable name
+# @sideEffects: None
+# @errors: None
+# @see: CONFIG:SUMMARY_PROVIDERS, GUI:SUMMARY_SETTINGS
+def default_key_env(name: str, occupied=()) -> str:
+    """A stable default, with a numeric suffix if another provider already uses it."""
     slug = re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_")
-    return f"DIARRHIZER_LLM_KEY_{slug or 'PROVIDER'}"
+    # Spaces and case alone are conventional readable names; punctuation and
+    # non-ASCII text need a digest so distinct names cannot normalize to one slug.
+    if not re.fullmatch(r"[A-Za-z0-9 ]+", name):
+        slug = f"{slug or 'PROVIDER'}_{hashlib.sha256(name.encode('utf-8')).hexdigest()[:12].upper()}"
+    base = f"DIARRHIZER_LLM_KEY_{slug}"
+    used = {value.upper() for value in occupied}
+    candidate, suffix = base, 2
+    while candidate.upper() in used:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+# [SEMANTIC-END] CONFIG:PROVIDER_KEY
 
 
 # [SEMANTIC-BEGIN] CONFIG:SUMMARY_PROVIDERS
@@ -63,6 +84,7 @@ def default_key_env(name: str) -> str:
 #   exist is the provider's to say (ADAPTER:LLM_ACCOUNTS). ProviderStore keeps the providers and the default
 #   name in a JSON file; there are no built-ins, an empty store is a normal state the callers explain. A CLI
 #   provider's command is a name looked up on PATH or the full path of the program (quotes around it are dropped).
+#   shared_key_variables() diagnoses existing shared variables without migrating or reading their secrets.
 # @inputs: provider fields (validated on construction), JSON store path (DIARRHIZER_SUMMARY_PROVIDERS_FILE)
 # @outputs: Provider instances, summary_providers.json
 # @sideEffects: ProviderStore.load() reads and save() atomically writes the JSON store; Provider.api_key() reads os.environ
@@ -269,6 +291,14 @@ class ProviderStore:
 
     def names(self) -> list[str]:
         return list(self.providers)
+
+    def shared_key_variables(self) -> dict[str, list[str]]:
+        """Variables used by several API providers (possibly intentional sharing)."""
+        users: dict[str, list[str]] = {}
+        for provider in self.providers.values():
+            if not provider.is_cli and provider.api_key_env:
+                users.setdefault(provider.api_key_env.upper(), []).append(provider.name)
+        return {key: names for key, names in users.items() if len(names) > 1}
 
     def get(self, name: str) -> Provider:
         if name not in self.providers:

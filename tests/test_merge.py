@@ -457,6 +457,18 @@ def test_cache_stays_valid_for_segments_written_before_the_field_existed(tmp_pat
     assert stage.is_cache_valid(_job(job_dir, min_turn_duration=1.0))
 
 
+def test_merge_cache_rejects_results_before_text_preservation_fix(tmp_path):
+    job_dir = _split_job_dir(tmp_path)
+    stage = MergeStage()
+    stage.run(_job(job_dir))
+    assert stage.is_cache_valid(_job(job_dir))
+    path = job_dir / "merged" / "segments.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["metadata"]["cache_version"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert not stage.is_cache_valid(_job(job_dir))
+
+
 # --- _find_overlapping_speaker ---------------------------------------------
 
 def test_find_overlapping_speaker_no_diarization_returns_default():

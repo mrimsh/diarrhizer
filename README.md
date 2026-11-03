@@ -362,6 +362,45 @@ python -m diarrhizer run --job-dir ".\out\meeting_20260101_120000" --from-stage 
 
 Stages outside the `--from-stage`/`--to-stage` range are skipped entirely (not even checked); stages inside it still use the normal cache (only recomputed if their inputs changed or `--force`/`--force-stage` was passed). If the first stage in range doesn't have the artifacts it needs on disk yet, the command fails with a clear error naming the missing file instead of a confusing crash.
 
+CLI and GUI now share the same resume settings: **explicit arguments → recorded settings → defaults**.
+Omitting a flag keeps the recorded language, model, decoding options, speaker range and full audio
+format, even if the personal format profile was removed. The recorded stage list keeps ASR-only jobs
+ASR-only. Names come from `speakers.json`, or from the last export if that file is absent. To clear
+names explicitly, pass `--speakers` with a JSON file containing `{}`; an empty
+`--asr-initial-prompt-file` clears a recorded prompt. Python callers can pass `None` for either.
+
+Conversion checks the source's resolved path, size and full SHA-256 as well as artifact freshness.
+Changing bytes with an older/preserved modification time is detected; moving an identical source
+to another path deliberately counts as a new input. Legacy jobs without a source fingerprint are
+converted once when `convert` is in range. ASR and merge likewise invalidate results predating
+their corrected contracts (`metadata.cache_version = 2`). Opening results or running only `export`
+does not launch recognition. To repair an old transcript, start at `transcribe`; to repair only
+speaker merging from an existing transcript, start at `merge`.
+
+Queuing a speaker recalculation leaves `speakers.json` intact. Its backup
+`speakers.before-rediarize.json` is made when diarization actually starts; removing a pending item
+does not change names. The Result screen asks to save, discard or cancel before loading another
+result, reloading the current result or closing the application with unsaved name edits.
+An empty `speakers.json` is left when recalculation starts, so an interrupted run cannot restore
+old labels from a stale export; retrying preserves the original nonempty backup. Explicit name
+overrides are saved to the job when export is reached, including an explicit empty mapping.
+
+### ASR settings and incomplete alignment
+
+The supported WhisperX 3.3.1 batched backend receives `--asr-beam-size` and the initial prompt
+through `load_model(asr_options=...)`; compute type is applied at model loading too. Its batched
+decoder uses temperature `0`, does not condition on previous text, and requires VAD. The legacy
+temperature/previous-text/VAD switches remain accepted for compatibility, but unsupported requests
+produce warnings. `vad_min_silence_ms` is unsupported and produces a warning; `--asr-hotwords-file`
+is rejected with a suggestion to use an initial prompt. Requested values remain in ASR metadata;
+`effective_settings`, `alignment_status` and `warnings` describe actual processing.
+
+Words whose alignment times are missing or invalid keep `null` timestamps and their source
+`segment_index`. If words cannot reproduce a whole segment in chronological order, merge keeps
+the original segment text and assigns one speaker to that whole segment. It records an
+`alignment_warning`; SRT also keeps the full text instead of splitting on an incomplete word list.
+This preserves text, while speaker assignment is less precise for that segment.
+
 ---
 
 ### Summaries
@@ -413,6 +452,12 @@ other values stand in the request: write a **wildcard**, `{{name}}`, and its val
   prompt as written; summaries stored before these existed are read as before.
 
 **Providers.** Where the request goes. Add as many as you like and mark one as the default:
+
+New API key variables are unique even for Cyrillic or similarly normalized provider names.
+Renaming a provider preserves its existing `api_key_env`. Explicit shared variables remain allowed;
+`doctor` reports them, and the GUI prevents overwriting a key referenced by another provider.
+For separate keys, give each provider a separate variable in the provider form. Existing references
+are never migrated automatically; a key overwritten by an older version must be entered again locally.
 
 | Kind | How it works | You need |
 |------|--------------|----------|

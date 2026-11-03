@@ -86,8 +86,8 @@ def test_resume_starts_at_the_first_missing_stage_with_recorded_settings(tmp_pat
     assert kwargs["asr_model"] == "small"
     assert kwargs["asr_initial_prompt"] == "Диаррайзер, ООО Ромашка"
     assert kwargs["audio_profile"] == "voice-call"
-    # The recorded format's *name* is not a run_pipeline argument on its own.
-    assert "audio_format" not in kwargs
+    # Legacy jobs with only a format name retain that profile too.
+    assert kwargs["audio_format"] == "mp3-q5"
 
 
 def test_resume_of_a_recognition_only_job_skips_diarize(tmp_path):
@@ -238,9 +238,11 @@ def test_speaker_names_are_read_and_set_aside(tmp_path):
     assert read_speaker_names(tmp_path) == {"Speaker_01": "Мария"}
 
     set_aside_speaker_names(tmp_path)
-    assert not (tmp_path / "speakers.json").exists()
+    assert json.loads((tmp_path / "speakers.json").read_text(encoding="utf-8")) == {}
     assert (tmp_path / SPEAKERS_SET_ASIDE).exists()
-    set_aside_speaker_names(tmp_path)  # nothing left to move: no error
+    backup = (tmp_path / SPEAKERS_SET_ASIDE).read_bytes()
+    set_aside_speaker_names(tmp_path)  # retry must not overwrite the old backup with an empty map
+    assert (tmp_path / SPEAKERS_SET_ASIDE).read_bytes() == backup
     assert read_speaker_names(tmp_path) == {}
 
 

@@ -130,6 +130,22 @@ def test_default_format_keeps_only_the_working_wav(input_file, tmp_path):
     assert len(FFMPEG_CALLS) == 1
 
 
+@pytest.mark.parametrize("audio_format", ["wav", "mp3-q5"])
+@pytest.mark.parametrize("replace_path", [False, True])
+def test_changed_source_with_preserved_mtime_rebuilds_signal_and_dependents(input_file, tmp_path, audio_format, replace_path):
+    _, job_dir = _run(input_file, tmp_path, audio_format=audio_format)
+    first_calls = len(FFMPEG_CALLS)
+    original_stat = input_file.stat()
+    source = tmp_path / "other.mp4" if replace_path else input_file
+    source.write_bytes(b"new! media")  # Same length as "fake media".
+    os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    statuses, _ = _run(source, tmp_path, job_dir=job_dir)
+    assert set(statuses.values()) == {"completed"}
+    assert len(FFMPEG_CALLS) > first_calls
+    assert all(str(source) in call for call in FFMPEG_CALLS[first_calls:])
+    assert _run(source, tmp_path, job_dir=job_dir)[0] == ALL_CACHED
+
+
 def test_lossy_format_drops_the_wav_once_the_job_completes(input_file, tmp_path):
     statuses, job_dir = _run(input_file, tmp_path, audio_format="mp3-q5")
 

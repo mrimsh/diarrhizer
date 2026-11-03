@@ -51,8 +51,9 @@ from diarrhizer.export.plain_transcript import format_plain_transcript
 from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.export.turns import format_timestamp, format_turn_line, group_turns, speaking_time
 from diarrhizer.utils import write_json_atomic
+from diarrhizer.pipeline.settings import read_segments, read_object, read_job_settings
 from diarrhizer_gui.job_queue import QueuedRun
-from diarrhizer_gui.job_scan import read_speaker_names, rediarize_plan, set_aside_speaker_names
+from diarrhizer_gui.job_scan import rediarize_plan
 from diarrhizer_gui.screens.new_job_screen import hf_token_present
 from diarrhizer_gui.screens.chat_dialog import ChatDialog
 from diarrhizer_gui.screens.summary_dialog import SummaryDialog
@@ -136,7 +137,7 @@ def sample_range(segments: list, speaker_id: str) -> Optional[tuple]:
 def _read_json(path: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, UnicodeError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -144,8 +145,8 @@ def _read_json(path: Path) -> dict:
 # [SEMANTIC-BEGIN] GUI:REEXPORT
 # @purpose: Re-render a finished job's exports with new speaker names, in the GUI process
 # @description: Runs run_pipeline() with only ExportStage (pure Python, no torch) and force_stage="export",
-#   passing the job's recorded language/device/speaker range so the regenerated headers match the original
-#   run. Takes milliseconds, so the Result screen calls it directly instead of queueing a job.
+#   restoring the shared recorded configuration and explicitly replacing names (an empty map clears them).
+#   Takes milliseconds, so the Result screen calls it directly instead of queueing a job.
 # @inputs: job_dir, speakers mapping {Speaker_XX: name}
 # @outputs: run_pipeline() result dict; export/result.* rewritten
 # @sideEffects: Writes export files
@@ -155,19 +156,12 @@ def reexport(job_dir: Path, speakers: dict) -> dict:
     from diarrhizer.pipeline.runner import run_pipeline
     from diarrhizer.pipeline.stages.export import ExportStage
 
-    config = _read_json(job_dir / "meta" / "run.json").get("pipeline_config") or {}
-    recorded = {
-        key: config[key]
-        for key in ("language", "device", "min_speakers", "max_speakers")
-        if config.get(key) is not None
-    }
     return run_pipeline(
         out_dir=job_dir.parent,
         job_dir=job_dir,
         stages=[ExportStage()],
-        speakers=speakers or None,
+        speakers=speakers,
         force_stage="export",
-        **recorded,
     )
 # [SEMANTIC-END] GUI:REEXPORT
 
@@ -225,6 +219,16 @@ class RediarizeDialog(QDialog):
         self.accept()
 
 
+# [SEMANTIC-BEGIN] GUI:RESULT_SCREEN
+# @purpose: Display a validated transcript and safely edit speaker names
+# @description: Switching/reloading results and closing the window ask to save/discard/cancel dirty names.
+#   Invalid transcript JSON is shown as a readable error. Failed writes keep edits available to retry.
+#   Diarization requests only enqueue work; the runner backs up names when the stage actually starts.
+# @inputs: job artifacts and user edits
+# @outputs: rendered transcript, saved mapping and exports, queued run requests
+# @sideEffects: Reads job files; explicit save rewrites speakers.json and exports
+# @errors: Disk/schema failures are reported in the screen or a dialog
+# @see: CONFIG:RESUME, GUI:REEXPORT, GUI:JOB_PLANS, GUI:MAIN_WINDOW
 class ResultScreen(QWidget):
     back_requested = Signal()
     runs_requested = Signal(list)  # [QueuedRun]
@@ -402,21 +406,29 @@ class ResultScreen(QWidget):
 
     # --- loading ---------------------------------------------------------------
 
-    def load(self, job_dir: Path) -> None:
+    def load(self, job_dir: Path) -> bool:
+        if self._job_dir is not None and not self._names_settled("открытие результата"):
+            return False
+        self._render_timer.stop()
         self._job_dir = job_dir
         self._set_status("", "#565c6b")
 
         read_error = None
         try:
-            data = json.loads((job_dir / "merged" / "segments.json").read_text(encoding="utf-8"))
-            self._segments = data.get("segments", [])
-        except (OSError, json.JSONDecodeError) as exc:
+            self._segments = read_segments(job_dir / "merged" / "segments.json")
+        except (OSError, ValueError, UnicodeError) as exc:
             self._segments = []
             read_error = str(exc)
 
-        self._names = read_speaker_names(job_dir)
-
-        self._meta = _read_json(job_dir / "meta" / "run.json")
+        self._names = {}
+        self._meta = {}
+        try:
+            self._meta = read_object(job_dir / "meta" / "run.json")
+            self._names = read_job_settings(job_dir, self._meta)["speakers"]
+        except (OSError, ValueError, UnicodeError) as exc:
+            self._set_status(f"Не удалось прочитать настройки задания: {exc}", "#c0392b")
+        if not isinstance(self._meta.get("input_path"), str):
+            self._meta.pop("input_path", None)
         self._has_diarization = (job_dir / "diar" / "diarization.json").exists()
         input_path = self._meta.get("input_path")
         self._title_label.setText(Path(input_path).name if input_path else job_dir.name)
@@ -440,9 +452,12 @@ class ResultScreen(QWidget):
 
         if read_error:
             self._transcript.setPlainText(f"Не удалось прочитать merged/segments.json: {read_error}")
+        return True
 
     def _subtitle(self) -> str:
         config = self._meta.get("pipeline_config") or {}
+        if not isinstance(config, dict):
+            config = {}
         parts = []
         name = self._job_dir.name if self._job_dir else ""
         if self._segments:
@@ -594,16 +609,16 @@ class ResultScreen(QWidget):
             return True
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Саммаризация")
+        box.setWindowTitle("Несохранённые имена")
         box.setText(
-            f"Имена спикеров изменены, но не сохранены, а {what} строится по сохранённому протоколу.\n\n"
+            f"Имена спикеров изменены, но не сохранены. Следующее действие: {what}.\n\n"
             "Сохранить имена?"
         )
         save = box.addButton("Сохранить", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("Продолжить без сохранения", QMessageBox.ButtonRole.DestructiveRole)
         cancel = box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
         box.exec()
-        if box.clickedButton() is cancel:
+        if box.clickedButton() is None or box.clickedButton() is cancel:
             return False
         if box.clickedButton() is save:
             self._save_names()
@@ -622,6 +637,8 @@ class ResultScreen(QWidget):
     def _rediarize(self) -> None:
         if self._job_dir is None:
             return
+        if not self._names_settled("пересчёт спикеров"):
+            return
         if not hf_token_present():
             QMessageBox.warning(
                 self,
@@ -632,14 +649,16 @@ class ResultScreen(QWidget):
         dialog = RediarizeDialog(self, self._has_diarization, len(unique_speakers(self._segments)))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        plan = rediarize_plan(self._job_dir, dialog.min_spin.value(), dialog.max_spin.value())
+        try:
+            plan = rediarize_plan(self._job_dir, dialog.min_spin.value(), dialog.max_spin.value())
+        except (OSError, ValueError, UnicodeError) as exc:
+            QMessageBox.warning(self, dialog.windowTitle(), f"Не удалось прочитать задание: {exc}")
+            return
         if plan is None:
             QMessageBox.warning(self, dialog.windowTitle(), "У задания нет распознанного текста.")
             return
         mode, kwargs = plan
-        # The old names belong to the old speaker ids.
-        set_aside_speaker_names(self._job_dir)
-        label =f"{self._title_label.text()} (спикеры {kwargs['min_speakers']}–{kwargs['max_speakers']})"
+        label = f"{self._title_label.text()} (спикеры {kwargs['min_speakers']}–{kwargs['max_speakers']})"
         self.runs_requested.emit([QueuedRun(mode=mode, kwargs=kwargs, label=label)])
 
     # --- search -----------------------------------------------------------------
@@ -835,3 +854,4 @@ class ResultScreen(QWidget):
     def _set_status(self, text: str, color: str) -> None:
         self._status_label.setText(text)
         self._status_label.setStyleSheet(f"color: {color};")
+# [SEMANTIC-END] GUI:RESULT_SCREEN

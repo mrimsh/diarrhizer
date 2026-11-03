@@ -12,11 +12,21 @@ from typing import Any, Mapping, Sequence
 #   stage that consumed it, without the runner tracking stage dependencies.
 #   config_mismatch() compares stored vs current stage config (legacy missing
 #   keys are ignored); stages also pass the original input file / speakers map.
+#   source_fingerprint() hashes the full source bytes so replacements with preserved mtimes are detected.
 # @inputs: output artifact paths, input artifact paths, optional stored/expected config
-# @outputs: bool (True = stale, must recompute)
-# @sideEffects: None (pure function; only stats files)
-# @errors: None
+# @outputs: staleness/config booleans or source path, size, mtime_ns and SHA-256
+# @sideEffects: Stats artifacts; fingerprint reads the entire source file
+# @errors: OSError for inaccessible sources
 # @see: PIPELINE:RUNNER, STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, STAGE:MERGE, STAGE:EXPORT
+def source_fingerprint(path: Path) -> dict:
+    """Full-content identity: detects replacement even if size and mtime were preserved."""
+    with path.open("rb") as source:
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+    stat = path.stat()
+    return {"path": str(path.resolve()), "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns, "sha256": digest}
+
+
 def is_stale(outputs: Sequence[Path], inputs: Sequence[Path]) -> bool:
     """Check whether cached output artifacts need to be recomputed.
 

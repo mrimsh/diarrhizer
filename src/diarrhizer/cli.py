@@ -254,13 +254,8 @@ def main() -> int:
 
     # Run command
     #
-    # NOTE on defaults: the literals below intentionally duplicate
-    # PipelineConfig's field defaults (src/diarrhizer/pipeline/runner.py).
-    # They can't just reference PipelineConfig directly: argparse needs
-    # concrete values for its own --help text, and two of them
-    # (--asr-condition-on-previous-text, --asr-vad-filter) are parsed here as
-    # true/false strings while PipelineConfig stores real bools. Keep these in
-    # sync with PipelineConfig by hand when either changes.
+    # Configurable flags use an omission sentinel: resume must not replace
+    # saved values with defaults. Help still documents defaults for new jobs.
     run_parser = subparsers.add_parser(
         "run",
         help="Process a media file"
@@ -375,14 +370,14 @@ def main() -> int:
         "--asr-temperature",
         type=float,
         default=0.0,
-        help="Decoding temperature (default: 0.0)"
+        help="Compatibility option: WhisperX batched decoding uses 0; other values produce a warning"
     )
     run_parser.add_argument(
         "--asr-condition-on-previous-text",
         type=str,
         default="true",
         choices=["true", "false", "1", "0", "yes", "no"],
-        help="Condition on previous text for stable decoding (default: true)"
+        help="Compatibility option: unsupported by WhisperX batched decoding; true produces a warning"
     )
     run_parser.add_argument(
         "--asr-initial-prompt-file",
@@ -401,13 +396,13 @@ def main() -> int:
         type=str,
         default="true",
         choices=["true", "false", "1", "0", "yes", "no"],
-        help="Enable VAD filtering (default: true)"
+        help="WhisperX requires VAD (default: true); false produces a warning and VAD stays enabled"
     )
     run_parser.add_argument(
         "--asr-vad-min-silence-ms",
         type=int,
         default=1000,
-        help="VAD minimum silence in milliseconds (default: 1000)"
+        help="Compatibility option: unsupported by this WhisperX backend; reported as a warning"
     )
     run_parser.add_argument(
         "--audio-profile",
@@ -528,6 +523,13 @@ def main() -> int:
                              help="Write the dialogue as Markdown to PATH ('-' = stdout), after the question if one is asked")
     chat_parser.add_argument("--delete", default=None, metavar="ID", help="Delete a dialogue and exit")
 
+    not_given = object()
+    run_option_names = (
+        "min_speakers", "max_speakers", "min_turn_duration", "lang", "device", "asr_model",
+        "asr_compute_type", "asr_beam_size", "asr_temperature", "asr_condition_on_previous_text",
+        "asr_vad_filter", "asr_vad_min_silence_ms", "audio_profile", "audio_format", "keep_wav",
+    )
+    run_parser.set_defaults(**{key: not_given for key in run_option_names})
     args = parser.parse_args()
 
     if args.command == "doctor":
@@ -546,6 +548,7 @@ def main() -> int:
         #   recomputing ASR/diarization. Several inputs (or a folder, see INPUT:EXPAND_MEDIA) run as a
         #   batch: one job per file, each in its own new_job_dir(), a failed file is reported and the
         #   batch moves on, and a summary is printed at the end.
+        #   Resume restores saved settings/stages/names; only explicitly supplied flags override them.
         # @inputs: args.input, args.out, args.job_dir, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.from_stage, args.to_stage, args.speakers, args.min_turn_duration, ASR params, audio_profile, audio_format, keep_wav
         # @outputs: Artifacts in out/ directory
         # @sideEffects: Creates job directories, writes artifacts to disk
@@ -554,7 +557,11 @@ def main() -> int:
 
         from diarrhizer.media import expand_media_paths
 
-        inputs = expand_media_paths(args.input)
+        try:
+            inputs = expand_media_paths(args.input)
+        except OSError as exc:
+            print(f"Error: Cannot read input paths: {exc}", file=sys.stderr)
+            return 1
         if args.input and not inputs:
             print(f"Error: No media files found in: {', '.join(args.input)}", file=sys.stderr)
             return 1
@@ -566,11 +573,6 @@ def main() -> int:
         # torch/whisperx as a side effect - it needs to stay import-safe to diagnose
         # a broken install.
         from diarrhizer.pipeline.runner import new_job_dir, run_pipeline
-        from diarrhizer.pipeline.stages.convert import ConvertStage
-        from diarrhizer.pipeline.stages.transcribe import TranscribeStage
-        from diarrhizer.pipeline.stages.diarize import DiarizeStage
-        from diarrhizer.pipeline.stages.merge import MergeStage
-        from diarrhizer.pipeline.stages.export import ExportStage
 
         # [SEMANTIC-BEGIN] CONFIG:SPEAKERS_MAP
         # @purpose: Load speaker name mapping from JSON file
@@ -586,8 +588,12 @@ def main() -> int:
             if not speakers_path.exists():
                 print(f"Error: Speakers file not found: {speakers_path}", file=sys.stderr)
                 return 1
-            with open(speakers_path, "r", encoding="utf-8") as f:
-                speakers = json.load(f)
+            try:
+                with open(speakers_path, "r", encoding="utf-8") as f:
+                    speakers = json.load(f)
+            except (OSError, ValueError, UnicodeError) as exc:
+                print(f"Error: Cannot read speakers file: {exc}", file=sys.stderr)
+                return 1
             if not isinstance(speakers, dict):
                 print(f"Error: Speakers file must contain a JSON object (dictionary)", file=sys.stderr)
                 return 1
@@ -615,39 +621,38 @@ def main() -> int:
             if not prompt_path.exists():
                 print(f"Error: Initial prompt file not found: {prompt_path}", file=sys.stderr)
                 return 1
-            with open(prompt_path, "r", encoding="utf-8") as f:
-                initial_prompt = f.read().strip()
+            try:
+                initial_prompt = prompt_path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError) as exc:
+                print(f"Error: Cannot read initial prompt: {exc}", file=sys.stderr)
+                return 1
             print(f"[CLI] Loaded initial prompt: {len(initial_prompt)} chars")
         # [SEMANTIC-END] CONFIG:INITIAL_PROMPT
 
         def _run(input_path, job_dir) -> dict:
+            from diarrhizer.pipeline.settings import build_stages, recorded_stage_names
+
+            options = {}
+            for key in run_option_names:
+                value = getattr(args, key)
+                if value is not_given:
+                    continue
+                if key in ("asr_condition_on_previous_text", "asr_vad_filter", "keep_wav"):
+                    value = _parse_bool(value) if value is not None else None
+                options["language" if key == "lang" else key] = value
+            if args.speakers:
+                options["speakers"] = speakers
+            if args.asr_initial_prompt_file:
+                options["asr_initial_prompt"] = initial_prompt or None
+            if args.asr_hotwords_file:
+                raise ValueError("--asr-hotwords-file is not supported by this backend; use --asr-initial-prompt-file")
+            if not args.job_dir:
+                options.setdefault("audio_format", None)  # shared default for new jobs
+            names = recorded_stage_names(Path(args.job_dir) if args.job_dir else None)
             return run_pipeline(
-                input_path=input_path,
-                out_dir=args.out,
-                stages=[ConvertStage(), TranscribeStage(), DiarizeStage(), MergeStage(), ExportStage()],
-                job_dir=job_dir,
-                min_speakers=args.min_speakers,
-                max_speakers=args.max_speakers,
-                language=args.lang,
-                device=args.device,
-                force=args.force,
-                force_stage=args.force_stage,
-                from_stage=args.from_stage,
-                to_stage=args.to_stage,
-                speakers=speakers,
-                asr_model=args.asr_model,
-                asr_compute_type=args.asr_compute_type,
-                asr_beam_size=args.asr_beam_size,
-                asr_temperature=args.asr_temperature,
-                asr_condition_on_previous_text=_parse_bool(args.asr_condition_on_previous_text),
-                asr_initial_prompt=initial_prompt,
-                asr_hotwords_file=args.asr_hotwords_file,
-                asr_vad_filter=_parse_bool(args.asr_vad_filter),
-                asr_vad_min_silence_ms=args.asr_vad_min_silence_ms,
-                audio_profile=args.audio_profile,
-                audio_format=args.audio_format,
-                keep_wav=None if args.keep_wav is None else _parse_bool(args.keep_wav),
-                min_turn_duration=args.min_turn_duration,
+                input_path=input_path, out_dir=args.out, job_dir=job_dir,
+                stages=build_stages(names), force=args.force, force_stage=args.force_stage,
+                from_stage=args.from_stage, to_stage=args.to_stage, **options,
             )
 
         def _error_text(e: Exception) -> str:

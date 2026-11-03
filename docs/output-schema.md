@@ -31,20 +31,23 @@ All of them are rendered from the same merged segments. `result.json` keeps them
       "device": "string",
       "min_speakers": "integer",
       "max_speakers": "integer"
-    }
+    },
+    "speakers": {"Speaker_00": "display name"}
   },
   "segments": [
     {
       "start": "float (seconds)",
       "end": "float (seconds)",
       "speaker_id": "string",
+      "speaker_name": "string",
       "text": "string",
       "words": [
         {
-          "start": "float (seconds)",
-          "end": "float (seconds)",
+          "start": "float (seconds) or null",
+          "end": "float (seconds) or null",
           "word": "string",
-          "speaker_id": "string"
+          "speaker_id": "string",
+          "speaker_name": "string"
         }
       ]
     }
@@ -63,6 +66,7 @@ All of them are rendered from the same merged segments. `result.json` keeps them
 | `input_file` | string | Path to the original input media file |
 | `created_at` | string | ISO 8601 timestamp when export was generated |
 | `config` | object | Summary of pipeline configuration used |
+| `speakers` | object | Normalized speaker ID → display name mapping; empty when unnamed |
 
 #### `config` object
 
@@ -82,8 +86,10 @@ Array of transcribed segments, each containing:
 | `start` | float | Segment start time in seconds |
 | `end` | float | Segment end time in seconds |
 | `speaker_id` | string | Speaker identifier (e.g., "Speaker_00") |
+| `speaker_name` | string | Resolved display name, or the speaker ID if unnamed |
 | `text` | string | Transcribed text for the segment |
 | `words` | array (optional) | Word-level details if available |
+| `alignment_warning` | string (optional) | Why the segment was retained unsplit to preserve text |
 
 #### `words` array (optional)
 
@@ -91,10 +97,16 @@ Each word object contains:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `start` | float | Word start time in seconds |
-| `end` | float | Word end time in seconds |
+| `start` | float or null | Word start time in seconds; null means alignment is unavailable |
+| `end` | float or null | Word end time in seconds; null means alignment is unavailable |
 | `word` | string | The transcribed word |
 | `speaker_id` | string | Speaker identifier for this word |
+| `speaker_name` | string | Resolved display name, or the speaker ID if unnamed |
+
+The segment's `text` is authoritative. An incomplete word list is diagnostic data, not a replacement
+for that text. Unknown times are never fabricated as zero. In this case exports retain the full
+segment and SRT uses its segment timestamps. `segment_index` is an ownership field in the intermediate
+ASR word records; it is not required in the exported words after merging/splitting.
 
 ---
 

@@ -57,6 +57,8 @@ APP_TITLE = "Diarrhizer"
 #   the window title and a taskbar flash report progress and completion. Closing the window while a job
 #   runs asks first and kills the child. Environment checks run once at startup in the background
 #   (GUI:ENVIRONMENT_PROBE); the Doctor item shows a warning badge when a required check failed.
+#   Result changes are guarded before replacing/closing its editor. Queue allocation failures
+#   become failed items; planning a restart has no filesystem side effects.
 # @inputs: user actions on the screens
 # @outputs: pipeline jobs, screen navigation
 # @sideEffects: Spawns/kills child processes; files dropped on the window are added to New Job
@@ -177,8 +179,8 @@ class MainWindow(QMainWindow):
             self._nav.setCurrentRow(row)
 
     def _show_result(self, job_dir) -> None:
-        self._result.load(Path(job_dir))
-        self._stack.setCurrentWidget(self._result)
+        if self._result.load(Path(job_dir)):
+            self._stack.setCurrentWidget(self._result)
 
     def _set_nav_label(self, key: str, text: str) -> None:
         self._nav.item(ROWS[key]).setText(text)
@@ -248,14 +250,13 @@ class MainWindow(QMainWindow):
             self._on_batch_finished()
             return
 
-        if not item.kwargs.get("job_dir"):
-            # Light import (no torch): the runner module itself only needs the stdlib.
-            from diarrhizer.pipeline.runner import new_job_dir
-
-            item.kwargs["job_dir"] = new_job_dir(item.kwargs["out_dir"], item.kwargs["input_path"])
-            item.job_dir = Path(item.kwargs["job_dir"])
-
         item.status = RUNNING
+        try:
+            self._allocate_job(item)
+        except OSError as exc:
+            self._end_item(FAILED, f"Не удалось создать задание: {exc}")
+            return
+
         self._item_started_at = time.monotonic()
         self._current_stage = None
         position, total = self._queue.position(item)
@@ -275,6 +276,14 @@ class MainWindow(QMainWindow):
             return
         self._new_job.set_busy(True)
         self._update_progress_labels()
+
+    def _allocate_job(self, item) -> None:
+        if not item.kwargs.get("job_dir"):
+            # Light import (no torch): the runner module itself only needs the stdlib.
+            from diarrhizer.pipeline.runner import new_job_dir
+
+            item.kwargs["job_dir"] = new_job_dir(item.kwargs["out_dir"], item.kwargs["input_path"])
+            item.job_dir = Path(item.kwargs["job_dir"])
 
     def _on_progress(self, stage: str, message: str) -> None:
         started = self._monitor.on_progress(stage, message)
@@ -377,6 +386,9 @@ class MainWindow(QMainWindow):
     # --- closing -------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
+        if not self._result._names_settled("закрытие приложения"):
+            event.ignore()
+            return
         if self._worker is not None:
             answer = QMessageBox.question(
                 self,

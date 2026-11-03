@@ -27,6 +27,7 @@ def is_blocking_failure(name: str, passed: bool) -> bool:
 # @description: Checks for Python version, FFmpeg, audio format profiles (file parses, default profile's
 #   encoder is in this FFmpeg build), summarization setup (templates/providers files parse, every provider's
 #   CLI is on PATH / API key is set), torch/torchaudio, CUDA, cuDNN, torchcodec, HF token, and critical ML imports.
+#   Shared API key variables are reported as optional warnings, without exposing their values.
 #   A failed check in OPTIONAL_CHECKS (torchcodec: only a faster decoder; Summarization: an add-on) is a
 #   warning, not a failure. run_all_checks() is the shared, print-free list the GUI runs (in a child process).
 # @sideEffects: Reads environment variables, audio_formats.json and the summary_*.json files, runs
@@ -176,6 +177,9 @@ def check_summarization() -> Tuple[str, bool, str]:
         return (name, False, str(e))
 
     problems = []
+    for variable, names in providers.shared_key_variables().items():
+        problems.append(f"Shared API key variable {variable}: {', '.join(names)}; "
+                        "check that sharing is intentional (use separate variables for different keys)")
     for provider in providers.providers.values():
         if provider.is_cli:
             if not shutil.which(provider.executable):

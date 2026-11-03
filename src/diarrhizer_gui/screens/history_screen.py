@@ -48,7 +48,6 @@ from diarrhizer_gui.job_scan import (
     restartable_stages,
     resume_plan,
     scan_jobs,
-    set_aside_speaker_names,
     stages_for_mode,
 )
 from diarrhizer_gui.screens.new_job_screen import hf_token_present
@@ -212,7 +211,7 @@ def sort_jobs(jobs: list, column: int, descending: bool) -> list:
 # @inputs: job folders under the results folder; header clicks; header drags
 # @outputs: view_result_requested, runs_requested
 # @sideEffects: reads/writes QSettings; deletes job folders on request
-# @errors: bad saved settings fall back to defaults
+# @errors: Bad display settings fall back to defaults; scan/config I/O errors are shown without escaping Qt slots
 class HistoryScreen(QWidget):
     COLUMNS = ["Дата", "Файл", "Язык", "Спикеры", "Модель", "Этапы", "Действия"]
     view_result_requested = Signal(Path)
@@ -393,7 +392,11 @@ class HistoryScreen(QWidget):
         return super().eventFilter(obj, event)
 
     def refresh(self) -> None:
-        self._scanned = scan_jobs(Path(self._path_field.text()))
+        try:
+            self._scanned = scan_jobs(Path(self._path_field.text()))
+        except OSError as exc:
+            self._summary_label.setText(f"Не удалось прочитать историю: {exc}")
+            return
         self._populate(self._scanned)
 
     def _populate(self, jobs: list) -> None:
@@ -459,7 +462,11 @@ class HistoryScreen(QWidget):
             self.view_result_requested.emit(self._jobs[row].job_dir)
 
     def _resume(self, job: JobSummary) -> None:
-        plan = resume_plan(job.job_dir)
+        try:
+            plan = resume_plan(job.job_dir)
+        except (OSError, ValueError, UnicodeError) as exc:
+            QMessageBox.warning(self, "Продолжить задание", f"Не удалось прочитать задание: {exc}")
+            return
         if plan is None:
             QMessageBox.information(
                 self, "Продолжить задание", "Этому заданию нечего довыполнять."
@@ -480,7 +487,11 @@ class HistoryScreen(QWidget):
 
     def _restart(self, job: JobSummary, stage: str) -> None:
         title = "Перезапустить этап"
-        plan = restart_plan(job.job_dir, stage)
+        try:
+            plan = restart_plan(job.job_dir, stage)
+        except (OSError, ValueError, UnicodeError) as exc:
+            QMessageBox.warning(self, title, f"Не удалось прочитать задание: {exc}")
+            return
         if plan is None:
             QMessageBox.information(
                 self, title, "Этот этап сейчас нельзя перезапустить: нет результатов предыдущих этапов."
@@ -521,14 +532,16 @@ class HistoryScreen(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         # Planned again with the user's changes (restart_plan checks them against the stage).
-        plan = restart_plan(job.job_dir, stage, dialog.overrides())
+        try:
+            plan = restart_plan(job.job_dir, stage, dialog.overrides())
+        except (OSError, ValueError, UnicodeError) as exc:
+            QMessageBox.warning(self, title, f"Не удалось подготовить перезапуск: {exc}")
+            return
         if plan is None:
             QMessageBox.information(self, title, "Задание изменилось: этот этап больше нельзя перезапустить.")
             self.refresh()
             return
         mode, kwargs = plan
-        if drops_names:
-            set_aside_speaker_names(job.job_dir)
         label = f"{job.input_name} (перезапуск этапа «{STAGE_TITLES[stage]}»)"
         self.runs_requested.emit([QueuedRun(mode=mode, kwargs=kwargs, label=label)])
 

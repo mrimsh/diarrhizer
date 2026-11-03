@@ -31,7 +31,8 @@ def _split_segment(seg: dict[str, Any]) -> list[tuple[float, float, str]]:
     words = [w for w in seg.get("words") or [] if (w.get("word") or "").strip()]
     timed = [w for w in words if w.get("start") is not None and w.get("end") is not None]
     fits = end - start <= MAX_CUE_SECONDS and len(text) <= MAX_CUE_CHARS
-    if fits or not timed:
+    complete = "".join(text.split()) == "".join("".join(w["word"].split()) for w in words)
+    if fits or not timed or not complete:
         return [(start, end, text)] if text else []
 
     cues: list[tuple[float, float, str]] = []
@@ -70,6 +71,7 @@ def _split_segment(seg: dict[str, Any]) -> list[tuple[float, float, str]]:
 #   longer than MAX_CUE_SECONDS or MAX_CUE_CHARS is split into several cues at word boundaries
 #   using its word timings (preferring sentence ends); without word timings it stays one cue.
 #   Segments with empty text are skipped - an empty cue is invalid SRT.
+#   Incomplete word text is never used to rebuild a cue: retain the full segment instead.
 # @inputs: segments data from merge stage, config metadata (including optional speakers mapping)
 # @outputs: SRT-formatted string
 # @sideEffects: None (pure function)

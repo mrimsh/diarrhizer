@@ -1,6 +1,5 @@
 """WhisperX adapter for ASR, alignment, and diarization."""
 
-import inspect
 import logging
 import os
 from pathlib import Path
@@ -24,8 +23,11 @@ def _release_cuda() -> None:
 # @description: Provides a clean interface to WhisperX for transcribing audio with timestamps.
 #   extract_transcript_fields() normalizes align()/transcribe() payloads (word_segments or
 #   per-segment words, plus concatenated text) into our text/segments/words shape.
+#   Beam size and initial prompt go to load_model(asr_options). Unsupported batched-backend
+#   temperature/previous-text/VAD controls produce warnings and explicit effective settings.
+#   Alignment failure and partial timing are returned as quality metadata, never silently hidden.
 # @inputs: audio_path, language, device, compute_type, beam_size, temperature, initial_prompt, vad_params
-# @outputs: Transcript dictionary with segments and word-level timestamps
+# @outputs: Transcript dictionary with segments, word-level timestamps and quality metadata
 # @sideEffects: Loads WhisperX model into memory (GPU/CPU); unload() releases it and empties the CUDA cache
 # @errors: RuntimeError if whisperx/torch is missing, model download fails, or transcription fails
 # @see: STAGE:TRANSCRIBE, CONFIG:INITIAL_PROMPT
@@ -97,10 +99,14 @@ class WhisperXAdapter:
             )
         return device
 
-    def _load_whisperx(self) -> None:
+    def _load_whisperx(self, language, compute_type, beam_size, initial_prompt) -> None:
         """Load WhisperX and download model if needed."""
-        if self._model_loaded:
+        compute_type = compute_type or ("float16" if self._device == "cuda" else "int8")
+        settings = (language, compute_type, beam_size, initial_prompt)
+        if self._model_loaded and self._loaded_settings == settings:
             return
+        if self._model_loaded:
+            self.unload()
 
         try:
             import whisperx
@@ -111,11 +117,6 @@ class WhisperXAdapter:
                 f"Import error: {e}"
             ) from e
 
-        # Determine compute type: use configured or auto-based on device
-        compute_type = self._compute_type
-        if compute_type is None:
-            compute_type = "float16" if self._device == "cuda" else "int8"
-
         # Load model
         try:
             self._whisperx = whisperx
@@ -123,7 +124,10 @@ class WhisperXAdapter:
                 self._model,
                 device=self._device,
                 compute_type=compute_type,
+                language=language,
+                asr_options={"beam_size": beam_size, "initial_prompt": initial_prompt},
             )
+            self._loaded_settings = settings
             self._model_loaded = True
         except Exception as e:
             error_msg = str(e)
@@ -149,40 +153,6 @@ class WhisperXAdapter:
                 raise RuntimeError(
                     f"Failed to load WhisperX model '{self._model}': {e}"
                 ) from e
-
-    def _build_transcribe_kwargs(
-        self,
-        lang: Optional[str],
-        beam_size: int,
-        temperature: float,
-        condition_on_previous_text: bool,
-        initial_prompt: Optional[str],
-        vad_filter: bool,
-        vad_min_silence_ms: int,
-    ) -> dict:
-        """Build kwargs dict for transcribe(), filtered to supported parameters."""
-        supported = set()
-        try:
-            sig = inspect.signature(self._whisper_model.transcribe)
-            supported = set(sig.parameters.keys()) - {"audio", "self"}
-        except (TypeError, ValueError):
-            supported = set()
-
-        kwargs: dict = {"language": lang}
-
-        # Conditionally add supported options
-        for name, value in {
-            "beam_size": beam_size,
-            "temperature": temperature,
-            "condition_on_previous_text": condition_on_previous_text,
-            "initial_prompt": initial_prompt,
-            "vad_filter": vad_filter,
-            "vad_min_silence_ms": vad_min_silence_ms,
-        }.items():
-            if name in supported:
-                kwargs[name] = value
-
-        return kwargs
 
     def transcribe(
         self,
@@ -230,60 +200,39 @@ class WhisperXAdapter:
         current_beam_size = beam_size if beam_size is not None else self._beam_size
         current_temperature = temperature if temperature is not None else self._temperature
         current_condition = condition_on_previous_text if condition_on_previous_text is not None else self._condition_on_previous_text
-        current_initial_prompt = initial_prompt or self._initial_prompt
+        current_initial_prompt = self._initial_prompt if initial_prompt is None else initial_prompt
         current_vad_filter = vad_filter if vad_filter is not None else self._vad_filter
-        current_vad_min_silence = (
-            self._vad_min_silence_ms if vad_min_silence_ms is None else vad_min_silence_ms
-        )
 
-        self._load_whisperx()
+        warnings = []
+        if current_temperature != 0:
+            warnings.append("WhisperX batched ASR does not support temperature; effective value is 0.")
+        if current_condition:
+            warnings.append("WhisperX batched ASR does not condition on previous text; effective value is false.")
+        if not current_vad_filter:
+            warnings.append("WhisperX requires VAD; vad_filter=false is unsupported, VAD remains enabled.")
+        warnings.append("WhisperX does not support vad_min_silence_ms; its own VAD thresholds are used.")
+        effective = {
+            "compute_type": current_compute_type or ("float16" if self._device == "cuda" else "int8"),
+            "beam_size": current_beam_size, "initial_prompt": current_initial_prompt,
+            "temperature": 0.0, "condition_on_previous_text": False,
+            "vad_filter": True, "vad_min_silence_ms": None,
+        }
+        for warning in warnings:
+            logging.getLogger(__name__).warning(warning)
+        self._load_whisperx(lang, current_compute_type, current_beam_size, current_initial_prompt)
 
         try:
             audio = self._whisperx.load_audio(str(audio_path))
 
-            # Load model with correct compute type if override
-            if current_compute_type and current_compute_type != self._compute_type:
-                self._whisper_model = self._whisperx.load_model(
-                    self._model,
-                    device=self._device,
-                    compute_type=current_compute_type,
-                )
-
-            # Build options by introspecting transcribe() signature
-            transcribe_kwargs = self._build_transcribe_kwargs(
-                lang=lang,
-                beam_size=current_beam_size,
-                temperature=current_temperature,
-                condition_on_previous_text=current_condition,
-                initial_prompt=current_initial_prompt,
-                vad_filter=current_vad_filter,
-                vad_min_silence_ms=current_vad_min_silence,
-            )
-
-            try:
-                result = self._whisper_model.transcribe(
-                    audio,
-                    **transcribe_kwargs,
-                )
-            except TypeError as e:
-                if "unexpected keyword argument" in str(e):
-                    logging.warning(
-                        "Some transcribe options not supported by this backend, "
-                        "retrying with minimal options. Error: %s", e
-                    )
-                    result = self._whisper_model.transcribe(
-                        audio,
-                        language=lang,
-                        batch_size=16 if self._device == "cuda" else 1,
-                    )
-                else:
-                    raise
+            # WhisperX 3.3.1 consumes decoding options at load_model, not here.
+            result = self._whisper_model.transcribe(audio, language=lang)
 
             # Get detected language if auto-detected
             detected_language = result.get("language", lang or "unknown")
 
             # Align words if language detected
             alignment_result = result
+            alignment_status = "unavailable"
             align_model = None
             if detected_language and detected_language != "unknown":
                 try:
@@ -301,21 +250,37 @@ class WhisperXAdapter:
                         audio,
                         device=self._device,
                     )
+                    alignment_status = "aligned"
                 except Exception as e:
                     # Alignment is best-effort, log but continue
                     logging.warning(f"Word alignment failed: {e}")
+                    alignment_status = "failed"
+                    warnings.append(f"Word alignment failed: {e}")
                 finally:
                     del align_model
 
             extracted = extract_transcript_fields(alignment_result)
-            if not extracted["text"] and alignment_result is not result:
-                extracted["text"] = extract_transcript_fields(result)["text"]
+            original = extract_transcript_fields(result)
+            if "".join(extracted["text"].split()) != "".join(original["text"].split()):
+                extracted = original
+                alignment_status = "partial"
+                warnings.append("Word alignment changed transcript text; original ASR segments are preserved.")
+            untimed = sum(w["start"] is None or w["end"] is None for w in extracted["words"])
+            if untimed:
+                alignment_status = "partial"
+                warnings.append(f"{untimed} word(s) have no valid alignment timestamps; text is preserved.")
+            elif alignment_status == "aligned" and extracted["text"] and not extracted["words"]:
+                alignment_status = "partial"
+                warnings.append("Word alignment returned no words; original segment text is preserved.")
 
             return {
                 "text": extracted["text"],
                 "segments": extracted["segments"],
                 "words": extracted["words"],
                 "language": detected_language,
+                "effective_settings": effective,
+                "alignment_status": alignment_status,
+                "warnings": warnings,
             }
 
         except Exception as e:

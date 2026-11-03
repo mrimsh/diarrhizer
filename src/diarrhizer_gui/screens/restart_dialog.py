@@ -84,6 +84,7 @@ MIN_TURN_TOOLTIP = (
 #   format is no longer in the profile store keeps it as an extra "как в задании" choice. cuda is
 #   disabled when the environment probe says it is unavailable. accept() refuses an empty model and a
 #   speaker minimum above the maximum.
+#   Compatibility ASR controls explicitly label the pinned backend's unsupported/effective behavior.
 # @inputs: intro text, settings keys, recorded kwargs, QSettings (custom model list), optional EnvironmentProbe
 # @outputs: overrides() -> {run_pipeline setting: new value}, accepted/rejected dialog result
 # @sideEffects: Reads audio_formats.json and the HF cache listing to fill the choices; writes nothing
@@ -247,14 +248,14 @@ class RestartDialog(QDialog):
             spin.setDecimals(1)
             spin.setValue(float(value))
             self._register(key, spin, spin.value)
-            form.addRow("Temperature:", spin)
+            form.addRow("Temperature (WhisperX: 0):", spin)
         elif key == "asr_condition_on_previous_text":
-            box = QCheckBox("Учитывать предыдущий текст (стабильнее декодирование)")
+            box = QCheckBox("Предыдущий текст (WhisperX не поддерживает)")
             box.setChecked(bool(value))
             self._register(key, box, box.isChecked)
             form.addRow(box)
         elif key == "asr_vad_filter":
-            box = QCheckBox("Включить VAD-фильтр (отсекать тишину)")
+            box = QCheckBox("VAD-фильтр (WhisperX всегда использует)")
             box.setChecked(bool(value))
             self._register(key, box, box.isChecked)
             form.addRow(box)
@@ -265,7 +266,7 @@ class RestartDialog(QDialog):
             spin.setSuffix(" мс")
             spin.setValue(int(value))
             self._register(key, spin, spin.value)
-            form.addRow("Мин. тишина для VAD:", spin)
+            form.addRow("Тишина VAD (не применяется):", spin)
         elif key == "asr_initial_prompt":
             edit = QPlainTextEdit()
             edit.setPlaceholderText("Глоссарий/начальный промпт (необязательно)")

@@ -165,6 +165,12 @@ Job folders are named `<input stem>_<YYYYMMDD_HHMMSS>`; callers that start sever
 
 Contains segments and/or words with timestamps (WhisperX alignment result).
 
+`adapters/transcript_result.py` preserves nested word ownership as `segment_index` and normalizes
+unknown, non-finite or reversed word times to `null`. ASR metadata separates requested options
+from `effective_settings`, and includes `alignment_status` (`aligned`, `partial`, `failed`,
+`unavailable`) and `warnings`. The pinned batched WhisperX backend takes beam size and initial
+prompt at model loading; unsupported controls are reported rather than silently discarded.
+
 ### Diarization output
 
 Contains speech intervals labeled with speaker identifiers (`Speaker_00...`).  
@@ -186,6 +192,35 @@ in, so a stray word can't fragment a sentence. Raise it when noisy diarization
 shreds sentences; `0` splits on every word-level speaker change. The value is
 recorded in `metadata.min_turn_duration`, and changing it invalidates the
 merge stage's cache.
+
+If word text is incomplete or its timings are missing/unordered, the segment is kept unsplit with
+its original text and a whole-segment speaker. `alignment_warning` on the segment and
+`metadata.warnings` explain the fallback. SRT never reconstructs text from an incomplete word list.
+
+### Resume and cache identity
+
+`pipeline/settings.py` (`CONFIG:RESUME`) is the shared CLI/GUI reader. The public runner applies
+explicit overrides, then recorded settings, then `PipelineConfig` defaults. Omission and explicit
+`None` differ: `None` clears nullable settings; `{}` clears names. An explicit stage list wins over
+the recorded list. The saved audio-format object wins over a renamed/deleted personal profile.
+Names prefer `speakers.json` (including an empty map), then `export/result.json.metadata.speakers`.
+Malformed critical metadata is an error; broken optional derived artifacts can still be rebuilt.
+
+`meta/run.json.source_fingerprint` contains the resolved path, size, `mtime_ns` and SHA-256 of the
+original bytes. Conversion checks path/size/hash, then freshness/profile/format; a relocated source
+is deliberately treated as new. Legacy conversion without this identity is invalidated once.
+ASR and merge use `metadata.cache_version = 2` to invalidate pre-fix artifacts. These checks run
+only for stages within the requested range, so opening a result or export-only runs remain cheap.
+
+Plans in `GUI:JOB_PLANS` only read files. The runner backs up `speakers.json` immediately before
+actual diarization, after cache checks; pending cancellation leaves it untouched. Automatically
+restored names are cleared when labels are recomputed; an explicit caller mapping remains an override.
+An empty `speakers.json` prevents an interrupted run from restoring names from a stale export;
+retries preserve the nonempty backup. Explicit name overrides are persisted when export is reached.
+GUI load/reload/close resolves dirty name edits before replacing the screen state. JSON/schema and
+filesystem failures are shown in the relevant screen/dialog; failed name saves retain edits for retry.
+
+### Merged JSON example
 
 ```json
 {

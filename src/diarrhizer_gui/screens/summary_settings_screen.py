@@ -832,7 +832,7 @@ class ProvidersTab(QWidget):
         self._model_field.setText("")
         self._endpoint_field.setText(DEFAULT_ENDPOINTS.get(kind, ""))
         if kind == KIND_ANTHROPIC_API:  # the one API kind that cannot go without a key
-            self._key_env_field.setText(default_key_env(name))
+            self._key_env_field.setText(self._unused_key_env(name))
         self._timeout_spin.setValue(DEFAULT_TIMEOUT_SECONDS)
         self._baseline = self._snapshot()
 
@@ -883,7 +883,7 @@ class ProvidersTab(QWidget):
             return Provider(command=self._command_field.text().strip(), extra_args=extra_args, **common)
         key_env = self._key_env_field.text().strip()
         if not key_env and (self._key_field.text().strip() or kind == KIND_ANTHROPIC_API):
-            key_env = default_key_env(name)
+            key_env = self._unused_key_env(name)
         return Provider(
             endpoint=self._endpoint_field.text().strip(),
             api_key_env=key_env,
@@ -895,6 +895,11 @@ class ProvidersTab(QWidget):
             price_cache_write=_optional_number(self._cache_write_field.text(), float, "Цена записи в кэш"),
             **common,
         )
+
+    def _unused_key_env(self, name: str) -> str:
+        occupied = [p.api_key_env for p in self._store.providers.values()
+                    if p.name != self._editing] if self._store else []
+        return default_key_env(name, occupied)
 
     # --- actions ---------------------------------------------------------------
 
@@ -936,6 +941,14 @@ class ProvidersTab(QWidget):
 
         key = self._key_field.text().strip()
         if not provider.is_cli and provider.api_key_env and key and key != provider.api_key():
+            others = [p.name for p in self._store.providers.values()
+                      if p.name != self._editing and not p.is_cli
+                      and p.api_key_env.upper() == provider.api_key_env.upper()]
+            if others:
+                _set_status(self._status,
+                            f"Переменная {provider.api_key_env} используется также: {', '.join(others)}. "
+                            "Для нового ключа задайте отдельное имя переменной; общий ключ не изменён.", ok=False)
+                return
             try:
                 env_file.write_env_file(ENV_PATH, {provider.api_key_env: key})
             except OSError as e:
@@ -1158,6 +1171,8 @@ class ProvidersTab(QWidget):
 #   job of the results folder (QSettings app/out_dir) with the form's prompt, saved or not. Providers are created from four presets (ChatGPT / Claude
 #   subscription via their CLIs, OpenAI-compatible API, Anthropic API); an API key typed in the form is written
 #   to the repo-root .env under the provider's variable and into os.environ, never to the JSON file. "Проверить"
+#   New key variables are unique across providers, including non-ASCII names. Renames keep existing
+#   references. Replacing a key shared by another provider is blocked until a separate variable is chosen.
 #   sends a trivial prompt through a child process (LlmWorker) using the form's current values, saved or not,
 #   and can be cancelled; its result lists the model, the tokens, the cost and the limits the provider reported.
 #   A subscription provider (ChatGPT, Claude) has an AccountPanel (GUI:ACCOUNT_PANEL): the one sign-in button, the

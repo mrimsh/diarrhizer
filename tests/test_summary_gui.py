@@ -369,6 +369,48 @@ def test_a_local_openai_compatible_server_needs_no_key(qapp, summary_stores, iso
     assert provider.api_key_env == "" and not isolated_env.exists()
 
 
+def test_cyrillic_providers_keep_separate_keys_and_renaming_preserves_reference(qapp, isolated_env, monkeypatch):
+    from diarrhizer.summary.providers import default_key_env
+
+    names = ("Первый сервис", "Второй сервис")
+    for name in names:
+        monkeypatch.delenv(default_key_env(name), raising=False)
+    tab = summary_settings_screen.ProvidersTab()
+    for name, key in zip(names, ("synthetic-key-one", "synthetic-key-two")):
+        _preset(tab, KIND_OPENAI_API)
+        tab._name_field.setText(name)
+        tab._endpoint_field.setText("https://example.invalid/v1")
+        tab._model_field.setText("test-model")
+        tab._key_field.setText(key)
+        tab._save_button.click()
+    first, second = (ProviderStore.load().get(name) for name in names)
+    assert first.api_key_env != second.api_key_env
+    assert (first.api_key(), second.api_key()) == ("synthetic-key-one", "synthetic-key-two")
+    tab.reload(select=names[0])
+    tab._name_field.setText("Новое имя")
+    tab._save_button.click()
+    assert ProviderStore.load().get("Новое имя").api_key_env == first.api_key_env
+    assert isolated_env.read_text(encoding="utf-8").count("synthetic-key-") == 2
+
+
+def test_changing_a_shared_legacy_key_is_blocked_and_doctor_reports_collision(qapp, isolated_env, monkeypatch):
+    from diarrhizer.diagnostics.doctor import check_summarization
+
+    monkeypatch.setenv("TEST_SHARED_KEY", "synthetic-original-key")
+    _store_providers(*(Provider(name=name, kind=KIND_OPENAI_API, endpoint="https://example.invalid/v1",
+                               model="m", api_key_env="TEST_SHARED_KEY") for name in ("a", "b")))
+    tab = summary_settings_screen.ProvidersTab()
+    tab.reload(select="a")
+    tab._key_field.setText("synthetic-replacement-key")
+    tab._save_button.click()
+    assert "используется также" in tab._status.text()
+    assert not isolated_env.exists()
+    assert ProviderStore.load().get("b").api_key() == "synthetic-original-key"
+    _, okay, message = check_summarization()
+    assert not okay and "Shared API key variable TEST_SHARED_KEY" in message
+    assert "synthetic-original-key" not in message
+
+
 def test_the_anthropic_api_gets_a_key_variable_even_before_a_key_is_typed(qapp, summary_stores):
     tab = summary_settings_screen.ProvidersTab()
     _preset(tab, KIND_ANTHROPIC_API)
@@ -789,7 +831,9 @@ def test_unsaved_speaker_names_are_offered_for_saving_before_summarizing(
     screen._summary_button.click()
 
     assert bool(dialog_spy.opened) is opens
-    assert (job / "speakers.json").exists() is saved
+    assert json.loads((job / "speakers.json").read_text(encoding="utf-8")) == (
+        {"Speaker_01": "Мария"} if saved else {}
+    )
     if saved:
         assert "Мария" in (job / "export" / "result.md").read_text(encoding="utf-8")
 

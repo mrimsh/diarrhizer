@@ -3,6 +3,7 @@
 import bisect
 import json
 import logging
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,6 +27,8 @@ logger = logging.getLogger(__name__)
 #   merged/exported output instead of failing. Output segments are one-speaker-each and so may
 #   outnumber the ASR segments they came from, since an ASR segment spanning a speaker change
 #   is split at that boundary (MERGE:SPEAKER_TURNS).
+#   Partial or inconsistent alignment retains the original segment text unsplit and records a warning.
+#   cache_version=2 invalidates results predating text-preserving merge, only when merge is in range.
 # @inputs: artifacts/asr/transcript.json (required), artifacts/diar/diarization.json (optional)
 # @outputs: artifacts/merged/segments.json
 # @sideEffects: Reads JSON files, writes merged segments to disk,
@@ -37,6 +40,7 @@ class MergeStage:
 
     # Stage name for identification
     NAME = "merge"
+    CACHE_VERSION = 2  # Never reuse results that may have dropped untimed words.
 
     # Output paths relative to job directory
     MERGE_DIR = "merged"
@@ -119,10 +123,13 @@ class MergeStage:
             "segments": merged_segments,
             "num_segments": len(merged_segments),
             "metadata": {
+                "cache_version": self.CACHE_VERSION,
                 "input_transcript": str(transcript_input),
                 "input_diarization": str(diar_input),
                 "output_path": str(segments_output),
                 "min_turn_duration": min_turn_duration,
+                "warnings": [f"Segment {i}: {seg['alignment_warning']}"
+                             for i, seg in enumerate(merged_segments) if seg.get("alignment_warning")],
                 "start_time": start_time.isoformat(),
                 "end_time": end_time.isoformat(),
                 "duration_seconds": duration,
@@ -187,8 +194,11 @@ class MergeStage:
         data = read_json(artifacts["segments"])
         if not isinstance(data, dict):
             return False
+        meta = data.get("metadata") or {}
+        if not isinstance(meta, dict) or meta.get("cache_version") != self.CACHE_VERSION:
+            return False
         return not config_mismatch(
-            data.get("metadata") or {},
+            meta,
             {"min_turn_duration": job.config.min_turn_duration},
         )
 
@@ -219,10 +229,12 @@ DEFAULT_MIN_TURN_DURATION = 0.4
 #   per speaker run (MERGE:SPEAKER_TURNS), so every emitted segment is
 #   homogeneous: seg["speaker_id"] always equals the speaker_id of every word
 #   in seg["words"]. Output segments can therefore outnumber input ASR segments.
+#   segment_index preserves ownership of untimed words. Incomplete/non-monotonic timing or
+#   incomplete word text falls back to an unsplit original segment, never dropping text.
 # @inputs: transcript_segments, transcript_words, diar_segments
 # @outputs: List of merged segments with speaker_id, one speaker per segment
 # @sideEffects: None (pure function)
-# @errors: None
+# @errors: ValueError for invalid or unordered segment timestamps
 # @see: STAGE:MERGE, MERGE:SPEAKER_TURNS
 def assign_speakers(
     transcript_segments: list[dict],
@@ -269,11 +281,15 @@ def assign_speakers(
     if not transcript_segments:
         return []
 
+    for seg in transcript_segments:
+        if not _valid_times(seg):
+            raise ValueError("ASR segment timestamps must be finite, non-negative and ordered")
+
     # Default speaker if no diarization
     default_speaker = "Speaker_00"
 
     # If no diarization, assign all to default speaker
-    if not diar_segments:
+    if not diar_segments and not transcript_words:
         return [
             {
                 "start": seg["start"],
@@ -284,33 +300,21 @@ def assign_speakers(
             for seg in transcript_segments
         ]
 
-    # Build word index for faster lookup
-    # Words are grouped by which transcript segment they belong to.
-    #
-    # Both lists are chronologically ordered and transcript segments don't
-    # overlap each other, so a single forward-moving pointer into
-    # transcript_segments suffices - O(segments + words) total instead of
-    # rescanning all segments for every word.
+    # Use source ownership first. Legacy flat words use a binary time lookup;
+    # unlike the old forward cursor it also handles unsorted word timestamps.
     word_segment_map: dict[int, list[dict]] = {}
-    if transcript_words:
-        seg_idx = 0
-        num_segments = len(transcript_segments)
-        for word in transcript_words:
-            word_start = word.get("start", 0)
-            # Advance past segments that ended before this (or any later,
-            # since words are chronological) word could start.
-            while (
-                seg_idx < num_segments
-                and transcript_segments[seg_idx].get("end", 0) <= word_start
-            ):
-                seg_idx += 1
-            if seg_idx >= num_segments:
-                break
-            # Word belongs to segment if it starts within the segment
-            # (inclusive start, exclusive end); otherwise it falls in a gap
-            # between segments and is left unmatched.
-            if transcript_segments[seg_idx].get("start", 0) <= word_start:
-                word_segment_map.setdefault(seg_idx, []).append(word)
+    starts = [seg["start"] for seg in transcript_segments]
+    if starts != sorted(starts):
+        raise ValueError("ASR segments must be ordered by start time")
+    for word in transcript_words:
+        index = word.get("segment_index")
+        if not (isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(starts)):
+            if not _valid_times(word):
+                continue  # Original segment text below still retains this token.
+            index = bisect.bisect_right(starts, word["start"]) - 1
+            if index < 0 or word["start"] >= transcript_segments[index]["end"]:
+                continue
+        word_segment_map.setdefault(index, []).append(word)
 
     # Process each transcript segment. Segments, and each segment's words, are
     # visited in chronological order, so a single _DiarizationSweep instance
@@ -326,6 +330,25 @@ def assign_speakers(
         seg_text = seg.get("text", "")
 
         words = word_segment_map.get(seg_idx)
+        complete_text = words and "".join(seg_text.split()) == "".join(
+            "".join(w.get("word", "").split()) for w in words
+        )
+        valid_times = words and all(_valid_times(w) for w in words)
+        ordered = valid_times and [w["start"] for w in words] == sorted(w["start"] for w in words)
+
+        if words and (not complete_text or not ordered):
+            speaker = _find_overlapping_speaker(seg_start, seg_end, diar_segments)
+            # Preserve available words as diagnostic data; exporters must keep
+            # the original text when it does not match the word list.
+            retained = [{"word": w.get("word", ""), "speaker_id": speaker,
+                         "start": w["start"] if _valid_times(w) and ordered else None,
+                         "end": w["end"] if _valid_times(w) and ordered else None} for w in words]
+            merged_segments.append({
+                "start": seg_start, "end": seg_end, "speaker_id": speaker, "text": seg_text,
+                "alignment_warning": "Incomplete or unordered word alignment; original text kept unsplit",
+                "words": retained,
+            })
+            continue
 
         # No word timestamps for this segment: nothing to split on, so match
         # the segment as a whole against diarization as before.
@@ -356,6 +379,12 @@ def assign_speakers(
         )
 
     return merged_segments
+
+
+def _valid_times(item: dict) -> bool:
+    start, end = item.get("start"), item.get("end")
+    return (isinstance(start, (int, float)) and isinstance(end, (int, float))
+            and math.isfinite(start) and math.isfinite(end) and 0 <= start <= end)
 
 
 def _find_overlapping_speaker(

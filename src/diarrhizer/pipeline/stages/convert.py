@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from diarrhizer.adapters.ffmpeg import FFmpegAdapter
 from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat, archive_path
-from diarrhizer.pipeline.cache import config_mismatch, is_stale
+from diarrhizer.pipeline.cache import config_mismatch, is_stale, source_fingerprint
 from diarrhizer.utils import read_json, write_json_atomic
 
 if TYPE_CHECKING:
@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 #   meta/run.json's pipeline_config records the whole job config (ASR params incl. the initial prompt,
 #   min_turn_duration, the stage list), so the GUI can list the job and resume it with the same settings
 #   (the runner refreshes the keys of later stages that ran with other settings - PIPELINE:RUNNER).
+#   Cache compares a full source SHA-256, resolved path and size; legacy jobs without identity
+#   are reconverted once when conversion is requested. A relocated source is a new input.
 # @inputs: job.input_path, config.audio_profile, config.audio_format
 # @outputs: artifacts/audio/normalized.wav, meta/run.json, optional artifacts/audio/archive.<ext>, and for
 #   split-stereo also artifacts/audio/normalized_left.wav / normalized_right.wav (+ archive_left/right.<ext>)
@@ -105,9 +107,11 @@ class ConvertStage:
         # changed since the last conversion, rewriting it would bump its mtime
         # and needlessly invalidate transcribe/diarize.
         recorded = self._read_recorded_config(job_dir)
+        fingerprint = source_fingerprint(input_path)
         forced = config.force or config.force_stage == self.NAME
         signal_unchanged = (
             not forced
+            and self._source_matches(job, fingerprint)
             and recorded.get("audio_profile") == audio_profile
             and not is_stale(outputs=[meta_output], inputs=[input_path])
         )
@@ -161,6 +165,7 @@ class ConvertStage:
         meta_info = {
             "stage": self.NAME,
             "input_path": str(input_path),
+            "source_fingerprint": fingerprint,
             "output_path": str(main_output),
             "output_paths": [str(p) for p in output_paths],
             "archive_paths": [str(p) for p in archive_outputs],
@@ -343,6 +348,8 @@ class ConvertStage:
     def is_cache_valid(self, job: "JobContext") -> bool:
         """Check outputs exist, match the current audio_profile and audio format, and are newer than the source."""
         job_dir = job.job_dir
+        if not self._source_matches(job):
+            return False
         recorded = self._read_recorded_config(job_dir)
         recorded_profile = recorded.get("audio_profile")
         if recorded_profile is not None and recorded_profile != job.config.audio_profile:
@@ -354,6 +361,14 @@ class ConvertStage:
         outputs = list(self.get_output_paths(job_dir).values())
         inputs = [job.input_path] if job.input_path.exists() else []
         return not is_stale(outputs=outputs, inputs=inputs)
+
+    def _source_matches(self, job: "JobContext", current: dict | None = None) -> bool:
+        meta = read_json(job.job_dir / self.META_RUN_JSON)
+        stored = meta.get("source_fingerprint") if isinstance(meta, dict) else None
+        if not isinstance(stored, dict) or not job.input_path.is_file():
+            return False
+        current = source_fingerprint(job.input_path) if current is None else current
+        return all(stored.get(key) == current[key] for key in ("path", "size", "sha256"))
 
 
 # [SEMANTIC-END] STAGE:CONVERT

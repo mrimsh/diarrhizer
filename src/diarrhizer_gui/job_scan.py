@@ -19,9 +19,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from diarrhizer.audio_formats import AudioFormat, find_job_audio
+from diarrhizer.audio_formats import find_job_audio
 from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.pipeline.runner import STAGE_SETTINGS
+from diarrhizer.pipeline.settings import RECORDED_RUN_KEYS, read_job_settings, set_aside_speaker_names
 
 # (stage name, artifact path relative to job_dir) - mirrors the layout
 # documented in docs/architecture.md, not the stage classes themselves.
@@ -49,25 +50,6 @@ STAGE_DEPENDENTS = {
 
 # Where set_aside_speaker_names() moves speakers.json to.
 SPEAKERS_SET_ASIDE = "speakers.before-rediarize.json"
-
-# meta/run.json pipeline_config keys that are run_pipeline() parameters of the
-# same name - what a resumed job must reuse to behave like the original run.
-RECORDED_RUN_KEYS = (
-    "language",
-    "device",
-    "min_speakers",
-    "max_speakers",
-    "asr_model",
-    "asr_compute_type",
-    "asr_beam_size",
-    "asr_temperature",
-    "asr_condition_on_previous_text",
-    "asr_initial_prompt",
-    "asr_vad_filter",
-    "asr_vad_min_silence_ms",
-    "audio_profile",
-    "min_turn_duration",
-)
 
 # generate_job_id()'s `_YYYYMMDD_HHMMSS`, plus the `_N` new_job_dir() adds on a clash.
 _JOB_ID_DATE = re.compile(r"_(\d{8})_(\d{6})(?:_\d+)?$")
@@ -117,7 +99,7 @@ def _read_json(path: Path) -> dict:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, UnicodeError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -140,7 +122,8 @@ def job_mode(meta: dict) -> str:
 
     Jobs from before the stage list was recorded count as "full".
     """
-    stages = (meta.get("pipeline_config") or {}).get("stages")
+    config = meta.get("pipeline_config")
+    stages = config.get("stages") if isinstance(config, dict) else None
     if isinstance(stages, list) and stages and "diarize" not in stages:
         return "asr_only"
     return "full"
@@ -213,21 +196,6 @@ def read_speaker_names(job_dir: Path) -> dict:
     }
 
 
-def set_aside_speaker_names(job_dir: Path) -> None:
-    """Move speakers.json to SPEAKERS_SET_ASIDE.
-
-    For when diarization is about to be redone: it numbers the speakers
-    afresh, so the old names would point at the wrong people. Moved rather
-    than deleted - the re-run may fail, or the user may want them back.
-    """
-    speakers_path = job_dir / "speakers.json"
-    if speakers_path.exists():
-        try:
-            speakers_path.replace(job_dir / SPEAKERS_SET_ASIDE)
-        except OSError:
-            pass
-
-
 def delete_job(out_dir: Path, job_dir: Path) -> None:
     """Permanently remove a job folder.
 
@@ -256,8 +224,12 @@ def scan_jobs(out_dir: Path) -> list:
 
         meta = _read_meta(job_dir)
         pipeline_config = meta.get("pipeline_config", {})
+        if not isinstance(pipeline_config, dict):
+            pipeline_config = {}
 
         input_path = meta.get("input_path")
+        if not isinstance(input_path, str):
+            input_path = None
         input_name = Path(input_path).name if input_path else "—"
 
         date = _parse_job_date(job_dir.name, job_dir)
@@ -280,9 +252,9 @@ def scan_jobs(out_dir: Path) -> list:
                 input_name=input_name,
                 date_label=date.strftime("%Y-%m-%d %H:%M"),
                 sort_key=date,
-                language=pipeline_config.get("language", "—"),
+                language=str(pipeline_config.get("language", "—")),
                 speakers=speakers,
-                asr_model=pipeline_config.get("asr_model", "—"),
+                asr_model=str(pipeline_config.get("asr_model", "—")),
                 stage_done=stage_done(job_dir),
                 result_path=result_path if complete else None,
                 mode=job_mode(meta),
@@ -299,30 +271,11 @@ def scan_jobs(out_dir: Path) -> list:
 
 def _recorded_run_kwargs(job_dir: Path, meta: dict) -> dict:
     """run_pipeline() kwargs that reproduce the job's recorded settings."""
-    config = meta.get("pipeline_config") or {}
-    kwargs = {
-        "job_dir": job_dir,
-        "out_dir": job_dir.parent,
-        "input_path": meta.get("input_path"),
-    }
-    for key in RECORDED_RUN_KEYS:
-        if key in config:
-            kwargs[key] = config[key]
-    if "min_turn_duration" not in kwargs:
-        # Jobs from before it was recorded in run.json: the merge stage wrote it.
-        merged = _read_json(job_dir / "merged" / "segments.json")
-        value = (merged.get("metadata") or {}).get("min_turn_duration")
-        if value is not None:
-            kwargs["min_turn_duration"] = value
-    # The full recorded format, not its name: a user profile may have been
-    # renamed or deleted since, and the job should keep what it was run with.
-    recorded_format = (meta.get("config") or {}).get("audio_format")
-    if isinstance(recorded_format, dict):
-        try:
-            kwargs["audio_format"] = AudioFormat.from_dict(recorded_format)
-        except (TypeError, ValueError):
-            pass
-    return kwargs
+    if not isinstance(meta.get("input_path"), str):
+        raise ValueError("meta/run.json: input_path must be text")
+    return {"job_dir": job_dir, "out_dir": job_dir.parent,
+            "input_path": meta.get("input_path"), **read_job_settings(job_dir, meta)}
+
 
 
 # [SEMANTIC-BEGIN] GUI:JOB_PLANS
@@ -338,13 +291,13 @@ def _recorded_run_kwargs(job_dir: Path, meta: dict) -> dict:
 #   the recorded settings for that run (restart_settings: the settings of the stages being recomputed;
 #   anything else raises ValueError); the runner then records them in meta/run.json. Saved speaker names
 #   follow the speaker ids: they are passed on to the export when diarization is not redone, and
-#   dropped (speakers=None; the caller moves speakers.json aside with set_aside_speaker_names) when
+#   dropped (speakers=None; the runner backs up speakers.json only when diarization actually starts) when
 #   it is. All plans reuse the recorded settings (RECORDED_RUN_KEYS, the full audio format) so the job
 #   behaves like the original run.
 # @inputs: job_dir (meta/run.json, artifacts present on disk, speakers.json), stage and overrides for restart_plan
 # @outputs: (mode, kwargs) for PipelineWorker, or None when there is nothing to do
-# @sideEffects: Reads job files only (set_aside_speaker_names is the one separate writer)
-# @errors: ValueError for restart overrides outside the restarted stages' settings (unreadable files count as missing)
+# @sideEffects: Reads job files only; pending/cancelled plans never mutate names or artifacts
+# @errors: ValueError for malformed recorded configuration or invalid overrides; OSError for inaccessible settings
 # @see: PIPELINE:RUNNER, CONFIG:PIPELINE, STAGE:CONVERT, GUI:PIPELINE_WORKER, GUI:RESTART_DIALOG
 def resume_plan(job_dir: Path) -> Optional[tuple]:
     """(mode, kwargs) that finish an interrupted job, or None if it is
@@ -359,6 +312,8 @@ def resume_plan(job_dir: Path) -> Optional[tuple]:
     if not missing:
         return None
     kwargs = _recorded_run_kwargs(job_dir, meta)
+    # Let the runner restore names implicitly, so actual diarization can reset them.
+    kwargs.pop("speakers", None)
     kwargs["from_stage"] = missing[0]
     return mode, kwargs
 
@@ -372,6 +327,7 @@ def rediarize_plan(job_dir: Path, min_speakers: int, max_speakers: int) -> Optio
     kwargs = _recorded_run_kwargs(job_dir, meta)
     kwargs.update(
         from_stage="diarize",
+        force_stage="diarize",
         min_speakers=min_speakers,
         max_speakers=max_speakers,
         # Old names belong to the old speaker ids; new diarization renumbers.
@@ -404,8 +360,5 @@ def restart_plan(job_dir: Path, stage: str, overrides: Optional[dict] = None) ->
     kwargs.update(from_stage=stage, force_stage=stage)
     if restart_drops_speaker_names(mode, stage):
         kwargs["speakers"] = None
-    else:
-        # The export would otherwise be rendered with the plain ids.
-        kwargs["speakers"] = read_speaker_names(job_dir) or None
     return mode, kwargs
 # [SEMANTIC-END] GUI:JOB_PLANS

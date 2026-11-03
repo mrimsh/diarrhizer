@@ -299,8 +299,8 @@ def test_provider_from_dict_rejects_a_typo():
 
 def test_default_key_env_is_a_valid_ascii_variable_name():
     assert default_key_env("OpenRouter") == "DIARRHIZER_LLM_KEY_OPENROUTER"
-    assert default_key_env("my api (2)") == "DIARRHIZER_LLM_KEY_MY_API_2"
-    assert default_key_env("Свой сервер") == "DIARRHIZER_LLM_KEY_PROVIDER"
+    assert default_key_env("my api (2)").startswith("DIARRHIZER_LLM_KEY_MY_API_2_")
+    assert default_key_env("Свой сервер").startswith("DIARRHIZER_LLM_KEY_PROVIDER_")
     _api(api_key_env=default_key_env("Свой сервер"))  # accepted by validation
 
 

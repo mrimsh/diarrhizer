@@ -13,6 +13,7 @@ from typing import Protocol, Sequence
 from diarrhizer.pipeline.stages.merge import DEFAULT_MIN_TURN_DURATION
 from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat, resolve_audio_format
 from diarrhizer.utils import read_json, write_json_atomic
+from diarrhizer.pipeline.settings import FULL_STAGES, read_job_settings, recorded_stage_names, build_stages, set_aside_speaker_names
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -70,9 +71,8 @@ class StageProtocol(Protocol):
 # [SEMANTIC-BEGIN] CONFIG:PIPELINE
 # @purpose: Single typed source of truth for pipeline stage configuration
 # @description: Replaces the previous untyped config dict carried on JobContext.config.
-#   Field defaults here are canonical; run_pipeline()'s own parameter defaults reference
-#   these fields directly (same module, so they can never drift). cli.py's argparse
-#   defaults are a separate, intentionally-synced literal set - see the comment there.
+#   Field defaults here are canonical. The public runner distinguishes omission from explicit
+#   overrides, restores saved settings, then falls back to these defaults; CLI uses the same path.
 #   STAGE_SETTINGS next to it names, per stage, the settings that stage's output depends on.
 # @inputs: (none - constructed by run_pipeline from its own parameters)
 # @outputs: PipelineConfig instance, carried as JobContext.config
@@ -238,8 +238,8 @@ def _read_recorded_input_path(job_dir: Path) -> Path | None:
         data = json.loads(meta_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    recorded = data.get("input_path")
-    return Path(recorded) if recorded else None
+    recorded = data.get("input_path") if isinstance(data, dict) else None
+    return Path(recorded) if isinstance(recorded, str) and recorded else None
 
 
 def _record_stage_settings(job_dir: Path, stage_name: str, config: PipelineConfig) -> None:
@@ -260,6 +260,8 @@ def _record_stage_settings(job_dir: Path, stage_name: str, config: PipelineConfi
     if not isinstance(recorded, dict):
         return
     current = {key: getattr(config, key) for key in keys}
+    if stage_name == "diarize" and isinstance(recorded.get("stages"), list):
+        current["stages"] = [name for name in FULL_STAGES if name == "diarize" or name in recorded["stages"]]
     if all(key in recorded and recorded[key] == value for key, value in current.items()):
         return
     recorded.update(current)
@@ -270,12 +272,80 @@ def _record_stage_settings(job_dir: Path, stage_name: str, config: PipelineConfi
         logger.warning(f"Could not update settings in {meta_path}: {e}")
 
 
+_UNSET = object()
+_RESUMABLE_SETTINGS = (
+    "min_speakers", "max_speakers", "language", "device", "speakers", "asr_model",
+    "asr_compute_type", "asr_beam_size", "asr_temperature", "asr_condition_on_previous_text",
+    "asr_initial_prompt", "asr_hotwords_file", "asr_vad_filter", "asr_vad_min_silence_ms",
+    "audio_profile", "audio_format", "min_turn_duration",
+)
+
+
+# [SEMANTIC-BEGIN] PIPELINE:EXECUTE
+# @purpose: Execute a pipeline using shared, reproducible resume settings
+# @description: Omitted parameters restore recorded settings; explicit None clears nullable values.
+#   Omitted stages restore the recorded list. Planning and validation precede output changes.
+#   Explicit names are saved when export is reached; an empty map prevents stale names returning on resume.
+# @inputs: input/out paths, optional job/stages, explicit configuration overrides
+# @outputs: per-stage results and artifacts
+# @sideEffects: Reads saved settings, then executes pipeline stages with disk/GPU effects
+# @errors: ValueError, OSError, RuntimeError for invalid settings or stage failures
+# @see: CONFIG:RESUME, CONFIG:PIPELINE, PIPELINE:RUNNER, PIPELINE:BUILD_STAGES
 def run_pipeline(
+    *,
+    input_path: str | Path | None = None,
+    out_dir: str | Path,
+    stages: Sequence[StageProtocol] | None = None,
+    job_dir: str | Path | None = None,
+    min_speakers: int = _UNSET,
+    max_speakers: int = _UNSET,
+    language: str = _UNSET,
+    device: str = _UNSET,
+    force: bool = PipelineConfig.force,
+    force_stage: str | None = PipelineConfig.force_stage,
+    from_stage: str | None = PipelineConfig.from_stage,
+    to_stage: str | None = PipelineConfig.to_stage,
+    speakers: dict | None = _UNSET,
+    asr_model: str = _UNSET,
+    asr_compute_type: str | None = _UNSET,
+    asr_beam_size: int = _UNSET,
+    asr_temperature: float = _UNSET,
+    asr_condition_on_previous_text: bool = _UNSET,
+    asr_initial_prompt: str | None = _UNSET,
+    asr_hotwords_file: str | None = _UNSET,
+    asr_vad_filter: bool = _UNSET,
+    asr_vad_min_silence_ms: int = _UNSET,
+    audio_profile: str = _UNSET,
+    audio_format: AudioFormat | str | None = _UNSET,
+    keep_wav: bool | None = None,
+    min_turn_duration: float = _UNSET,
+) -> dict:
+    """Run a job with explicit overrides > recorded settings > defaults.
+
+    Omitting a setting preserves it on resume; explicitly passing None resets
+    nullable settings (e.g. speakers or initial prompt). An explicit stage list
+    remains authoritative, allowing GUI rediarization of an ASR-only job.
+    """
+    supplied = locals()
+    overrides = {key: supplied[key] for key in _RESUMABLE_SETTINGS if supplied[key] is not _UNSET}
+    settings = read_job_settings(Path(job_dir), include_speakers="speakers" not in overrides) if job_dir is not None else {}
+    settings.update(overrides)
+    if stages is None:
+        stages = build_stages(recorded_stage_names(Path(job_dir) if job_dir is not None else None))
+    return _run_pipeline(input_path=input_path, out_dir=out_dir, stages=stages, job_dir=job_dir,
+                         force=force, force_stage=force_stage, from_stage=from_stage,
+                         to_stage=to_stage, keep_wav=keep_wav,
+                         preserve_speakers="speakers" in overrides, **settings)
+# [SEMANTIC-END] PIPELINE:EXECUTE
+
+
+def _run_pipeline(
     *,
     input_path: str | Path | None = None,
     out_dir: str | Path,
     stages: Sequence[StageProtocol],
     job_dir: str | Path | None = None,
+    preserve_speakers: bool = False,
     min_speakers: int = PipelineConfig.min_speakers,
     max_speakers: int = PipelineConfig.max_speakers,
     language: str = PipelineConfig.language,
@@ -510,6 +580,9 @@ def run_pipeline(
         # Determine if this stage should be forced
         should_force = force or (force_stage == stage_name)
 
+        if stage_name == "export" and preserve_speakers:
+            write_json_atomic(job_dir / "speakers.json", config.speakers or {})
+
         # Check cache before running (skip if not forced and cache is valid)
         if not should_force and stage.is_cache_valid(job):
             # Get this stage's own output paths for the log message. Using
@@ -538,6 +611,13 @@ def run_pipeline(
                 "status": "cached",
             })
             continue
+
+        # Only a stage that actually runs changes the saved name mapping.
+        # Pending/cancelled jobs and cached diarization leave it untouched.
+        if stage_name == "diarize":
+            set_aside_speaker_names(job_dir)
+            if not preserve_speakers:
+                config.speakers = None
 
         # If forcing, delete this stage's own outputs first to avoid partial
         # state. Deliberately uses get_output_paths(), not get_artifact_paths():

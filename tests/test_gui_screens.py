@@ -453,7 +453,7 @@ def test_history_restart_does_nothing_when_declined(qapp, isolated, tmp_path, mo
     assert (job_dir / "speakers.json").exists()
 
 
-def test_history_restart_of_diarization_sets_the_old_names_aside(qapp, isolated, tmp_path, monkeypatch):
+def test_history_pending_diarization_preserves_names_even_if_removed(qapp, isolated, tmp_path, monkeypatch):
     out = tmp_path / "out"
     job_dir = _complete_job(out)
     _write(job_dir / "speakers.json", {"Speaker_00": "Иван"})
@@ -468,8 +468,12 @@ def test_history_restart_of_diarization_sets_the_old_names_aside(qapp, isolated,
 
     (runs,) = received
     assert runs[0].kwargs["speakers"] is None
-    assert not (job_dir / "speakers.json").exists()
-    assert (job_dir / "speakers.before-rediarize.json").exists()
+    assert (job_dir / "speakers.json").exists()
+    assert not (job_dir / "speakers.before-rediarize.json").exists()
+    queue = JobQueue()
+    queue.add(runs)
+    assert queue.remove_pending(runs[0])
+    assert json.loads((job_dir / "speakers.json").read_text(encoding="utf-8")) == {"Speaker_00": "Иван"}
     assert "Имена спикеров будут сброшены" in shown_dialogs[0].intro_text
 
 
@@ -961,3 +965,101 @@ def test_result_screen_ignores_unchanged_ids_saved_by_older_versions(qapp, tmp_p
     screen.load(job_dir)
     assert screen._speaker_fields["Speaker_00"].text() == ""
     assert screen._speaker_fields["Speaker_01"].text() == "Мария"
+
+
+@pytest.mark.parametrize("choice", ["Отмена", "Сохранить", "Продолжить без сохранения"])
+def test_switching_result_settles_unsaved_names(qapp, tmp_path, monkeypatch, choice):
+    first = _finished_job(tmp_path / "first")
+    second = _finished_job(tmp_path / "second")
+    screen = result_screen.ResultScreen()
+    screen.load(first)
+    screen._speaker_fields["Speaker_00"].setText("Иван")
+
+    def answer(box):
+        next(button for button in box.buttons() if button.text() == choice).click()
+    monkeypatch.setattr(QMessageBox, "exec", answer)
+    assert screen.load(second) is (choice != "Отмена")
+    if choice == "Отмена":
+        assert screen._job_dir == first and screen._speaker_fields["Speaker_00"].text() == "Иван"
+    else:
+        assert screen._job_dir == second
+    assert (first / "speakers.json").exists() is (choice == "Сохранить")
+
+
+def test_saving_failure_keeps_dirty_names_and_prevents_navigation(qapp, tmp_path, monkeypatch):
+    job = _finished_job(tmp_path)
+    screen = result_screen.ResultScreen()
+    screen.load(job)
+    screen._speaker_fields["Speaker_00"].setText("Иван")
+    monkeypatch.setattr(QMessageBox, "exec", lambda box: next(b for b in box.buttons() if b.text() == "Сохранить").click())
+    monkeypatch.setattr(result_screen, "write_json_atomic", lambda *args: (_ for _ in ()).throw(PermissionError("read-only")))
+    warnings = _warnings(monkeypatch)
+    assert not screen.load(job)
+    assert screen._save_button.isEnabled() and screen._speaker_fields["Speaker_00"].text() == "Иван"
+    assert "read-only" in warnings[0]
+
+
+@pytest.mark.parametrize("payload", [[], {"segments": "bad"}, {"segments": ["bad"]},
+                                      {"segments": [{"start": None, "end": 1, "text": "text"}]}])
+def test_corrupt_result_shows_readable_error(qapp, tmp_path, payload):
+    job = _finished_job(tmp_path)
+    _write(job / "merged" / "segments.json", payload)
+    _write(job / "meta" / "run.json", {"input_path": [], "pipeline_config": "bad"})
+    screen = result_screen.ResultScreen()
+    assert screen.load(job)
+    assert "Не удалось прочитать" in screen._transcript.toPlainText()
+    assert screen._segments == []
+
+
+def test_history_reports_filesystem_and_plan_errors(qapp, isolated, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    job = _complete_job(out)
+    _record_source(job, tmp_path / "call.wav")
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    screen = history_screen.HistoryScreen()
+    _write(job / "meta" / "run.json", {"input_path": "call.wav", "pipeline_config": []})
+    warnings = _warnings(monkeypatch)
+    screen._restart(screen._jobs[0], "export")
+    assert "pipeline_config" in warnings[0]
+    monkeypatch.setattr(history_screen, "scan_jobs", lambda *args: (_ for _ in ()).throw(PermissionError("denied")))
+    screen.refresh()
+    assert "denied" in screen._summary_label.text()
+
+
+def test_result_reports_corrupt_names_without_overwriting_them(qapp, tmp_path):
+    job = _finished_job(tmp_path)
+    _write(job / "speakers.json", {"Speaker_00": 42})
+    before = (job / "speakers.json").read_bytes()
+    screen = result_screen.ResultScreen()
+    assert screen.load(job)
+    assert "Не удалось прочитать настройки" in screen._status_label.text()
+    assert (job / "speakers.json").read_bytes() == before
+
+
+def test_closing_window_can_cancel_unsaved_names(qapp, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtGui import QCloseEvent
+    from diarrhizer_gui.main_window import MainWindow
+
+    screen = result_screen.ResultScreen()
+    screen.load(_finished_job(tmp_path))
+    screen._speaker_fields["Speaker_00"].setText("Иван")
+    monkeypatch.setattr(QMessageBox, "exec", lambda box: next(b for b in box.buttons() if b.text() == "Отмена").click())
+    event = QCloseEvent()
+    MainWindow.closeEvent(SimpleNamespace(_result=screen), event)
+    assert not event.isAccepted()
+
+
+def test_job_directory_failure_is_reported_as_failed_item(qapp, monkeypatch):
+    from types import SimpleNamespace
+    from diarrhizer_gui.main_window import MainWindow
+    from diarrhizer_gui.job_queue import FAILED
+
+    queue = JobQueue()
+    queue.add([_run("new")])
+    errors = []
+    def fail(item):
+        raise PermissionError("cannot allocate")
+    host = SimpleNamespace(_queue=queue, _allocate_job=fail, _end_item=lambda *args: errors.append(args))
+    MainWindow._start_next(host)
+    assert errors == [(FAILED, "Не удалось создать задание: cannot allocate")]
