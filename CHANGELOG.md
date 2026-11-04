@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Quality C1: RAM/VRAM and performance (2026-11-04)
+
+- Shared ASR/DER sampling of full native process-tree RSS/CPU, Windows private commit, system RAM
+  and device-wide NVIDIA VRAM/utilization with identity, baseline, sampling coverage and explicit scope.
+- Wall time, throughput, weighted RTF, memory peaks and repeated-case median/p95; failed runs retain
+  telemetry and unavailable counters remain missing. PyTorch-only memory remains separately labelled.
+- Optional `bench` dependencies, supported constraints, Windows CI and native/stub regressions.
+- Recorded CPU/CUDA examples with ambient load and sampling limits; no accuracy/cache changes.
+
 ### Quality C1: annotated DER (2026-11-04)
 
 - Full duration-based DER using explicit RTTM/UEM, Hungarian speaker mapping and overlap included

@@ -2,9 +2,11 @@
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 
 from benchmark_asr import run_benchmark
+from benchmark_resources import summarize_performance
 from diarrhizer.env_file import load_project_env
 from diarrhizer.utils import write_json_atomic
 
@@ -13,11 +15,12 @@ from diarrhizer.utils import write_json_atomic
 # @purpose: Compare models/devices on a hash-verified synthetic corpus and preserve failed cases
 # @description: Runs sequential fresh jobs; aggregates edit counts, not mean WER; silence/overlap stay unscored.
 #   Incrementally writes results; nonzero exit on failed execution or text/alignment integrity failure.
+#   Per-model resource summaries keep device scope, measurement coverage and repeated-case timing spread.
 # @inputs: corpus manifest, model/device, repeats and optional two-speaker diarization
 # @outputs: per-case reports and aggregate WER/CER/RTF
 # @sideEffects: Model loading and job/report writes; optional local HF credential loading
 # @errors: ValueError on invalid corpus; per-case errors retained in report, exit 1
-# @see: QUALITY:BENCHMARK, QUALITY:CORPUS
+# @see: QUALITY:BENCHMARK, QUALITY:CORPUS, QUALITY:PERFORMANCE_SUMMARY
 def select_cases(manifest_path, only=None):
     path = Path(manifest_path).resolve()
     manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -55,10 +58,11 @@ def aggregate(runs):
             group[key] += run[key]
         for key in ("word_edits", "reference_words", "char_edits", "reference_chars"):
             group[key] += (run["metrics"] or {}).get(key, 0)
-    for group in groups.values():
+    for model, group in groups.items():
         group["wer"] = group["word_edits"] / group["reference_words"] if group["reference_words"] else None
         group["cer"] = group["char_edits"] / group["reference_chars"] if group["reference_chars"] else None
         group["rtf"] = group["wall_seconds"] / group["audio_seconds"] if group["audio_seconds"] else None
+        group["performance"] = summarize_performance([r for r in runs if r["model"] == model])
     return groups
 
 
@@ -71,10 +75,13 @@ def main(argv=None):
     parser.add_argument("--models", nargs="+", default=["tiny"])
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--only", nargs="+")
+    parser.add_argument("--sample-interval", type=float, default=.1)
     parser.add_argument("--diarize", action="store_true", help="Two-speaker synthetic cases only; loads local HF credentials")
     args = parser.parse_args(argv)
     if not 1 <= args.repeat <= 20:
         parser.error("--repeat must be between 1 and 20")
+    if not math.isfinite(args.sample_interval) or not .02 <= args.sample_interval <= 10:
+        parser.error("--sample-interval must be in 0.02..10 seconds")
     cases = select_cases(args.corpus, args.only)
     if args.diarize:
         if any(len({u["speaker_id"] for u in c["utterances"]}) != 2 for c in cases):
@@ -90,12 +97,14 @@ def main(argv=None):
                     run.update(run_benchmark(case["audio_path"], case["reference_text"], args.out,
                                              device=args.device, model=model, language=case["language"],
                                              reference_words=case["reference_words"],
-                                             score_text=case.get("score_text", True), diarize=args.diarize))
+                                             score_text=case.get("score_text", True), diarize=args.diarize,
+                                             sample_interval=args.sample_interval))
                     run["status"] = "completed"
                     run["integrity_ok"] = (run["export_preserves_normalized_text"]
                                            and run["asr_metadata"].get("alignment_status") != "failed")
                 except Exception as exc:
-                    run.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+                    run.update(status="failed", error=f"{type(exc).__name__}: {exc}",
+                               performance=getattr(exc, "benchmark_performance", None))
                 report["runs"].append(run)
                 report["aggregate"] = aggregate(report["runs"])
                 write_json_atomic(args.report, report)

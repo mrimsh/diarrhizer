@@ -4,10 +4,11 @@ import argparse
 import hashlib
 import itertools
 import math
-import time
 import unicodedata
 import wave
 from pathlib import Path
+
+from benchmark_resources import ResourceMonitor
 
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance
 from diarrhizer.audio_formats import WAV_FORMAT
@@ -125,11 +126,11 @@ def missing_times(words):
 # @description: Includes conversion, model load, ASR/alignment and export in wall time. No cached job reuse.
 #   Optional diarization scores speakers on matched words; overlap text/timing scores are explicitly omitted.
 # @inputs: audio, reference text/markers, model/device/language, output directory
-# @outputs: report with hashes, edit counts, timings, warnings and partial PyTorch memory measurement
-# @sideEffects: Creates pipeline job; loads models; optional diarization uses locally configured HF credentials
-# @see: QUALITY:METRICS, ADAPTER:ALIGNMENT_LOAD, PIPELINE:EXECUTE
+# @outputs: hashes, edit counts, timings, warnings, OS RAM/CPU and device-wide VRAM plus PyTorch-only peak
+# @sideEffects: Creates job, loads models and starts resource sampler; optional diarization uses local HF credentials
+# @see: QUALITY:METRICS, ADAPTER:ALIGNMENT_LOAD, PIPELINE:EXECUTE, QUALITY:RESOURCE_MONITOR
 def run_benchmark(audio, reference, out, *, device="cpu", model="tiny", language="ru",
-                  reference_words=None, score_text=True, diarize=False):
+                  reference_words=None, score_text=True, diarize=False, sample_interval=.1):
     audio = Path(audio)
     if normalize(reference):
         score(reference, "")
@@ -139,13 +140,14 @@ def run_benchmark(audio, reference, out, *, device="cpu", model="tiny", language
     if device == "cuda":
         import torch
         torch.cuda.reset_peak_memory_stats()
-    started = time.perf_counter()
     names = ("convert", "transcribe", "diarize", "merge", "export") if diarize else ("convert", "transcribe", "merge", "export")
-    result = run_pipeline(input_path=audio, out_dir=out, stages=build_stages(names),
-                          device=device, language=language, asr_model=model, audio_format=WAV_FORMAT,
-                          min_speakers=2 if diarize else 1, max_speakers=2 if diarize else 1,
-                          asr_compute_type="float16" if device == "cuda" else "int8")
-    seconds = time.perf_counter() - started
+    stages = build_stages(names)
+    with ResourceMonitor(sample_interval) as monitor:
+        result = run_pipeline(input_path=audio, out_dir=out, stages=stages,
+                              device=device, language=language, asr_model=model, audio_format=WAV_FORMAT,
+                              min_speakers=2 if diarize else 1, max_speakers=2 if diarize else 1,
+                              asr_compute_type="float16" if device == "cuda" else "int8")
+    seconds = monitor.wall_seconds
     job = Path(result["job_dir"])
     with wave.open(str(job / "audio" / "normalized.wav"), "rb") as wav:
         duration = wav.getnframes() / wav.getframerate()
@@ -163,6 +165,7 @@ def run_benchmark(audio, reference, out, *, device="cpu", model="tiny", language
         "unscored_reason": None if score_text else "overlapping speech has no single text order",
         "silence_insertions": len(normalize(hypothesis).split()) if not normalize(reference) else None,
         "audio_seconds": duration, "wall_seconds": seconds, "rtf": seconds / duration if duration else None,
+        "performance": monitor.report(duration),
         "words_without_times_fraction": missing_times(asr.get("words", [])),
         "export_preserves_normalized_text": normalize(hypothesis) == normalize(final_text),
         "word_metrics": word_metrics(reference_words, [w for s in exported["segments"] for w in s.get("words", [])],
@@ -185,10 +188,12 @@ def main(argv=None):
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--model", default="tiny")
     parser.add_argument("--lang", default="ru")
+    parser.add_argument("--sample-interval", type=float, default=.1, help="RAM/VRAM sampling interval, 0.02..10 seconds")
     args = parser.parse_args(argv)
     reference = args.reference.read_text(encoding="utf-8-sig")
     score(reference, "")  # Validate before inference.
-    report = run_benchmark(args.audio, reference, args.out, device=args.device, model=args.model, language=args.lang)
+    report = run_benchmark(args.audio, reference, args.out, device=args.device, model=args.model, language=args.lang,
+                           sample_interval=args.sample_interval)
     write_json_atomic(args.report, report)
     print(f"WER={report['metrics']['wer']:.4f}, CER={report['metrics']['cer']:.4f}, RTF={report['rtf']:.3f}")
     print(args.report.resolve())

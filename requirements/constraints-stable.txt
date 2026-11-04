@@ -44,6 +44,10 @@ pandas>=2.2,<3.0
 # qualify a later binding release separately before updating the supported profile.
 PySide6==6.11.2
 
+# Optional benchmark telemetry (.[bench]); no changes to the ML stack.
+psutil==7.2.2
+nvidia-ml-py==13.615.71
+
 # IMPORTANT:
 # Do not pin `av` here for now. On Windows, PyPI file availability for recent
 # PyAV releases can vary, and forcing a specific version may push pip into a

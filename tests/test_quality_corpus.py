@@ -138,6 +138,8 @@ def test_silence_and_overlap_have_no_misleading_wer(quality, tmp_path, monkeypat
         (tmp_path / name).write_text(json.dumps(transcript), encoding="utf-8")
     monkeypatch.setattr(benchmark, "run_pipeline", lambda **kwargs: {"job_dir": str(tmp_path)})
     result = benchmark.run_benchmark(audio, reference, tmp_path, score_text=scored)
+    assert result["performance"]["wall_seconds"] == result["wall_seconds"]
+    assert result["performance"]["ram"]["peak_rss_bytes"] > 0
     assert result["metrics"] is None and result["word_metrics"] is None
     assert result["silence_insertions"] == insertions
     assert bool(result["unscored_reason"]) is (not scored)

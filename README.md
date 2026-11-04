@@ -701,3 +701,5 @@ Artifact versions, job write locks and `python -m diarrhizer recover "out/<job>"
 [quality baseline](docs/quality-baseline.md).
 Full DER with overlap, independent RTTM/UEM references and a reproducible VoxConverse mini-corpus:
 [diarization evaluation](docs/diarization-quality.md).
+OS/native RAM, whole-device VRAM and repeated CPU/CUDA performance measurements:
+[benchmark performance](docs/benchmark-performance.md).

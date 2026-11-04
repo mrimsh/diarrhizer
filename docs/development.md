@@ -12,7 +12,7 @@ compatibility failure, not a claim that every 6.12 installation is broken.
 
 ```powershell
 py -3.12 -m venv .venv-check
-.venv-check\Scripts\python.exe -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt -e '.[gui,dev]'
+.venv-check\Scripts\python.exe -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt -e '.[gui,dev,bench]'
 .venv-check\Scripts\python.exe -m pip check
 .venv-check\Scripts\python.exe tools/check_repository.py
 .venv-check\Scripts\python.exe -m pytest -q
@@ -91,3 +91,11 @@ policy and a pinned public human-speech corpus. Analytic DER, RTTM/UEM, corpus v
 boundary tests run without network or models. Downloaded audio and model runs are explicit manual checks.
 Reference RTTM uses LF via `.gitattributes` to preserve source hashes on Windows. No new dependencies
 are needed: the scorer uses the existing pinned pyannote.metrics/core packages.
+
+## Benchmark resource telemetry
+
+The optional `bench` extra installs psutil/NVML bindings; clean development installs and Windows CI
+include it for resource regressions. Tests cover deterministic counter accounting, unavailable GPU data,
+exception preservation, summaries and a real child-process allocation, without CUDA or model downloads.
+See [benchmark-performance.md](benchmark-performance.md) for full RSS/VRAM scopes, interval control,
+observed CPU/CUDA runs and the limits of sampled peaks. Application installs do not need this extra.

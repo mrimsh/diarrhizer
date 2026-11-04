@@ -713,6 +713,11 @@ overlapping tracks that single-speaker export segments cannot represent. The cor
 `convert → diarize` with declared speaker bounds, without ASR or reference-derived speaker counts.
 See [DER protocol and overlap breakdown](diarization-quality.md); product schemas/caches are unchanged.
 
+`benchmark_resources.py` supplies shared ASR/DER resource measurement. Its optional `bench` extra
+queries process-tree native RAM/CPU and physical-device NVML memory; reported scopes distinguish
+application RSS, Windows private commit, system RAM and GPU-wide occupancy. It records sampling
+coverage and keeps telemetry failure separate from workload results. See [performance protocol](benchmark-performance.md).
+
 - Every stage must log:
   - input/output artifact paths,
   - key parameters,

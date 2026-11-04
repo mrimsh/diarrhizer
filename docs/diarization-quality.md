@@ -1,5 +1,9 @@
 # Full diarization evaluation (C1)
 
+ASR and DER benchmarks also record native process-tree RAM/CPU, full-device VRAM and repeated-run
+timing summaries. See [benchmark performance](benchmark-performance.md) for scopes, optional installation,
+CPU/CUDA measurements and the sampling limits.
+
 `tools/benchmark_diarization.py` evaluates **raw speaker activity** in `diar/diarization.json` against
 independent RTTM annotations. It runs only `convert → diarize`; ASR omissions, alignment and merge's
 single-speaker segments cannot hide overlapping speakers. It uses the already installed, pinned
@@ -150,4 +154,5 @@ with overlap excluded gives 4.0660%; with collar 0.5 and overlap included it giv
 All six CPU/CUDA jobs completed. CUDA wall time totaled 21.744 s including model loading. This short, ordered
 run is not a throughput benchmark. The largest remaining errors are missed/incorrect speakers in overlap
 and false alarms outside it. Next steps are a larger held-out corpus in relevant call languages/domains,
-confidence intervals and fixed acceptance thresholds; full RAM/VRAM measurement also remains open.
+confidence intervals and fixed acceptance thresholds. RAM/VRAM measurement is now covered by the shared
+[resource monitor](benchmark-performance.md).

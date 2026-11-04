@@ -94,6 +94,8 @@ def test_suite_uses_raw_diarization_without_asr_or_oracle_counts(modules, source
     monkeypatch.setattr(suite, "run_pipeline", run)
     monkeypatch.setattr(suite, "build_stages", lambda names: names)
     result = suite.run_case(suite.load_cases(root / "corpus.json")[0], tmp_path / "out")
+    assert result["performance"]["wall_seconds"] == result["wall_seconds"]
+    assert result["performance"]["ram"]["peak_rss_bytes"] > 0
     assert result["der"]["der"] == 0
     assert calls[0]["stages"] == ("convert", "diarize")
     assert calls[0]["min_speakers"] == 1 and calls[0]["max_speakers"] == 10

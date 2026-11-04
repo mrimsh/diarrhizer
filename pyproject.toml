@@ -23,6 +23,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+bench = [
+    # Optional OS process-tree RAM/CPU and driver-wide GPU telemetry for tools/ benchmarks.
+    "psutil>=5.9,<8",
+    "nvidia-ml-py>=12,<14",
+]
 cuda = [
     # Compatibility extra; use the constrained CUDA install documented in README.
     # The CUDA wheel index is provided by requirements/cuda-cu121.txt.
@@ -48,4 +53,4 @@ diarrhizer_gui = "src/diarrhizer_gui"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "tools"]

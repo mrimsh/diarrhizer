@@ -30,7 +30,7 @@ jobs:
             requirements/*.txt
             pyproject.toml
       - name: Install supported CPU stack
-        run: python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt -e '.[gui,dev]'
+        run: python -m pip install -c requirements/constraints-stable.txt -r requirements/base.txt -r requirements/cpu.txt -e '.[gui,dev,bench]'
       - run: python -m pip check
       - run: python tools/check_repository.py
       - run: python -m pytest -q --tb=short
