@@ -1,5 +1,12 @@
 # Architecture
 
+The independent [Windows launcher](launcher.md) is the first-run entry point. Its `diarrhizer_launcher`
+package uses the standard library and Tk, with no imports of Qt or the processing stack in its own
+process. A standalone bundle prepares one environment through checkpointed setup stages, reuses the
+same dependency constraints and `doctor --profile asr`, and launches the installed main GUI in a separate
+interpreter. Setup state/logs/start files are separate from job artifacts; models remain an optional
+download through the main GUI.
+
 Goal: a simple, extensible architecture for local call recording processing on Windows:  
 **FFmpeg → WhisperX (ASR + alignment) → diarization (pyannote via WhisperX) → merge → export (MD/TXT/SRT/JSON).**
 

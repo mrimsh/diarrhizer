@@ -44,12 +44,16 @@ dev = [
 diarrhizer = "diarrhizer.cli:main"
 diarrhizer-gui = "diarrhizer_gui.app:main"
 
+[project.gui-scripts]
+diarrhizer-launcher = "diarrhizer_launcher.app:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-dir]
 diarrhizer = "src/diarrhizer"
 diarrhizer_gui = "src/diarrhizer_gui"
+diarrhizer_launcher = "src/diarrhizer_launcher"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

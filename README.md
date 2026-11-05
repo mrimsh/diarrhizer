@@ -8,6 +8,13 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
 and a CLI (`python -m diarrhizer run …`).
 
+The Windows **`Diarrhizer.exe` launcher** prepares Python, one `.venv`, CPU/CUDA dependencies,
+FFmpeg, model-cache and results paths through a graphical setup wizard. It runs without an existing
+Python installation or `.venv`, keeps an installation log and supports retry/repair. After setup it
+opens the GUI and can create a shortcut that uses the environment without activation.
+See [launcher setup, distribution and recovery](docs/launcher.md). The standalone executable is built
+with `tools/build_launcher.py`; `Diarrhizer.pyw` is the source entry point for developers with Python.
+
 ---
 
 ## Current Status
@@ -21,6 +28,7 @@ and a CLI (`python -m diarrhizer run …`).
 | Speaker name mapping | ✅ Implemented |
 | Batch processing (several files / folders) | ✅ Implemented |
 | Desktop GUI (PySide6) | ✅ Implemented |
+| Graphical setup / launch / recovery (standalone Windows launcher) | ✅ Implemented |
 | Summaries (prompt templates + model providers) | ✅ Implemented |
 
 ---

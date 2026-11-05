@@ -4,6 +4,13 @@ The supported runtime is Python 3.11/3.12 with WhisperX 3.3.1, PySide6 6.11.2 an
 Use the same interpreter for installation and execution. A bare unconstrained dependency upgrade
 is not a supported ML migration.
 
+The [independent Windows launcher](launcher.md#build-and-validate) has a separate lightweight build
+environment (`requirements/launcher-build.txt`). Its bundled Tk/Python does not depend on the processing
+venv. Launcher tests use temporary configuration and synthetic downloads; they do not install a system
+Python, access model caches or modify personal GUI settings. The standalone smoke opens/closes the UI
+outside the checkout with Python removed from PATH. Clean-machine Python/FFmpeg bootstrap and CUDA
+driver qualification remain separate integration checks.
+
 PySide6 6.12.0 passed test assertions but exited with code 1 during GUI teardown in the clean Windows
 environment. It is excluded from the supported profile pending investigation; this is an observed local
 compatibility failure, not a claim that every 6.12 installation is broken.
