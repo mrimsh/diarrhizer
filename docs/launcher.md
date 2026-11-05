@@ -39,6 +39,21 @@ treated as proof that the installed CUDA stack works. CPU remains a supported ch
 
 ## Start, shortcut and files
 
+Selecting an existing venv with **Обзор…** opens its parameters automatically. For a typed path,
+press Enter or **Открыть среду**. The launcher reads the current saved configuration or the
+`.diarrhizer-launcher.json` snapshot in the environment, then checks readiness in the background.
+Ready environments immediately offer GUI launch, shortcut creation and the start-file folder.
+Opening a directory alone does not install packages or replace the active saved configuration;
+the first use asks to save the selected environment as the single active configuration.
+
+Cache, results, FFmpeg and application-config paths are editable. **Применить параметры** saves
+these changes without pip or reinstalling packages, and regenerates the GUI start files. Interpreter
+or CPU/CUDA changes still use the confirmed setup flow. A snapshot is saved after successful setup
+and parameter changes so the environment can later be reopened by directory. Existing environments
+created by older launcher versions can recover the current launcher configuration; without either
+saved configuration or snapshot, Python/device are detected and the remaining paths are clearly
+presented as proposed values to review. No secrets or model caches are read to infer settings.
+
 After successful setup the window offers all three actions:
 
 - **Запустить Diarrhizer** starts the main GUI using the created environment.

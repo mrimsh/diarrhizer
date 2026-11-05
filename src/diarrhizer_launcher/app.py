@@ -13,6 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from .config import LauncherLock, Settings, State, application_source, launcher_home
+from .existing import inspect_environment, remember_environment
 from .launch import (
     create_shortcut,
     desktop_folder,
@@ -29,6 +30,8 @@ from .system import discover_pythons, gpu_description
 # @description: Tk ships inside the standalone bundle. Workers report through a queue; all widget
 #   changes stay on the Tk thread. Confirmation describes the actual plan and existing-environment
 #   package changes. Closing during setup waits for child shutdown before releasing the single-instance lock.
+#   Selecting a venv reads its parameters asynchronously; adopting it is an explicit action. Runtime
+#   path edits are saved without pip; interpreter/device changes use the confirmed setup flow.
 # @inputs: one local state file, user paths/device/download choices
 # @outputs: setup progress/log, retry/repair controls, GUI/shortcut/start-folder actions
 # @sideEffects: Native dialogs, background setup/probes and user-requested shortcuts
@@ -70,6 +73,9 @@ class Launcher:
         form.grid(row=2, column=0, sticky="ew")
         form.columnconfigure(1, weight=1)
         self._path_row(form, 0, "Окружение (.venv)", "venv")
+        self.open_button = ttk.Button(form, text="Открыть среду", command=self.open_environment)
+        self.open_button.grid(row=0, column=3, padx=(8, 0))
+        self.controls.append(self.open_button)
         ttk.Label(form, text="Python 3.11 / 3.12 x64").grid(row=1, column=0, sticky="w", padx=(0, 12))
         self.python_combo = ttk.Combobox(form, textvariable=self.variables["python"])
         self.python_combo.grid(row=1, column=1, sticky="ew", pady=3)
@@ -95,9 +101,10 @@ class Launcher:
         self._check(form, 6, "Если FFmpeg отсутствует, скачать комплект с ffprobe с gyan.dev (~110 МБ)", "install_ffmpeg")
         self._path_row(form, 7, "Кэш моделей", "cache")
         self._path_row(form, 8, "Результаты обработки", "output")
+        self._path_row(form, 9, "Настройки приложения", "config_dir")
         ttk.Label(form, text="Зависимости: общие ограничения проекта + CPU / CUDA. Установка может занять несколько ГБ.\n"
                   "Модели — отдельно в GUI: tiny ≈80 МБ, base ≈150 МБ, large-v3 ≈3,1 ГБ; выравнивание и диаризация — дополнительно.",
-                  wraplength=900).grid(row=9, column=0, columnspan=3, sticky="w", pady=(8, 0))
+                  wraplength=900).grid(row=10, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         progress = ttk.Frame(body)
         progress.grid(row=3, column=0, sticky="ew", pady=(12, 6))
@@ -154,6 +161,8 @@ class Launcher:
         button = ttk.Button(parent, text="Обзор…", command=lambda: self._browse(key, file))
         button.grid(row=row, column=2, padx=(8, 0))
         self.controls.extend((entry, button))
+        if key == "venv":
+            entry.bind("<Return>", lambda _: self.open_environment())
 
     def _check(self, parent, row, title, key):
         control = ttk.Checkbutton(parent, text=title, variable=self.variables[key])
@@ -165,6 +174,55 @@ class Launcher:
                  if file else filedialog.askdirectory(parent=self.root, mustexist=False))
         if value:
             self.variables[key].set(str(Path(value)))
+            if key == "venv":
+                self.open_environment()
+
+    def open_environment(self):
+        if self.busy or self.scanning:
+            return
+        folder = Path(self.variables["venv"].get().strip())
+        self.available = False
+        self.scanning = True
+        self.status.set("Чтение параметров выбранной среды…")
+        defaults = self._settings()
+        current = self.state
+        self.refresh()
+
+        def inspect():
+            try:
+                state, ready, reason = inspect_environment(folder, current, defaults)
+                self.events.put({"kind": "opened", "folder": str(folder), "state": state,
+                                 "ready": ready, "message": reason})
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                self.events.put({"kind": "opened", "folder": str(folder), "state": None,
+                                 "ready": False, "message": str(exc)})
+        threading.Thread(target=inspect, daemon=True).start()
+
+    def _save_selection(self):
+        """Called only after explicit apply/use; inspection alone never changes saved state."""
+        settings = self.state.settings
+        settings.validate(self.source, self.state_path.parent)
+        for folder in (settings.cache, settings.output, settings.config_dir):
+            Path(folder).mkdir(parents=True, exist_ok=True)
+        self.state.log = (self.state.log if self.state.log and Path(self.state.log).resolve().is_relative_to(
+            (self.state_path.parent / "logs").resolve()) else "")
+        self.state.save(self.state_path)
+        # The environment snapshot is optional for an adopted read-only venv.
+        try:
+            remember_environment(self.state_path, self.state)
+        except OSError:
+            self._append("Параметры сохранены в лаунчере; папка среды недоступна для записи копии настроек.")
+        write_start_files(self.state_path, self.state)
+
+    def _use_selection(self):
+        saved = State.load(self.state_path)
+        if saved and saved.settings == self.state.settings and saved.ready:
+            return True
+        if not messagebox.askyesno("Использовать среду?", "Сохранить выбранную среду и её параметры для последующих "
+                                  "запусков? Пакеты изменяться не будут.", parent=self.root, default="no"):
+            return False
+        self._save_selection()
+        return True
 
     def _discover(self):
         try:
@@ -212,6 +270,18 @@ class Launcher:
             existing = nonempty and not managed
             if existing and not (folder / "pyvenv.cfg").is_file():
                 raise ValueError("Папка окружения не пуста и не является venv. Выберите пустую папку.")
+            runtime_only = (self.available and self.state and self.state.ready and not repair
+                            and all(getattr(settings, key) == getattr(self.state.settings, key)
+                                    for key in ("venv", "python", "device")))
+            if runtime_only:
+                if not messagebox.askyesno("Сохранить параметры?", "Сохранить параметры запуска выбранной среды? "
+                                          "Пакеты переустанавливаться не будут.", parent=self.root, default="no"):
+                    return
+                self.state.settings = settings
+                self._save_selection()
+                self.refresh()
+                self.status.set("Параметры сохранены. Доступны запуск GUI, ярлык и папка запуска.")
+                return
             text = (f"Окружение: {settings.venv}\nPython: {settings.python or 'найти / скачать 3.12.10 x64'}\n"
                     f"Режим: {settings.device.upper()}\nКэш: {settings.cache}\nРезультаты: {settings.output}\n\n"
                     "Будут установлены зависимости и выполнена диагностика. Модели не скачиваются.")
@@ -245,7 +315,20 @@ class Launcher:
             except queue.Empty:
                 break
             kind = event["kind"]
-            if kind == "log":
+            if kind == "opened":
+                self.scanning = False
+                if event["folder"] == self.variables["venv"].get().strip():
+                    self.available = event["ready"]
+                    if event["state"]:
+                        self.state = event["state"]
+                        for key, value in asdict(self.state.settings).items():
+                            self.variables[key].set(value)
+                        self.log_path.set("Журнал: " + (self.state.log or str(self.state_path.parent / "logs")))
+                    self.status.set(event["message"])
+                    self.stage.set("Среда готова" if self.available else "Требуется настройка / восстановление")
+                    self.overall["value"] = len(STEPS) if self.available else 0
+                self.refresh()
+            elif kind == "log":
                 self._append(event["message"])
                 if self.state and self.state.log:
                     self.log_path.set("Журнал: " + self.state.log)
@@ -309,6 +392,8 @@ class Launcher:
 
     def launch(self):
         try:
+            if not self._use_selection():
+                return
             process = start_gui(self.state_path, self.state)
             self.status.set("GUI запускается… Ошибки запуска сохраняются в logs/gui.log.")
             self.root.after(2000, lambda: self.status.set(
@@ -317,6 +402,12 @@ class Launcher:
             messagebox.showerror("Не удалось запустить GUI", str(exc), parent=self.root)
 
     def shortcut(self):
+        try:
+            if not self._use_selection():
+                return
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Параметры среды", str(exc), parent=self.root)
+            return
         destination = filedialog.asksaveasfilename(parent=self.root, title="Ярлык основного GUI Diarrhizer",
                                                  initialdir=str(desktop_folder()), initialfile="Diarrhizer.lnk",
                                                  defaultextension=".lnk", filetypes=[("Windows shortcut", "*.lnk")])
@@ -330,6 +421,8 @@ class Launcher:
 
     def open_start_folder(self):
         try:
+            if not self._use_selection():
+                return
             write_start_files(self.state_path, self.state)
             os.startfile(self.state_path.parent)
             self.status.set("Start Diarrhizer.cmd — файл запуска основного GUI с настроенным окружением.")

@@ -82,3 +82,35 @@ def test_missing_ready_environment_disables_launch_and_offers_repair(ui):
     assert "disabled" in ui.launch_button.state()
     assert "disabled" not in ui.repair_button.state()
     assert ui.status.get() == "Environment unavailable"
+
+
+def test_opened_environment_loads_fields_and_enables_shortcut_without_saving(ui):
+    from dataclasses import replace
+
+    previous = ui.state_path.read_bytes()
+    settings = replace(ui.state.settings, venv=ui.state.settings.venv + "-other", output=ui.state.settings.output + "-other")
+    ui.variables["venv"].set(settings.venv)
+    ui.scanning = True
+    ui.events.put({"kind": "opened", "folder": settings.venv, "state": State(settings, ready=True),
+                   "ready": True, "message": "Loaded"})
+    ui.poll()
+    assert ui.variables["output"].get() == settings.output
+    assert "disabled" not in ui.shortcut_button.state()
+    assert ui.state_path.read_bytes() == previous
+
+
+def test_editing_ready_environment_paths_saves_without_starting_installation(ui, monkeypatch):
+    from pathlib import Path
+
+    from diarrhizer_launcher.existing import MARKER
+
+    folder = Path(ui.state.settings.venv)
+    folder.mkdir()
+    ui.state.ready = ui.available = True
+    ui.variables["output"].set(ui.state.settings.output + "-edited")
+    monkeypatch.setattr("diarrhizer_launcher.app.messagebox.askyesno", lambda *_, **__: True)
+    ui.begin()
+    assert ui.worker is None
+    assert State.load(ui.state_path).settings.output.endswith("-edited")
+    assert State.load(folder / MARKER).settings.output.endswith("-edited")
+    assert "disabled" not in ui.shortcut_button.state()

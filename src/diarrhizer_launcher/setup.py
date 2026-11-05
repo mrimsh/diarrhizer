@@ -103,6 +103,7 @@ def check_ready(state: State) -> tuple[bool, str]:
 #   is deleted or cleared. Resume skips successful stages; repair reruns them and keeps packages/data.
 #   Install uses the repository's CPU/cu121 requirements and shared constraints, then a regular install
 #   of the bundled application, so a one-file launcher's temporary extraction is never an editable source.
+#   Successful setup also snapshots parameters in the venv for reopening it by directory.
 # @inputs: settings state, source payload, event callback, explicit existing-environment approval
 # @outputs: ready state, durable log, GUI start files; queue events for progress/errors
 # @sideEffects: Local filesystem writes, hidden child processes, optional verified downloads and pip network
@@ -205,6 +206,8 @@ class SetupWorker:
                     self.state.save(self.state_path)
                 self.state.ready = True
                 self.state.repair = False
+                from .existing import remember_environment
+                remember_environment(self.state_path, self.state)
                 self.state.save(self.state_path)
                 self.log("Готово. Модели не загружались. HF-токен можно указать в настройках основного GUI.")
                 self.emit({"kind": "done"})
