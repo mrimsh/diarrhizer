@@ -1,6 +1,7 @@
 """Convert stage for audio normalization."""
 
 import logging
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -10,6 +11,7 @@ from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat, archive_path
 from diarrhizer.pipeline.cache import config_mismatch, is_stale, source_fingerprint
 from diarrhizer.utils import read_json, write_json_atomic
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance
+from diarrhizer.projects import JOB_FILE, read_config, media_path, validate_storage
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -37,6 +39,8 @@ logger = logging.getLogger(__name__)
 #   Cache compares a full source SHA-256, resolved path and size; legacy jobs without identity
 #   are reconverted once when conversion is requested. A relocated source is a new input.
 #   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
+#   Portable job.json independently controls original/working/archive retention and filename templates.
+#   Originals are copied, never moved; discard removes generated media only after successful completion.
 # @inputs: job.input_path, config.audio_profile, config.audio_format
 # @outputs: artifacts/audio/normalized.wav, meta/run.json, optional artifacts/audio/archive.<ext>, and for
 #   split-stereo also artifacts/audio/normalized_left.wav / normalized_right.wav (+ archive_left/right.<ext>)
@@ -92,7 +96,7 @@ class ConvertStage:
         split = audio_profile == FFmpegAdapter.PROFILE_SPLIT_STEREO
 
         # Build output paths
-        audio_output = job_dir / self.NORMALIZED_WAV
+        audio_output = self._wav_paths(job_dir, split)["audio"]
         meta_output = job_dir / self.META_RUN_JSON
         wav_paths = self._wav_paths(job_dir, split)
         archive_targets = self._archive_targets(job_dir, audio_format, split)
@@ -121,7 +125,8 @@ class ConvertStage:
             wav_action = "reuse"
         elif (
             signal_unchanged
-            and not audio_format.keeps_wav
+            and not (job_dir / JOB_FILE).is_file()
+            and not self._keeps_wav(job_dir, audio_format)
             and not any(p.exists() for p in wav_paths.values())
         ):
             # Retention already dropped the WAV for this very signal - only the
@@ -131,6 +136,12 @@ class ConvertStage:
             wav_action = "convert"
 
         start_time = datetime.now()
+        identity = read_config(job_dir / JOB_FILE)
+        if identity and validate_storage(identity.get("storage"))["original"] != "discard":
+            original = media_path(job_dir, "original", input_path.suffix.lstrip("."))
+            original.parent.mkdir(parents=True, exist_ok=True)
+            if input_path.resolve() != original.resolve():
+                shutil.copy2(input_path, original)
         if wav_action == "convert":
             self.ffmpeg_adapter.convert_to_wav(
                 input_path=str(input_path),
@@ -238,6 +249,15 @@ class ConvertStage:
         job_dir = job.job_dir
         recorded = self._read_recorded_config(job_dir)
         audio_format = self._recorded_format(recorded)
+        identity = read_config(job_dir / JOB_FILE)
+        if identity:
+            modes = validate_storage(identity.get("storage"))
+            split = recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
+            if modes["working"] == "discard":
+                for wav in self._wav_paths(job_dir, split).values():
+                    wav.unlink(missing_ok=True)
+            write_json_atomic(job_dir / JOB_FILE, {**identity, "media_finalized": True})
+            return
         if audio_format.keeps_wav:
             return
         split = recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
@@ -253,15 +273,25 @@ class ConvertStage:
                 )
 
     def _wav_paths(self, job_dir: Path, split: bool) -> dict:
-        paths = {"audio": job_dir / self.NORMALIZED_WAV}
+        portable = (job_dir / JOB_FILE).is_file()
+        paths = {"audio": media_path(job_dir, "working", "wav") if portable else job_dir / self.NORMALIZED_WAV}
         if split:
-            paths["audio_left"] = job_dir / self.NORMALIZED_LEFT_WAV
-            paths["audio_right"] = job_dir / self.NORMALIZED_RIGHT_WAV
+            paths["audio_left"] = media_path(job_dir, "working", "wav", "_left") if portable else job_dir / self.NORMALIZED_LEFT_WAV
+            paths["audio_right"] = media_path(job_dir, "working", "wav", "_right") if portable else job_dir / self.NORMALIZED_RIGHT_WAV
         return paths
+
+    @staticmethod
+    def _keeps_wav(job_dir: Path, audio_format: AudioFormat) -> bool:
+        identity = read_config(job_dir / JOB_FILE)
+        return (validate_storage(identity.get("storage"))["working"] != "discard"
+                if identity else audio_format.keeps_wav)
 
     def _archive_targets(self, job_dir: Path, audio_format: AudioFormat, split: bool) -> dict:
         """{artifact key: (archive path, split-stereo channel or None)}; empty when no archive."""
-        if not audio_format.writes_archive:
+        identity = read_config(job_dir / JOB_FILE)
+        if identity and validate_storage(identity.get("storage"))["archive"] == "discard":
+            return {}
+        if not identity and not audio_format.writes_archive:
             return {}
         ext = audio_format.extension
         targets = {"archive": (archive_path(job_dir, ext), None)}
@@ -276,6 +306,13 @@ class ConvertStage:
         after switching to raw) - reclaiming that space is the point of formats.
         """
         audio_dir = job_dir / self.AUDIO_DIR
+        if (job_dir / JOB_FILE).is_file():
+            for directory in (audio_dir / "working", audio_dir / "archive"):
+                if directory.exists():
+                    for file in directory.iterdir():
+                        if file.is_file() and file not in keep:
+                            file.unlink()
+            return
         for pattern in ("normalized*.wav", "archive*.*"):
             for path in audio_dir.glob(pattern):
                 if path not in keep and path.is_file():
@@ -328,7 +365,7 @@ class ConvertStage:
         audio_format = self._recorded_format(recorded)
         split = recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
 
-        paths = self._wav_paths(job_dir, split) if audio_format.keeps_wav else {}
+        paths = self._wav_paths(job_dir, split) if self._keeps_wav(job_dir, audio_format) else {}
         for key, (path, _) in self._archive_targets(job_dir, audio_format, split).items():
             paths[key] = path
         paths["meta"] = job_dir / self.META_RUN_JSON

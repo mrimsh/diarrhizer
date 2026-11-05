@@ -20,6 +20,8 @@ _held = threading.local()
 # @purpose: Allow one writer per job across CLI/GUI processes without stale PID-lock cleanup
 # @description: A nonblocking OS file lock is released on close/crash. Lock files live beside jobs so
 #   a job can be deleted under its lock. Nested calls on the same thread reuse the lock; other writers fail.
+#   Project jobs also hold their outer project lock (outside the movable tree), making scope renames
+#   mutually exclusive with CLI/GUI writes without open Windows lock files inside a renamed directory.
 # @inputs: job directory
 # @outputs: context manager/decorator for mutating operations
 # @sideEffects: Creates a byte-sized lock file in the parent's hidden lock directory
@@ -28,6 +30,18 @@ _held = threading.local()
 @contextmanager
 def job_write_lock(job_dir):
     root = Path(job_dir).resolve()
+    project = next((p for p in root.parents if (p / ".diarrhizer-project.json").is_file()), None)
+    if project is not None:
+        with job_write_lock(project):
+            with _directory_lock(root):
+                yield
+        return
+    with _directory_lock(root):
+        yield
+
+
+@contextmanager
+def _directory_lock(root):
     key = os.path.normcase(str(root))
     held = getattr(_held, "paths", None)
     if held is None:

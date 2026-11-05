@@ -80,6 +80,52 @@ Normalization via FFmpeg is mandatory.
 
 ## 3. Key Entities
 
+### Project and team library
+
+`diarrhizer/projects.py` is a stdlib-only shared boundary for scope settings, safe Windows names,
+template expansion, explicit participant lists and portable job identities. Projects contain root jobs
+and named team directories. A project's `participants` list is its root-team roster; named teams have
+independent lists. `.diarrhizer-project.json` and `.diarrhizer-team.json` mark scopes, so recursive history
+discovery distinguishes them from jobs. Existing direct-child legacy jobs remain readable.
+
+```
+out/
+  .diarrhizer-library.json        # optional library naming/storage defaults and root roster
+  MySuperProject/
+    .diarrhizer-project.json      # name, default_team, root participants, optional naming/storage defaults
+    <project-root job>/
+    Coders/
+      .diarrhizer-team.json       # name, participants, optional naming/storage overrides
+      MySuperProject-2026_11_05-Coders/
+        job.json                 # fixed title, creation date, template/custom value, source name, storage modes
+        original/<name>.<ext>     # optional copied original
+        audio/working/<name>.wav # generated lossless input; may be removed after success
+        audio/archive/<name>.<ext> # optional converted archive
+        export/<job title>.*     # MD/TXT/SRT/JSON, same recoverable bundle contract
+        meta/, asr/, diar/, merged/, speakers.json, summary/, chat/  # existing artifact contracts
+```
+
+Naming/storage defaults inherit library → project → team. Planning a GUI run is read-only; scope and
+job allocation happens when it starts. `job.json` fixes the job's identity and three independent modes
+(`original`, `template`, `discard`) for original media, working WAV and archive. Directory-local settings
+are edited explicitly. A project may select a default named team; an explicitly empty team selects its root.
+`export_path()`/`media_path()` resolve new paths and preserve legacy `result.*`/normalized/archive paths.
+The conversion stage honors independent retention only for jobs with `job.json`; legacy format keep_wav
+behavior is unchanged. Working files selected for discard survive partial runs and failures; successful
+completion records `media_finalized`, allowing history to distinguish intentional removal from missing conversion.
+
+Scope renames move their directories and preserve historical job titles. All descendant writers acquire
+the outer project OS lock, stored outside the project tree; a rename uses the same lock, avoiding open
+Windows lock files inside the moved directory. GUI pending jobs also block renames before their workers
+start. UI references to moved results are relocated. Retained paths are derived from `job.json` relative
+to the job; retained originals can replace a missing external input on resume. Job deletion verifies that
+the resolved target stays under the selected library root and is a discovered job, never a scope/symlink.
+Writers in one project share an exclusive lock: a concurrent export or roster edit in that project
+returns a busy error while another writer is active; jobs in different projects remain independent.
+
+Speaker assignments (`speakers.json`) remain per-job. Explicit Add/Remove actions edit only the current
+team/root roster. Typing a new speaker name and exporting it never implicitly changes that roster.
+
 ### Job
 
 "One processing run for one file."

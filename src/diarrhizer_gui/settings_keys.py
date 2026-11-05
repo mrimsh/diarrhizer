@@ -12,6 +12,8 @@ CUSTOM_ASR_MODELS = "app/custom_asr_models"
 HISTORY_SORT_COLUMN = "history/sort_column"
 HISTORY_SORT_ORDER = "history/sort_order"
 HISTORY_COLUMN_WIDTHS = "history/column_widths"
+HISTORY_GROUP_PROJECTS = "history/group_projects"
+HISTORY_GROUP_TEAMS = "history/group_teams"
 
 # New Job remembers the parameters of the last started job under this prefix
 # (mode, language, speakers, audio profile, advanced ASR params, glossary).

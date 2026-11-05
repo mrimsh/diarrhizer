@@ -43,6 +43,7 @@ from diarrhizer.diagnostics import models as model_cache
 from diarrhizer.media import MEDIA_EXTENSIONS, expand_media_paths, is_media_file
 from diarrhizer_gui import custom_models, settings_keys
 from diarrhizer_gui.job_queue import QueuedRun
+from diarrhizer_gui.screens.project_panel import ProjectPanel
 
 MEDIA_FILTER = (
     "Медиафайлы (" + " ".join(f"*{ext}" for ext in MEDIA_EXTENSIONS) + ");;Все файлы (*.*)"
@@ -73,7 +74,7 @@ AUDIO_PROFILES = [
 # Russian labels for the built-in storage formats (diarrhizer.audio_formats);
 # user profiles show their own name and description.
 AUDIO_FORMAT_LABELS = {
-    "wav": "WAV 16 кГц моно — без сжатия, только рабочий файл (≈115 МБ/ч)",
+    "wav": "WAV 16 кГц моно — без сжатия (≈115 МБ/ч)",
     "flac": "FLAC — сжатие без потерь (≈50–75 МБ/ч)",
     "mp3-q5": "MP3 VBR -q:a 5 (≈15–20 МБ/ч)",
     "opus-24k": "Opus 24 кбит/с (≈11 МБ/ч)",
@@ -195,7 +196,7 @@ class FileList(QListWidget):
 class NewJobScreen(QWidget):
     runs_requested = Signal(list)  # [QueuedRun]
 
-    def __init__(self, probe=None) -> None:
+    def __init__(self, probe=None, is_busy=None) -> None:
         super().__init__()
         self._settings = QSettings("Diarrhizer", "DiarrhizerGUI")
         self._probe = probe
@@ -264,6 +265,7 @@ class NewJobScreen(QWidget):
         out_row = QHBoxLayout()
         out_row.addWidget(self._out_field, stretch=1)
         out_row.addWidget(out_browse)
+        self._project_panel = ProjectPanel(lambda: self._out_field.text(), is_busy)
 
         self._mode_combo = QComboBox()
         for label, key in MODES:
@@ -315,15 +317,8 @@ class NewJobScreen(QWidget):
         self._audio_formats: dict = {}
         self._audio_format_combo = QComboBox()
         self._audio_format_combo.currentIndexChanged.connect(self._on_audio_format_changed)
-        self._keep_wav_checkbox = QCheckBox("Оставить рабочий WAV")
-        self._keep_wav_checkbox.setToolTip(
-            "Рабочий audio/normalized.wav (без сжатия) нужен только на время обработки.\n"
-            "Если его не оставлять, после завершения задания на диске остаётся\n"
-            "только архивная копия в выбранном формате."
-        )
         audio_format_row = QHBoxLayout()
         audio_format_row.addWidget(self._audio_format_combo, stretch=1)
-        audio_format_row.addWidget(self._keep_wav_checkbox)
         self._audio_format_hint = QLabel()
         self._audio_format_hint.setStyleSheet("color: #7d8394;")
         self._audio_format_hint.setWordWrap(True)
@@ -331,13 +326,14 @@ class NewJobScreen(QWidget):
         form = QFormLayout()
         form.addRow("Файлы:", files_box)
         form.addRow("Папка результатов:", out_row)
+        form.addRow("Организация задания:", self._project_panel)
         form.addRow("Режим:", self._mode_combo)
         form.addRow("Язык:", self._language_combo)
         form.addRow("Спикеры (мин–макс):", speakers_row)
         form.addRow("Модель ASR:", self._model_combo)
         form.addRow("Устройство:", self._device_combo)
         form.addRow("Предобработка звука:", self._audio_profile_combo)
-        form.addRow("Хранение аудио:", audio_format_row)
+        form.addRow("Формат архива:", audio_format_row)
         form.addRow("", self._audio_format_hint)
 
         self._advanced_toggle = QPushButton("▸ Продвинутые параметры")
@@ -440,8 +436,9 @@ class NewJobScreen(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
-        self._restore_last_used()
         self.apply_defaults()
+        self._restore_last_used()
+        self._project_panel.changed.connect(self._validate)
         if self._probe is not None:
             self._probe.finished.connect(self._on_probe_finished)
             if self._probe.results is not None:
@@ -454,6 +451,7 @@ class NewJobScreen(QWidget):
         """Output folder, model and device from the Settings defaults."""
         default_out = str(Path.cwd() / "out")
         self._out_field.setText(self._settings.value(settings_keys.OUT_DIR, default_out))
+        self._project_panel.refresh()
 
         self._reload_asr_models()
         default_model = self._settings.value(settings_keys.DEFAULT_ASR_MODEL, "") or "large-v3"
@@ -499,6 +497,7 @@ class NewJobScreen(QWidget):
         self._reload_asr_models()
         self._reload_audio_formats()
         self._validate()
+        self._project_panel.refresh()
 
     # --- persistence ---------------------------------------------------------
 
@@ -526,6 +525,9 @@ class NewJobScreen(QWidget):
             value(self._key("vad_silence_ms"), defaults["vad_silence_ms"], type=int)
         )
         self._min_turn_spin.setValue(value(self._key("min_turn"), defaults["min_turn"], type=float))
+        self._project_panel.project.setCurrentText(value(self._key("project"), "", type=str))
+        self._project_panel.team.setCurrentText(value(self._key("team"), "", type=str))
+        self._project_panel.custom.setText(value(self._key("custom"), "", type=str))
 
     def _remember(self) -> None:
         set_value = self._settings.setValue
@@ -542,6 +544,9 @@ class NewJobScreen(QWidget):
         set_value(self._key("vad"), self._vad_checkbox.isChecked())
         set_value(self._key("vad_silence_ms"), self._vad_silence_spin.value())
         set_value(self._key("min_turn"), self._min_turn_spin.value())
+        for key in ("project", "team", "custom"):
+            widget = getattr(self._project_panel, key)
+            set_value(self._key(key), widget.text() if key == "custom" else widget.currentText())
 
     def _reset_advanced(self) -> None:
         defaults = ADVANCED_DEFAULTS
@@ -602,10 +607,12 @@ class NewJobScreen(QWidget):
         fmt = self._audio_formats.get(self._audio_format_combo.currentData())
         if fmt is None:
             return
-        # A WAV-only format has nothing else to keep, so the WAV always stays.
-        self._keep_wav_checkbox.setEnabled(fmt.writes_archive)
-        self._keep_wav_checkbox.setChecked(fmt.keeps_wav)
-        self._audio_format_hint.setText(audio_format_hint(fmt))
+        estimate = fmt.estimated_mb_per_hour()
+        size = f" · ≈{estimate:.0f} МБ/ч" if estimate is not None else ""
+        self._audio_format_hint.setText(
+            f"{fmt.codec}, {fmt.sample_rate} Гц, {fmt.channels} кан.{size}. "
+            "Сохранение WAV и архива задаётся отдельно выше."
+        )
         self._audio_format_hint.setStyleSheet("color: #7d8394;")
 
     def _reload_asr_models(self) -> None:
@@ -681,12 +688,18 @@ class NewJobScreen(QWidget):
         if chosen:
             self._out_field.setText(chosen)
             self._settings.setValue(settings_keys.OUT_DIR, chosen)
+            self._project_panel.refresh()
 
     def _selected_files(self) -> list:
         return [self._files.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self._files.count())]
 
     def _validate(self, *_args) -> bool:
         problems = []
+        self._audio_format_combo.setEnabled(self._project_panel.storage["archive"].currentData() != "discard")
+        try:
+            self._project_panel.options()
+        except (OSError, ValueError) as exc:
+            problems.append(str(exc))
         if not self._files.count():
             problems.append("добавьте хотя бы один медиафайл")
         if self._min_speakers.value() > self._max_speakers.value():
@@ -725,6 +738,7 @@ class NewJobScreen(QWidget):
 
         mode = self._mode_combo.currentData()
         common = {
+            **self._project_panel.options(),
             "out_dir": self._out_field.text(),
             "min_speakers": self._min_speakers.value(),
             "max_speakers": self._max_speakers.value(),
@@ -735,7 +749,6 @@ class NewJobScreen(QWidget):
             # Pass the resolved profile, not its name: the job must use what
             # was on screen even if audio_formats.json changes before it runs.
             "audio_format": self._audio_formats[self._audio_format_combo.currentData()],
-            "keep_wav": self._keep_wav_checkbox.isChecked(),
             "asr_compute_type": self._compute_type_combo.currentData(),
             "asr_beam_size": self._beam_size_spin.value(),
             "asr_temperature": self._temperature_spin.value(),

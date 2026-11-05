@@ -25,6 +25,7 @@ from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -53,6 +54,7 @@ from diarrhizer.export.turns import format_timestamp, format_turn_line, group_tu
 from diarrhizer.utils import write_json_atomic
 from diarrhizer.artifacts import job_write_lock
 from diarrhizer.pipeline.settings import read_segments, read_object, read_job_settings
+from diarrhizer.projects import export_path, job_context, participants, change_participant, resolve_input
 from diarrhizer_gui.job_queue import QueuedRun
 from diarrhizer_gui.job_scan import rediarize_plan
 from diarrhizer_gui.screens.new_job_screen import hf_token_present
@@ -224,6 +226,7 @@ class RediarizeDialog(QDialog):
 # @purpose: Display a validated transcript and safely edit speaker names
 # @description: Switching/reloading results and closing the window ask to save/discard/cancel dirty names.
 #   An unopened result has no dirty state; saves hold the per-job OS write lock through re-export.
+#   Team-scoped suggestions are explicit roster entries; typing/saving a speaker alone never enrolls a name.
 #   Invalid transcript JSON is shown as a readable error. Failed writes keep edits available to retry.
 #   Diarization requests only enqueue work; the runner backs up names when the stage actually starts.
 # @inputs: job artifacts and user edits
@@ -271,7 +274,7 @@ class ResultScreen(QWidget):
 
         self._summary_button = QPushButton("Саммаризация…")
         self._summary_button.setToolTip(
-            "Краткое изложение разговора языковой моделью по протоколу (export/result.md): "
+            "Краткое изложение разговора языковой моделью по сохранённому протоколу: "
             "выбор шаблона промпта и провайдера"
         )
         self._summary_button.clicked.connect(self._open_summary)
@@ -316,7 +319,7 @@ class ResultScreen(QWidget):
 
         self._save_button = QPushButton("Сохранить имена")
         self._save_button.setEnabled(False)
-        self._save_button.setToolTip("Записать speakers.json и сразу обновить result.md/.txt/.srt/.json")
+        self._save_button.setToolTip("Сохранить имена и сразу обновить экспорт в MD/TXT/SRT/JSON")
         self._save_button.clicked.connect(self._save_names)
         self._rediarize_button = QPushButton("Пересчитать спикеров…")
         self._rediarize_button.clicked.connect(self._rediarize)
@@ -434,7 +437,7 @@ class ResultScreen(QWidget):
             self._meta.pop("input_path", None)
         self._has_diarization = (job_dir / "diar" / "diarization.json").exists()
         input_path = self._meta.get("input_path")
-        self._title_label.setText(Path(input_path).name if input_path else job_dir.name)
+        self._title_label.setText(job_dir.name if (job_dir / "job.json").is_file() else Path(input_path).name if input_path else job_dir.name)
         self._subtitle_label.setText(self._subtitle())
         self._rediarize_button.setText(
             "Пересчитать спикеров…" if self._has_diarization else "Разделить по спикерам…"
@@ -445,7 +448,7 @@ class ResultScreen(QWidget):
             else "Добавить разделение по спикерам к заданию «Только распознавание»"
         )
         self._rediarize_button.setEnabled((job_dir / "asr" / "transcript.json").exists())
-        self._summary_button.setEnabled((job_dir / "export" / "result.md").exists())
+        self._summary_button.setEnabled(export_path(job_dir, "md").exists())
         self._chat_button.setEnabled(self._summary_button.isEnabled())
 
         self._rebuild_speaker_panel()
@@ -483,6 +486,14 @@ class ResultScreen(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._speaker_fields = {}
+        self._roster_buttons = {}
+        project, team = job_context(self._job_dir)
+        self._roster_dir = team or project or self._job_dir.parent
+        try:
+            known = participants(self._roster_dir)
+        except (OSError, ValueError) as exc:
+            known = []
+            self._set_status(str(exc), "#b23b35")
 
         totals = speaking_time(self._segments)
         total = sum(totals.values()) or 1.0
@@ -500,6 +511,17 @@ class ResultScreen(QWidget):
             field.setPlaceholderText(f"имя для {speaker_id}")
             field.textChanged.connect(self._on_names_edited)
             self._speaker_fields[speaker_id] = field
+            self._set_completer(field, known)
+            names = QPushButton("Имена ▾")
+            menu = QMenu(names)
+            names.setMenu(menu)
+            menu.aboutToShow.connect(lambda m=menu, f=field: self._roster_menu(m, f))
+            add = QPushButton("Добавить в команду")
+            add.setToolTip("Сохранить имя для следующих созвонов этой команды; само назначение имени этого не делает")
+            add.setEnabled(bool(field.text().strip()) and field.text().strip() not in known)
+            add.clicked.connect(lambda checked=False, f=field: self._change_roster(f.text().strip()))
+            field.textChanged.connect(lambda text, b=add: b.setEnabled(bool(text.strip()) and text.strip() not in self._known_names()))
+            self._roster_buttons[speaker_id] = add
 
             seconds = totals.get(speaker_id, 0.0)
             stats = QLabel(f"{format_timestamp(seconds)} · {seconds / total:.0%}")
@@ -510,7 +532,45 @@ class ResultScreen(QWidget):
             self._speakers_grid.addWidget(id_label, row, 1)
             self._speakers_grid.addWidget(field, row, 2)
             self._speakers_grid.addWidget(stats, row, 3)
+            self._speakers_grid.addWidget(names, row, 4)
+            self._speakers_grid.addWidget(add, row, 5)
         self._speakers_grid.setColumnStretch(2, 1)
+
+    @staticmethod
+    def _set_completer(field, known):
+        completer = QCompleter(known, field)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        field.setCompleter(completer)
+
+    def _known_names(self):
+        try:
+            return participants(self._roster_dir)
+        except (OSError, ValueError):
+            return []
+
+    def _roster_menu(self, menu, field):
+        menu.clear()
+        known = self._known_names()
+        for name in known:
+            menu.addAction(name, lambda checked=False, n=name: field.setText(n))
+        if not known:
+            menu.addAction("Сохранённых имён пока нет").setEnabled(False)
+        remove = menu.addMenu("Удалить имя из команды")
+        for name in known:
+            remove.addAction(name, lambda checked=False, n=name: self._change_roster(n, remove=True))
+        remove.setEnabled(bool(known))
+
+    def _change_roster(self, name, remove=False):
+        try:
+            change_participant(self._roster_dir, name, remove=remove)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self._set_status(str(exc), "#b23b35")
+            return
+        known = self._known_names()
+        for sid, field in self._speaker_fields.items():
+            self._set_completer(field, known)
+            self._roster_buttons[sid].setEnabled(bool(field.text().strip()) and field.text().strip() not in known)
 
     def _current_names(self) -> dict:
         return {
@@ -542,7 +602,9 @@ class ResultScreen(QWidget):
         if self._job_dir is None:
             return
         for label, rel_path in OPEN_TARGETS:
-            path = self._job_dir / rel_path
+            path = export_path(self._job_dir, Path(rel_path).suffix) if rel_path.startswith("export/result.") else self._job_dir / rel_path
+            if rel_path.startswith("export/result."):
+                label = label.replace(Path(rel_path).name, path.name)
             action = self._open_menu.addAction(label)
             if rel_path == "asr/transcript.txt":
                 action.setEnabled((self._job_dir / "asr" / "transcript.json").exists())
@@ -556,7 +618,7 @@ class ResultScreen(QWidget):
         action.setEnabled(audio is not None)
         if audio is not None:
             action.triggered.connect(lambda checked=False, p=audio: self._open_file(p))
-        original = Path(self._meta["input_path"]) if self._meta.get("input_path") else None
+        original = resolve_input(self._job_dir, self._meta["input_path"]) if self._meta.get("input_path") else None
         action = self._open_menu.addAction("Исходный файл")
         action.setEnabled(original is not None and original.exists())
         if original is not None:
@@ -605,7 +667,7 @@ class ResultScreen(QWidget):
             return
         self._names = names
         self._update_save_state()
-        self._set_status("Имена сохранены, файлы result.md/.txt/.srt/.json обновлены.", "#2f7d52")
+        self._set_status("Имена сохранены, экспорт в MD/TXT/SRT/JSON обновлён.", "#2f7d52")
 
     def _names_settled(self, what: str) -> bool:
         """The model reads the saved result.md: names typed but not saved would be missing from it. False = stop."""
@@ -743,8 +805,10 @@ class ResultScreen(QWidget):
         if audio is not None:
             return audio
         original = self._meta.get("input_path")
-        if original and Path(original).exists():
-            return Path(original)
+        if original:
+            source = resolve_input(self._job_dir, original)
+            if source.exists():
+                return source
         return None
 
     def _load_audio(self) -> None:

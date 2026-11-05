@@ -245,7 +245,7 @@ class SummaryDialog(QDialog):
             return
         size = f"{self._transcript_chars:,}".replace(",", " ")
         self._target_label.setText(
-            f"Протокол (export/result.md, {size} симв.) будет отправлен {destination(provider)}."
+            f"Сохранённый протокол ({size} симв.) будет отправлен {destination(provider)}."
         )
 
     def _update_note_warning(self) -> None:

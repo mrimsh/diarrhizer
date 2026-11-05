@@ -916,6 +916,109 @@ def test_result_screen_saves_names_and_reexports(qapp, tmp_path):
     assert not screen._player_bar.isVisible()
 
 
+def test_project_job_planning_is_read_only(qapp, isolated, tmp_path):
+    out = tmp_path / "new-library"
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    media = _touch(tmp_path / "call.wav")
+    screen = new_job_screen.NewJobScreen()
+    screen._mode_combo.setCurrentIndex(screen._mode_combo.findData("asr_only"))
+    screen._project_panel.project.setCurrentText("Project")
+    screen._project_panel.team.setCurrentText("Coders")
+    screen._project_panel.template.setText("PROJECT-TEAM-CUSTOM")
+    screen._project_panel.custom.setText("daily")
+    screen.add_paths([media])
+    received = []
+    screen.runs_requested.connect(received.append)
+    screen._emit_run_requested()
+    run = received[0][0]
+    assert run.kwargs["project"] == "Project"
+    assert run.kwargs["team"] == "Coders"
+    assert run.kwargs["naming_template"] == "PROJECT-TEAM-CUSTOM"
+    assert run.kwargs["custom"] == "daily"
+    assert not out.exists()
+
+
+def test_project_busy_includes_unallocated_pending_jobs(tmp_path):
+    from types import SimpleNamespace
+    from diarrhizer_gui.main_window import MainWindow
+    queue = JobQueue()
+    queue.add([QueuedRun("full", {"out_dir": tmp_path, "project": "Project", "team": "Coders"}, "call")])
+    host = SimpleNamespace(_queue=queue)
+    assert MainWindow._is_job_busy(host, tmp_path / "Project")
+    assert MainWindow._is_job_busy(host, tmp_path / "Project" / "Coders")
+    assert not MainWindow._is_job_busy(host, tmp_path / "Project" / "Designers")
+
+
+def test_scope_move_relocates_result_and_finished_queue_paths(qapp, isolated, tmp_path):
+    from types import SimpleNamespace
+    from diarrhizer_gui.main_window import MainWindow
+    queue = JobQueue()
+    old = tmp_path / "Project"
+    new = tmp_path / "Renamed"
+    run = QueuedRun("full", {"job_dir": old / "Coders" / "call", "out_dir": old / "Coders"}, "call", status=DONE)
+    queue.add([run])
+    screen = new_job_screen.NewJobScreen()
+    panel = screen._project_panel
+    host = SimpleNamespace(_queue=queue, _result=SimpleNamespace(_job_dir=run.job_dir, _roster_dir=old / "Coders"),
+                           _monitor=SimpleNamespace(_result_job_dir=run.job_dir),
+                           _new_job=SimpleNamespace(_project_panel=panel))
+    MainWindow._scope_renamed(host, old, new)
+    assert run.job_dir == new / "Coders" / "call"
+    assert host._result._job_dir == run.job_dir
+    assert host._result._roster_dir == new / "Coders"
+    assert host._monitor._result_job_dir == run.job_dir
+
+
+def test_project_history_tree_and_independent_grouping(qapp, isolated, tmp_path):
+    from diarrhizer.projects import reserve_job
+    out = tmp_path / "out"
+    reserve_job(out, Path("a.wav"), project="Project", team="Coders")
+    reserve_job(out, Path("b.wav"), project="Project", team="")
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    screen = history_screen.HistoryScreen()
+    assert screen._group_projects.isChecked() and screen._group_teams.isChecked()
+    assert screen._tree.topLevelItemCount() == 1
+    project = screen._tree.topLevelItem(0)
+    assert project.text(0) == "Project" and project.childCount() == 2
+    screen._group_teams.setChecked(False)
+    assert screen._tree.topLevelItem(0).childCount() == 2
+    assert screen._tree.topLevelItem(0).child(0).data(0, Qt.ItemDataRole.UserRole + 1) == "job"
+    screen._group_projects.setChecked(False)
+    assert screen._table.rowCount() == 2
+    screen._group_teams.setChecked(True)
+    assert screen._tree.topLevelItemCount() == 2
+    screen._filter_field.setText("Coders")
+    assert screen._tree.topLevelItemCount() == 1
+
+
+def test_result_speaker_roster_requires_explicit_add_and_preserves_typed_names(qapp, tmp_path):
+    import shutil
+    from diarrhizer.projects import reserve_job, change_participant, participants
+    source = _finished_job(tmp_path)
+    job = reserve_job(tmp_path / "library", Path("call.wav"), project="Project", team="Coders")
+    shutil.copytree(source, job, dirs_exist_ok=True)
+    change_participant(job.parent, "Alice")
+    screen = result_screen.ResultScreen()
+    screen.load(job)
+    field = screen._speaker_fields["Speaker_00"]
+    assert field.completer().model().stringList() == ["Alice"]
+    from PySide6.QtWidgets import QMenu
+    menu = QMenu()
+    screen._roster_menu(menu, field)
+    menu.actions()[0].trigger()
+    assert field.text() == "Alice"
+    field.setText("Мария")
+    screen._save_names()
+    assert participants(job.parent) == ["Alice"]
+    screen._roster_buttons["Speaker_00"].click()
+    assert participants(job.parent) == ["Alice", "Мария"]
+    screen._roster_menu(menu, field)
+    menu.actions()[-1].menu().actions()[0].trigger()
+    assert participants(job.parent) == ["Мария"]
+    assert field.text() == "Мария"
+    assert field.completer().model().stringList() == ["Мария"]
+
+
 def _pump(ms: int) -> None:
     from PySide6.QtCore import QEventLoop, QTimer
 

@@ -83,6 +83,19 @@ def test_single_input_keeps_the_plain_behaviour(tmp_path, monkeypatch, calls, ca
     assert "Pipeline completed successfully!" in capsys.readouterr().out
 
 
+def test_project_batch_uses_hierarchy_and_template(tmp_path, monkeypatch, calls):
+    a = _touch(tmp_path / "a.wav")
+    b = _touch(tmp_path / "b.wav")
+    out = tmp_path / "out"
+    assert _main(monkeypatch, a, b, "--out", out, "--project", "Project", "--team", "Coders",
+                 "--name-template", "PROJECT-TEAM-CUSTOM", "--name-value", "daily",
+                 "--original-storage", "template", "--working-storage", "discard") == 0
+    assert len(calls) == 2
+    assert {Path(c["job_dir"]).parent for c in calls} == {out / "Project" / "Coders"}
+    assert [Path(c["job_dir"]).name for c in calls] == ["Project-Coders-daily", "Project-Coders-daily_2"]
+    assert all(c["storage"] == {"original": "template", "working": "discard"} for c in calls)
+
+
 def test_job_dir_with_several_inputs_is_rejected(tmp_path, monkeypatch, calls):
     a = _touch(tmp_path / "a.wav")
     b = _touch(tmp_path / "b.wav")

@@ -12,6 +12,7 @@ end_item() / batch_finished().
 """
 
 from pathlib import Path
+from diarrhizer.projects import export_path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -316,7 +317,7 @@ class MonitorScreen(QWidget):
                 self._steps[self._current_stage].set_state("error")
             self._log.appendPlainText("Остановлено пользователем.")
         elif item.status == DONE and item.job_dir is not None:
-            if (item.job_dir / "export" / "result.json").exists():
+            if export_path(item.job_dir, "json").exists():
                 self._result_job_dir = item.job_dir
 
     def batch_finished(self, items: list) -> None:
@@ -347,7 +348,7 @@ class MonitorScreen(QWidget):
             self._set_status("Пакет завершён: " + ", ".join(parts) + ".", color)
 
         last_done = next((i for i in reversed(done) if i.job_dir is not None), None)
-        if last_done is not None and (last_done.job_dir / "export" / "result.json").exists():
+        if last_done is not None and export_path(last_done.job_dir, "json").exists():
             self._result_job_dir = last_done.job_dir
         self._view_result_button.setVisible(self._result_job_dir is not None)
 

@@ -208,6 +208,54 @@ python -m diarrhizer_gui.app
 Processing runs in a separate process: the window stays responsive, a crash inside CUDA/cuDNN
 cannot take the GUI down, and memory (including VRAM) is fully released after every job.
 
+### Projects, teams and source files
+
+**Новое задание** lets you choose an existing project/team or type a new name. Leave the team empty
+to put the job directly in the project; leave both empty for the library root. Scope folders are created
+when processing starts. **Параметры…** explicitly creates/edits a scope, its default naming/storage
+settings and known participants. A project can select a default team for future jobs.
+
+The default job name is `PROJECT-YYYY_MM_DD-TEAM`, for example
+`out/MySuperProject/Coders/MySuperProject-2026_11_05-Coders/`. Templates support `PROJECT`, `TEAM`,
+`YYYY_MM_DD`, `CUSTOM` (the **Своё значение** field), and `SOURCE` (source filename without extension),
+or `{{project}}`, `{{team}}`, `{{date}}`, `{{custom}}`, `{{source}}`. Empty optional parts omit extra
+separators; repeated names receive `_2`, `_3`, etc. The date is the local date when the job starts.
+New GUI jobs and CLI jobs using project/naming/storage options export `<job name>.md/.txt/.srt/.json`.
+Older jobs keep their existing `result.*` files and remain readable.
+
+**История заданий** defaults to a project/team tree. **По проектам** and **По командам** independently
+toggle grouping; disabling both shows the flat table. Select a group and use **Параметры группы…**
+to edit its settings, rename its folder or manage participants. Renaming moves the project/team folder
+with all its contents; job titles and filenames keep the names assigned when they were created.
+Running/queued jobs prevent renaming their scope.
+
+On **Результат**, speaker fields autocomplete from the current team's known participants; **Имена ▾**
+also lists them and lets you delete each saved name. **Добавить в команду** explicitly saves a new name
+for later calls. Simply typing/saving a speaker name only updates the current job. Project-root jobs
+use the project's root participant list; jobs outside projects use the library root list.
+
+Original media, working WAV and converted archive each have their own retention selector:
+**С исходным именем**, **По шаблону задания**, **Не сохранять**. Renamed media uses the job title;
+generated WAV/archive files preserve the source stem with the appropriate output extension in original-name
+mode. They live in separate `original/`, `audio/working/`, `audio/archive/` folders, avoiding collisions.
+The archive codec is chosen separately, including a WAV archive when that profile is selected.
+The user's source is always left in place. Discarded working files remain available until successful
+completion (also when processing was stopped early with `--to-stage`). With generated audio discarded,
+rerunning ASR/diarization requires conversion from the source again; export and summaries still work.
+Playback uses a retained or external original when available, otherwise it is unavailable.
+If the external source disappears, a retained original can be used when restarting conversion.
+
+Settings live beside the data: `.diarrhizer-library.json` at the library root,
+`.diarrhizer-project.json` in each project, `.diarrhizer-team.json` in each named team. Naming/storage
+defaults inherit from library to project to team; explicit job choices win and are captured in `job.json`.
+
+```powershell
+python -m diarrhizer run "D:\records\call.mp4" --out ".\out" --project "MySuperProject" --team "Coders" --name-template "PROJECT-YYYY_MM_DD-TEAM-CUSTOM" --name-value "daily" --original-storage template --working-storage discard --archive-storage template --audio-format flac
+```
+
+Omit `--team` to use a project's default team; pass `--team=` for its root. Legacy CLI calls with
+none of the new options retain the previous timestamp naming and audio-profile retention behavior.
+
 ---
 
 ## Quick Start

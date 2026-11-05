@@ -275,6 +275,14 @@ def main() -> int:
         "run",
         help="Process a media file"
     )
+    run_parser.add_argument("--project", default=None, help="Existing/new project under --out")
+    run_parser.add_argument("--team", default=None, help="Existing/new team in the project; empty = project root")
+    run_parser.add_argument("--name-template", default=None,
+                            help="Job/file name template (default for projects: PROJECT-YYYY_MM_DD-TEAM); also CUSTOM/SOURCE")
+    run_parser.add_argument("--name-value", default=None, help="Text substituted for CUSTOM")
+    for kind in ("original", "working", "archive"):
+        run_parser.add_argument(f"--{kind}-storage", choices=("original", "template", "discard"), default=None,
+                                help=f"{kind} file retention: original name, template name, or discard")
     run_parser.add_argument(
         "input",
         nargs="*",
@@ -576,6 +584,7 @@ def main() -> int:
         #   batch: one job per file, each in its own new_job_dir(), a failed file is reported and the
         #   batch moves on, and a summary is printed at the end.
         #   Resume restores saved settings/stages/names; only explicitly supplied flags override them.
+        #   Optional projects/teams share portable directory-local defaults, naming and independent media retention with GUI.
         # @inputs: args.input, args.out, args.job_dir, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.from_stage, args.to_stage, args.speakers, args.min_turn_duration, ASR params, audio_profile, audio_format, keep_wav
         # @outputs: Artifacts in out/ directory
         # @sideEffects: Creates job directories, writes artifacts to disk
@@ -656,10 +665,22 @@ def main() -> int:
             print(f"[CLI] Loaded initial prompt: {len(initial_prompt)} chars")
         # [SEMANTIC-END] CONFIG:INITIAL_PROMPT
 
+        library_options = {key: value for key, value in {
+            "project": args.project, "team": args.team, "naming_template": args.name_template,
+            "custom": args.name_value,
+        }.items() if value is not None}
+        storage = {kind: getattr(args, f"{kind}_storage") for kind in ("original", "working", "archive")
+                   if getattr(args, f"{kind}_storage") is not None}
+        if storage:
+            library_options["storage"] = storage
+
         def _run(input_path, job_dir) -> dict:
             from diarrhizer.pipeline.settings import build_stages, recorded_stage_names
 
             options = {}
+            if args.job_dir and library_options:
+                raise ValueError("Project/name/storage options apply to new jobs; resume preserves job.json")
+            options.update(library_options)
             for key in run_option_names:
                 value = getattr(args, key)
                 if value is not_given:
@@ -705,7 +726,7 @@ def main() -> int:
         for index, input_path in enumerate(inputs, 1):
             print(f"\n[{index}/{len(inputs)}] {input_path}")
             try:
-                result = _run(input_path, new_job_dir(args.out, input_path))
+                result = _run(input_path, new_job_dir(args.out, input_path, **library_options))
                 summary.append((True, input_path, result["job_dir"]))
             except Exception as e:
                 print(f"Error: {_error_text(e)}", file=sys.stderr)

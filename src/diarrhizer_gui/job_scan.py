@@ -24,6 +24,7 @@ from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.artifacts import LOCK_DIR, job_write_lock, bundle_valid
 from diarrhizer.pipeline.runner import STAGE_SETTINGS
 from diarrhizer.pipeline.settings import RECORDED_RUN_KEYS, read_job_settings, set_aside_speaker_names
+from diarrhizer.projects import JOB_FILE, iter_job_dirs, job_context, read_config, export_path, resolve_input
 
 # (stage name, artifact path relative to job_dir) - mirrors the layout
 # documented in docs/architecture.md, not the stage classes themselves.
@@ -71,6 +72,8 @@ class JobSummary:
     mode: str = "full"
     resumable: bool = False
     input_path: Optional[str] = None
+    project: str = ""
+    team: str = ""
 
     @property
     def complete(self) -> bool:
@@ -113,6 +116,7 @@ def _read_meta(job_dir: Path) -> dict:
 # @purpose: Discover job state and delete an explicitly selected job without racing its writer
 # @description: Main artifacts define completed stages; export manifests reject incomplete bundles.
 #   Legacy exports remain readable. Hidden OS lock files are not jobs; deletion acquires the job lock.
+#   Scope marker files drive recursive project/team discovery; only actual job folders can be deleted.
 # @inputs: output root and job directories
 # @outputs: stage state, history rows or removal of a selected job
 # @sideEffects: Reads artifacts; delete_job removes the selected directory
@@ -123,8 +127,8 @@ def stage_done(job_dir: Path) -> dict:
     done = {name: (job_dir / rel_path).exists() for name, rel_path in STAGE_ARTIFACTS}
     # An audio format with keep_wav=false drops normalized.wav once the job
     # completes and keeps audio/archive.<ext> instead - still converted.
-    done["convert"] = find_job_audio(job_dir) is not None
-    done["export"] = done["export"] and bundle_valid(job_dir / "export", "manifest.json")
+    done["convert"] = find_job_audio(job_dir) is not None or bool(read_config(job_dir / JOB_FILE).get("media_finalized"))
+    done["export"] = export_path(job_dir, "md").is_file() and bundle_valid(job_dir / "export", "manifest.json")
     return done
 
 
@@ -213,7 +217,10 @@ def delete_job(out_dir: Path, job_dir: Path) -> None:
     Refuses anything that is not a direct child directory of out_dir, so a
     stale or tampered row can never delete outside the results root.
     """
-    if job_dir.parent.resolve() != out_dir.resolve() or not job_dir.is_dir():
+    root = out_dir.resolve()
+    target = job_dir.resolve()
+    if (target == root or not target.is_relative_to(root)
+            or job_dir not in list(iter_job_dirs(out_dir)) or not job_dir.is_dir()):
         raise ValueError(f"Not a job folder under {out_dir}: {job_dir}")
     with job_write_lock(job_dir):
         shutil.rmtree(job_dir)
@@ -230,7 +237,7 @@ def scan_jobs(out_dir: Path) -> list:
         return []
 
     summaries = []
-    for job_dir in out_dir.iterdir():
+    for job_dir in iter_job_dirs(out_dir):
         if job_dir.name == LOCK_DIR or not job_dir.is_dir():
             continue
 
@@ -244,7 +251,12 @@ def scan_jobs(out_dir: Path) -> list:
             input_path = None
         input_name = Path(input_path).name if input_path else "—"
 
-        date = _parse_job_date(job_dir.name, job_dir)
+        identity = read_config(job_dir / JOB_FILE)
+        project_dir, team_dir = job_context(job_dir)
+        try:
+            date = datetime.fromisoformat(identity["created_at"]) if identity else _parse_job_date(job_dir.name, job_dir)
+        except (KeyError, ValueError, TypeError):
+            date = _parse_job_date(job_dir.name, job_dir)
 
         min_speakers = pipeline_config.get("min_speakers")
         max_speakers = pipeline_config.get("max_speakers")
@@ -254,7 +266,7 @@ def scan_jobs(out_dir: Path) -> list:
             else "—"
         )
 
-        result_path = job_dir / "export" / "result.md"
+        result_path = export_path(job_dir, "md")
         complete = result_path.exists() and bundle_valid(job_dir / "export", "manifest.json")
 
         summaries.append(
@@ -274,6 +286,8 @@ def scan_jobs(out_dir: Path) -> list:
                 # there is nothing to resume from; start a new job instead.
                 resumable=not complete and bool(input_path),
                 input_path=input_path or None,
+                project=project_dir.name if project_dir else "",
+                team=team_dir.name if team_dir else "",
             )
         )
 
@@ -285,8 +299,10 @@ def _recorded_run_kwargs(job_dir: Path, meta: dict) -> dict:
     """run_pipeline() kwargs that reproduce the job's recorded settings."""
     if not isinstance(meta.get("input_path"), str):
         raise ValueError("meta/run.json: input_path must be text")
+    source = resolve_input(job_dir, meta["input_path"])
+    input_path = meta["input_path"] if source == Path(meta["input_path"]) else str(source)
     return {"job_dir": job_dir, "out_dir": job_dir.parent,
-            "input_path": meta.get("input_path"), **read_job_settings(job_dir, meta)}
+            "input_path": input_path, **read_job_settings(job_dir, meta)}
 
 
 

@@ -122,6 +122,66 @@ def _audio_files(job_dir: Path) -> list:
 ALL_CACHED = {s: "cached" for s in ("convert", "transcribe", "diarize", "merge", "export")}
 
 
+@pytest.mark.parametrize("modes", [
+    {"original": "original", "working": "original", "archive": "original"},
+    {"original": "template", "working": "template", "archive": "template"},
+    {"original": "discard", "working": "discard", "archive": "discard"},
+    {"original": "template", "working": "discard", "archive": "original"},
+    {"original": "discard", "working": "template", "archive": "discard"},
+    {"original": "original", "working": "discard", "archive": "template"},
+])
+def test_project_job_storage_and_named_exports(input_file, tmp_path, modes):
+    from diarrhizer.projects import JOB_FILE, export_path, media_path, read_config
+    from diarrhizer.summary.service import read_transcript
+    from diarrhizer_gui.job_scan import scan_jobs
+
+    states, job = _run(input_file, tmp_path, project="Project", team="Coders", storage=modes,
+                       audio_format="flac", naming_template="PROJECT-YYYY_MM_DD-TEAM-CUSTOM", custom="daily")
+    assert job.parent == tmp_path / "out" / "Project" / "Coders"
+    assert all(status == "completed" for status in states.values())
+    assert input_file.exists()  # User's original is never removed.
+    for kind, ext in (("original", "mp4"), ("working", "wav"), ("archive", "flac")):
+        target = media_path(job, kind, ext)
+        assert target.exists() == (modes[kind] != "discard")
+        if modes[kind] == "template":
+            assert target.stem == job.name
+        elif modes[kind] == "original":
+            assert target.stem == "call"
+    assert export_path(job, "md").exists()
+    assert not (job / "export" / "result.md").exists()
+    assert "hello world" in read_transcript(job)
+    assert scan_jobs(tmp_path / "out")[0].complete
+    assert read_config(job / JOB_FILE)["media_finalized"] is True
+    # Re-export restores the same identity and speaker settings without the original audio.
+    run_pipeline(job_dir=job, out_dir=tmp_path / "out", stages=[ExportStage()], speakers={"Speaker_00": "Alice"})
+    assert "Alice" in read_transcript(job)
+
+
+def test_project_resume_after_scope_move_and_external_source_removal(input_file, tmp_path):
+    from diarrhizer.projects import media_path, rename_scope
+    from diarrhizer_gui.job_scan import restart_plan
+
+    _, job = _run(input_file, tmp_path, project="Project", team="Coders",
+                  storage={"original": "template", "working": "discard", "archive": "template"}, audio_format="flac")
+    input_file.unlink()
+    renamed = rename_scope(job.parent.parent, "Renamed")
+    moved = renamed / "Coders" / job.name
+    _, kwargs = restart_plan(moved, "convert")
+    assert Path(kwargs["input_path"]) == media_path(moved, "original", "mp4")
+    states, _ = _run(None, tmp_path, job_dir=moved, force_stage="convert")
+    assert states["convert"] == "completed"
+
+
+def test_project_split_stereo_rerun_uses_main_archive(input_file, tmp_path):
+    from diarrhizer.audio_formats import find_job_audio
+    from diarrhizer.projects import media_path
+    _, job = _run(input_file, tmp_path, project="Project", team="Coders", audio_profile="split-stereo",
+                  storage={"working": "discard", "archive": "template"}, audio_format="flac")
+    assert find_job_audio(job) == media_path(job, "archive", "flac")
+    run_pipeline(job_dir=job, out_dir=tmp_path / "out", stages=[TranscribeStage()], force_stage="transcribe")
+    assert DECODED[-1] == ("transcribe", media_path(job, "archive", "flac").name)
+
+
 def test_default_format_keeps_only_the_working_wav(input_file, tmp_path):
     statuses, job_dir = _run(input_file, tmp_path)
 

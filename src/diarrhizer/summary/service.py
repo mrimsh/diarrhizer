@@ -20,6 +20,7 @@ from diarrhizer.summary.provider_info import Limits
 from diarrhizer.summary.providers import KIND_CODEX_CLI, Provider
 from diarrhizer.summary.templates import PromptTemplate
 from diarrhizer.utils import read_json
+from diarrhizer.projects import export_path
 from diarrhizer.artifacts import SCHEMA_VERSION, locked_job, digest, provenance, write_bundle, recover_bundles, bundle_valid
 
 logger = logging.getLogger("diarrhizer.summary")
@@ -56,7 +57,7 @@ def read_transcript(job_dir: str | Path) -> str:
         FileNotFoundError: the job has not been exported yet
         ValueError: the transcript is empty
     """
-    path = Path(job_dir) / TRANSCRIPT_PATH
+    path = export_path(Path(job_dir), "md")
     if not bundle_valid(Path(job_dir) / "export", "manifest.json"):
         raise ValueError("Export is incomplete or changed; run --from-stage export to recover it before sending")
     if not path.exists():
@@ -115,6 +116,7 @@ def preview_prompt(
 # [SEMANTIC-BEGIN] SUMMARY:JOB
 # @purpose: Produce and store a summary of one job's transcript with a chosen template and provider
 # @description: Reads export/result.md as it is (speaker names included), builds the request from the template's
+#   Portable jobs read their job-title-named Markdown export through job.json instead.
 #   prompt (SUMMARY:WILDCARDS: {{transcript}}, {{note}} and the job's facts are filled in where the template
 #   puts them; the transcript is appended when it does not; an optional note of the user for this run goes
 #   in the same way, with a warning - logged and returned - when the template has no {{note}}), asks the
@@ -183,7 +185,7 @@ def summarize_job(
         "user_fields": {"note": (note or "").strip()},
         "wildcards_used": rendered.wildcards_used,
         "provider": {"name": provider.name, "kind": provider.kind, "model": provider.model},
-        "source": TRANSCRIPT_PATH,
+        "source": str(export_path(Path(job_dir), "md").relative_to(job_dir)).replace("\\", "/"),
         "transcript_chars": len(transcript),
         "context_budget": budget.to_dict(),
         "duration_seconds": round(duration, 1),

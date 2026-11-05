@@ -268,7 +268,7 @@ class ChatDialog(QDialog):
             return
         tokens = chat.estimate_tokens(self._transcript_chars)
         lines = [
-            f"Контекст: транскрипт задания «{self._job_title}» (export/result.md): "
+            f"Контекст: сохранённый транскрипт задания «{self._job_title}»: "
             f"{chat_text.number(self._transcript_chars)} симв., ≈ {chat_text.number(tokens)} токенов."
         ]
         if provider is not None:

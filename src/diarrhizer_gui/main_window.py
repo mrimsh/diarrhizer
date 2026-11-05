@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from diarrhizer_gui.environment import EnvironmentProbe
-from diarrhizer_gui.job_queue import CANCELLED, DONE, FAILED, RUNNING, JobQueue
+from diarrhizer_gui.job_queue import CANCELLED, DONE, FAILED, PENDING, RUNNING, JobQueue
 from diarrhizer_gui.pipeline_worker import PipelineWorker
 from diarrhizer_gui.screens.doctor_screen import DoctorScreen
 from diarrhizer_gui.screens.history_screen import HistoryScreen
@@ -59,6 +59,7 @@ APP_TITLE = "Diarrhizer"
 #   (GUI:ENVIRONMENT_PROBE); the Doctor item shows a warning badge when a required check failed.
 #   Result changes are guarded before replacing/closing its editor. Queue allocation failures
 #   become failed items; planning a restart has no filesystem side effects.
+#   Project/team settings are passed into allocation; queued descendants prevent scope renames.
 # @inputs: user actions on the screens
 # @outputs: pipeline jobs, screen navigation
 # @sideEffects: Spawns/kills child processes; files dropped on the window are added to New Job
@@ -122,8 +123,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._probe.run)
 
     def _build_screens(self) -> None:
-        self._new_job = NewJobScreen(self._probe)
+        self._new_job = NewJobScreen(self._probe, is_busy=self._is_job_busy)
         self._new_job.runs_requested.connect(self.enqueue)
+        self._new_job._project_panel.scope_renamed.connect(self._scope_renamed)
 
         self._monitor = MonitorScreen()
         self._monitor.back_requested.connect(self._go_to_history)
@@ -135,6 +137,7 @@ class MainWindow(QMainWindow):
         self._history = HistoryScreen(is_busy=self._is_job_busy, probe=self._probe)
         self._history.view_result_requested.connect(self._show_result)
         self._history.runs_requested.connect(self.enqueue)
+        self._history.scope_renamed.connect(self._scope_renamed)
 
         self._result = ResultScreen()
         self._result.back_requested.connect(self._go_to_history)
@@ -213,10 +216,43 @@ class MainWindow(QMainWindow):
 
     # --- queue ---------------------------------------------------------------
 
+    def _scope_renamed(self, previous: Path, current: Path) -> None:
+        def relocated(value):
+            if value is not None and Path(value).is_relative_to(previous):
+                return current / Path(value).relative_to(previous)
+            return value
+        for item in self._queue.items:
+            item.job_dir = relocated(item.job_dir)
+            for key in ("job_dir", "out_dir"):
+                if key in item.kwargs:
+                    item.kwargs[key] = relocated(item.kwargs[key])
+        result = self._result
+        result._job_dir = relocated(result._job_dir)
+        if hasattr(result, "_roster_dir"):
+            result._roster_dir = relocated(result._roster_dir)
+        self._monitor._result_job_dir = relocated(self._monitor._result_job_dir)
+        panel = self._new_job._project_panel
+        from diarrhizer.projects import scope_path
+        try:
+            selected = scope_path(panel.root(), panel.project.currentText().strip(), panel.team.currentText().strip())
+        except ValueError:
+            return  # An unrelated, unfinished new-job form may contain an invalid name.
+        if selected.is_relative_to(previous):
+            moved = relocated(selected).relative_to(panel.root()).parts
+            panel.project.setCurrentText(moved[0])
+            panel.team.setCurrentText(moved[1] if len(moved) > 1 else "")
+
     def _is_job_busy(self, job_dir: Path) -> bool:
         try:
-            return job_dir.resolve() in self._queue.busy_job_dirs()
-        except OSError:
+            target = job_dir.resolve()
+            if any(p == target or p.is_relative_to(target) for p in self._queue.busy_job_dirs()):
+                return True
+            from diarrhizer.projects import scope_path
+            return any(item.status in (PENDING, RUNNING) and not item.job_dir
+                       and (scope_path(Path(item.kwargs["out_dir"]), item.kwargs.get("project", ""),
+                                                item.kwargs.get("team") or "").resolve()).is_relative_to(target)
+                       for item in self._queue.items)
+        except (OSError, ValueError):
             return False
 
     def enqueue(self, runs: list) -> None:
@@ -253,7 +289,7 @@ class MainWindow(QMainWindow):
         item.status = RUNNING
         try:
             self._allocate_job(item)
-        except OSError as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             self._end_item(FAILED, f"Не удалось создать задание: {exc}")
             return
 
@@ -282,8 +318,12 @@ class MainWindow(QMainWindow):
             # Light import (no torch): the runner module itself only needs the stdlib.
             from diarrhizer.pipeline.runner import new_job_dir
 
-            item.kwargs["job_dir"] = new_job_dir(item.kwargs["out_dir"], item.kwargs["input_path"])
+            options = {k: item.kwargs[k] for k in ("project", "team", "naming_template", "custom", "storage")
+                       if k in item.kwargs}
+            item.kwargs["job_dir"] = new_job_dir(item.kwargs["out_dir"], item.kwargs["input_path"], **options)
             item.job_dir = Path(item.kwargs["job_dir"])
+            if options:
+                item.label = item.job_dir.name
 
     def _on_progress(self, stage: str, message: str) -> None:
         started = self._monitor.on_progress(stage, message)

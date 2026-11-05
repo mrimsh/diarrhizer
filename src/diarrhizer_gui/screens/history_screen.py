@@ -18,6 +18,7 @@ from typing import Callable, Optional
 from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
@@ -29,6 +30,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -52,6 +55,8 @@ from diarrhizer_gui.job_scan import (
 )
 from diarrhizer_gui.screens.new_job_screen import hf_token_present
 from diarrhizer_gui.screens.restart_dialog import RestartDialog
+from diarrhizer_gui.screens.project_panel import ScopeDialog
+from diarrhizer.projects import job_context
 
 STAGE_LABELS = [name[0].upper() for name, _ in STAGE_ARTIFACTS]  # C T D M E
 STAGE_TITLES = {
@@ -206,6 +211,8 @@ def sort_jobs(jobs: list, column: int, descending: bool) -> list:
 #   with the rows; a click on a sortable header (all but "Действия") re-sorts self._jobs in Python and
 #   rebuilds the table. Default order: date, newest first. Empty values go last in both directions.
 #   The sort column/direction and the widths the user dragged are kept in QSettings
+#   Default view is a project/team tree; independent toggles hide either grouping or show the flat table.
+#   Group settings edit the on-disk scope, including directory renames guarded against queued writers.
 #   (settings_keys.HISTORY_*); values that do not fit the table are ignored. "Файл" fills the free width
 #   until the user sets its width. The selected job stays selected across refresh() by job_id.
 # @inputs: job folders under the results folder; header clicks; header drags
@@ -216,6 +223,7 @@ class HistoryScreen(QWidget):
     COLUMNS = ["Дата", "Файл", "Язык", "Спикеры", "Модель", "Этапы", "Действия"]
     view_result_requested = Signal(Path)
     runs_requested = Signal(list)  # [QueuedRun]
+    scope_renamed = Signal(Path, Path)
 
     def __init__(self, is_busy: Optional[Callable[[Path], bool]] = None, probe=None) -> None:
         super().__init__()
@@ -251,7 +259,7 @@ class HistoryScreen(QWidget):
         path_row.addWidget(refresh_button)
 
         self._filter_field = QLineEdit()
-        self._filter_field.setPlaceholderText("Фильтр по имени файла…")
+        self._filter_field.setPlaceholderText("Поиск по заданию, файлу, проекту или команде…")
         self._filter_field.setClearButtonEnabled(True)
         self._filter_field.textChanged.connect(self._apply_filter)
         self._summary_label = QLabel()
@@ -259,6 +267,26 @@ class HistoryScreen(QWidget):
         filter_row = QHBoxLayout()
         filter_row.addWidget(self._filter_field, stretch=1)
         filter_row.addWidget(self._summary_label)
+        self._group_projects = QCheckBox("По проектам")
+        self._group_teams = QCheckBox("По командам")
+        for box, key in ((self._group_projects, settings_keys.HISTORY_GROUP_PROJECTS),
+                         (self._group_teams, settings_keys.HISTORY_GROUP_TEAMS)):
+            box.setChecked(self._settings.value(key, True, type=bool))
+            box.toggled.connect(self._grouping_changed)
+            filter_row.addWidget(box)
+        edit_group = QPushButton("Параметры группы…")
+        edit_group.clicked.connect(self._edit_group)
+        filter_row.addWidget(edit_group)
+        self._tree = QTreeWidget()
+        self._tree.setColumnCount(len(self.COLUMNS))
+        self._tree.setHeaderLabels(self.COLUMNS)
+        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.itemDoubleClicked.connect(self._tree_double_click)
+        self._tree.header().sectionClicked.connect(self._on_header_clicked)
+        self._tree.header().setSectionsClickable(True)
+        self._tree.setColumnWidth(0, 210)
+        self._tree.setColumnWidth(1, 270)
 
         self._table = QTableWidget(0, len(self.COLUMNS))
         self._table.setHorizontalHeaderLabels(self.COLUMNS)
@@ -296,6 +324,7 @@ class HistoryScreen(QWidget):
         layout.addWidget(title)
         layout.addLayout(path_row)
         layout.addLayout(filter_row)
+        layout.addWidget(self._tree, stretch=1)
         layout.addWidget(self._table, stretch=1)
         layout.addWidget(self._empty_label)
 
@@ -394,7 +423,7 @@ class HistoryScreen(QWidget):
     def refresh(self) -> None:
         try:
             self._scanned = scan_jobs(Path(self._path_field.text()))
-        except OSError as exc:
+        except (OSError, ValueError, UnicodeError) as exc:
             self._summary_label.setText(f"Не удалось прочитать историю: {exc}")
             return
         self._populate(self._scanned)
@@ -407,17 +436,19 @@ class HistoryScreen(QWidget):
 
         self._table.setRowCount(0)
         self._empty_label.setVisible(not jobs)
-        self._table.setVisible(bool(jobs))
+        self._table.setVisible(bool(jobs) and not self._grouped())
+        self._tree.setVisible(bool(jobs) and self._grouped())
 
         for row, job in enumerate(jobs):
             busy = self._is_busy(job.job_dir)
             self._table.insertRow(row)
             date_item = QTableWidgetItem(job.date_label)
             self._table.setItem(row, 0, date_item)
-            name_item = QTableWidgetItem(job.input_name)
+            display_name = job.job_id if (job.job_dir / "job.json").is_file() else job.input_name
+            name_item = QTableWidgetItem(display_name)
             name_item.setToolTip(str(job.job_dir))
             if not job.complete:
-                name_item.setText(f"{job.input_name}  — {'выполняется' if busy else 'не завершено'}")
+                name_item.setText(f"{display_name}  — {'выполняется' if busy else 'не завершено'}")
             self._table.setItem(row, 1, name_item)
             self._table.setItem(row, 2, QTableWidgetItem(job.language))
             self._table.setItem(row, 3, QTableWidgetItem(job.speakers))
@@ -434,21 +465,21 @@ class HistoryScreen(QWidget):
         self._apply_filter()
         if selected is not None:
             for row, job in enumerate(jobs):
-                if job.job_id == selected:
+                if str(job.job_dir) == selected:
                     self._table.selectRow(row)
                     break
 
     def _selected_job_id(self) -> Optional[str]:
         rows = self._table.selectionModel().selectedRows()
         if rows and 0 <= rows[0].row() < len(self._jobs):
-            return self._jobs[rows[0].row()].job_id
+            return str(self._jobs[rows[0].row()].job_dir)
         return None
 
     def _apply_filter(self) -> None:
         needle = self._filter_field.text().strip().lower()
         shown = 0
         for row, job in enumerate(self._jobs):
-            hidden = bool(needle) and needle not in job.input_name.lower() and needle not in job.job_id.lower()
+            hidden = bool(needle) and needle not in " ".join((job.input_name, job.job_id, job.project, job.team)).lower()
             self._table.setRowHidden(row, hidden)
             shown += not hidden
         unfinished = sum(1 for job in self._jobs if not job.complete)
@@ -456,6 +487,85 @@ class HistoryScreen(QWidget):
         if unfinished:
             text += f", не завершено {unfinished}"
         self._summary_label.setText(text)
+        self._populate_tree()
+
+    def _grouped(self):
+        return self._group_projects.isChecked() or self._group_teams.isChecked()
+
+    def _grouping_changed(self):
+        self._settings.setValue(settings_keys.HISTORY_GROUP_PROJECTS, self._group_projects.isChecked())
+        self._settings.setValue(settings_keys.HISTORY_GROUP_TEAMS, self._group_teams.isChecked())
+        self._populate(self._scanned)
+
+    def _populate_tree(self):
+        selected = self._tree.currentItem()
+        selected_path = selected.data(0, Qt.ItemDataRole.UserRole) if selected else None
+        collapsed = set()
+        def remember(item):
+            if item.childCount() and not item.isExpanded():
+                collapsed.add(item.data(0, Qt.ItemDataRole.UserRole))
+            for i in range(item.childCount()):
+                remember(item.child(i))
+        for i in range(self._tree.topLevelItemCount()):
+            remember(self._tree.topLevelItem(i))
+        self._tree.clear()
+        if not self._grouped():
+            return
+        groups = {}
+        needle = self._filter_field.text().strip().casefold()
+        for job in self._jobs:
+            if needle and needle not in " ".join((job.input_name, job.job_id, job.project, job.team)).casefold():
+                continue
+            parent = self._tree.invisibleRootItem()
+            project_dir, team_dir = job_context(job.job_dir)
+            parts = []
+            if self._group_projects.isChecked():
+                parts.append(((job.project,), job.project or "Без проекта", project_dir))
+            if self._group_teams.isChecked():
+                parts.append(((job.project, job.team), job.team or "Без команды", team_dir or project_dir))
+            for key, label, directory in parts:
+                if key not in groups:
+                    group = QTreeWidgetItem([label])
+                    group.setData(0, Qt.ItemDataRole.UserRole, str(directory) if directory else repr(key))
+                    group.setData(0, Qt.ItemDataRole.UserRole + 1, "scope" if directory else "empty")
+                    parent.addChild(group)
+                    group.setExpanded(str(directory) not in collapsed)
+                    groups[key] = group
+                parent = groups[key]
+            leaf = QTreeWidgetItem([job.date_label, job.job_id, job.language, job.speakers, job.asr_model])
+            leaf.setToolTip(1, f"{job.input_name}\n{job.job_dir}")
+            leaf.setData(0, Qt.ItemDataRole.UserRole, str(job.job_dir))
+            leaf.setData(0, Qt.ItemDataRole.UserRole + 1, "job")
+            parent.addChild(leaf)
+            self._tree.setItemWidget(leaf, 5, StageDots(job))
+            actions = RowActions(job, self._is_busy(job.job_dir))
+            actions.open_result_requested.connect(self.view_result_requested)
+            actions.resume_requested.connect(self._resume)
+            actions.restart_requested.connect(self._restart)
+            actions.delete_requested.connect(self._delete)
+            self._tree.setItemWidget(leaf, 6, actions)
+            if str(job.job_dir) == selected_path:
+                self._tree.setCurrentItem(leaf)
+        self._tree.resizeColumnToContents(6)
+
+    def _tree_double_click(self, item, _column):
+        if item.data(0, Qt.ItemDataRole.UserRole + 1) == "job":
+            directory = Path(item.data(0, Qt.ItemDataRole.UserRole))
+            if any(j.job_dir == directory and j.complete for j in self._jobs):
+                self.view_result_requested.emit(directory)
+
+    def _edit_group(self):
+        item = self._tree.currentItem()
+        if item is None or item.data(0, Qt.ItemDataRole.UserRole + 1) != "scope":
+            QMessageBox.information(self, "Параметры группы", "Выберите проект или команду в дереве истории")
+            return
+        try:
+            dialog = ScopeDialog(self, Path(item.data(0, Qt.ItemDataRole.UserRole)), self._is_busy)
+            dialog.scope_renamed.connect(self.scope_renamed)
+            dialog.exec()
+            self.refresh()
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, "Параметры группы", str(exc))
 
     def _on_double_click(self, row: int, _column: int) -> None:
         if 0 <= row < len(self._jobs) and self._jobs[row].complete:

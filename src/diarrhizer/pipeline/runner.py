@@ -15,6 +15,7 @@ from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat, resolve_audio_form
 from diarrhizer.utils import read_json, write_json_atomic
 from diarrhizer.artifacts import locked_job, job_write_lock, recover_bundles
 from diarrhizer.pipeline.settings import FULL_STAGES, read_job_settings, recorded_stage_names, build_stages, set_aside_speaker_names
+from diarrhizer.projects import JOB_FILE, reserve_job, resolve_input
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ logger = logging.getLogger(__name__)
 #   config in meta/run.json; every later stage that actually ran (not cached, not skipped) then
 #   updates its own STAGE_SETTINGS keys there, so a stage re-run with other settings (GUI "restart
 #   stage", CLI --job-dir --from-stage) leaves the record true to what produced the artifacts.
+#   Optional project/team/template/storage reserve portable job.json identities; legacy callers retain
+#   timestamp names. Project locks protect scope moves, and retained originals can restore missing sources.
 # @inputs: input_path, config, out_dir, stages, job_dir, force, force_stage, from_stage, to_stage, audio_format
 # @outputs: Artifacts on disk per stage definitions
 # @sideEffects: Creates job directory, writes artifacts to disk, deletes artifacts when force is used,
@@ -207,7 +210,8 @@ def generate_job_id(input_path: str | Path) -> str:
     return f"{filename}_{timestamp}"
 
 
-def new_job_dir(out_dir: str | Path, input_path: str | Path) -> Path:
+def new_job_dir(out_dir: str | Path, input_path: str | Path, *, project: str = "", team: str | None = None,
+                naming_template: str | None = None, custom: str = "", storage: dict | None = None) -> Path:
     """Atomically reserve a fresh job directory, avoiding concurrent name collisions.
 
     generate_job_id() has one-second resolution, so two files with the same
@@ -215,6 +219,9 @@ def new_job_dir(out_dir: str | Path, input_path: str | Path) -> Path:
     otherwise land in - and mix artifacts into - the same folder. Callers that
     start several jobs pass the result to run_pipeline(job_dir=...).
     """
+    if project or team or naming_template is not None or storage is not None or custom:
+        return reserve_job(Path(out_dir), Path(input_path), project=project, team=team,
+                           naming_template=naming_template, custom=custom, storage=storage)
     base = Path(out_dir) / generate_job_id(input_path)
     base.parent.mkdir(parents=True, exist_ok=True)
     candidate = base
@@ -244,7 +251,8 @@ def _read_recorded_input_path(job_dir: Path) -> Path | None:
     except (OSError, json.JSONDecodeError):
         return None
     recorded = data.get("input_path") if isinstance(data, dict) else None
-    return Path(recorded) if isinstance(recorded, str) and recorded else None
+    source = Path(recorded) if isinstance(recorded, str) and recorded else None
+    return resolve_input(job_dir, source) if source is not None else None
 
 
 def _record_stage_settings(job_dir: Path, stage_name: str, config: PipelineConfig) -> None:
@@ -293,6 +301,7 @@ _RESUMABLE_SETTINGS = (
 #   Explicit names are saved when export is reached; an empty map prevents stale names returning on resume.
 #   Existing jobs are write-locked before settings are read; fresh jobs reserve their name atomically
 #   before preflight (empty reservations are removed on failure). Export journals are recovered under the lock before any stage can reuse the bundle.
+#   New project/team jobs use portable naming/storage identity; resume keeps that identity unchanged.
 # @inputs: input/out paths, optional job/stages, explicit configuration overrides
 # @outputs: per-stage results and artifacts
 # @sideEffects: Reads saved settings, then executes pipeline stages with disk/GPU effects
@@ -327,6 +336,11 @@ def run_pipeline(
     audio_format: AudioFormat | str | None = _UNSET,
     keep_wav: bool | None = None,
     min_turn_duration: float = _UNSET,
+    project: str = "",
+    team: str | None = None,
+    naming_template: str | None = None,
+    custom: str = "",
+    storage: dict | None = None,
 ) -> dict:
     """Run a job with explicit overrides > recorded settings > defaults.
 
@@ -343,7 +357,8 @@ def run_pipeline(
     return _run_pipeline(input_path=input_path, out_dir=out_dir, stages=stages, job_dir=job_dir,
                          force=force, force_stage=force_stage, from_stage=from_stage,
                          to_stage=to_stage, keep_wav=keep_wav,
-                         preserve_speakers="speakers" in overrides, **settings)
+                         preserve_speakers="speakers" in overrides, project=project, team=team,
+                         naming_template=naming_template, custom=custom, storage=storage, **settings)
 # [SEMANTIC-END] PIPELINE:EXECUTE
 
 
@@ -376,6 +391,11 @@ def _run_pipeline(
     audio_format: AudioFormat | str | None = PipelineConfig.audio_format,
     keep_wav: bool | None = None,
     min_turn_duration: float = PipelineConfig.min_turn_duration,
+    project: str = "",
+    team: str | None = None,
+    naming_template: str | None = None,
+    custom: str = "",
+    storage: dict | None = None,
 ) -> dict:
     """Run the processing pipeline for a media file.
 
@@ -464,6 +484,8 @@ def _run_pipeline(
     # never leaves an empty job folder behind in the history.
     if job_dir is not None:
         job_dir = Path(job_dir)
+        if input_path is not None:
+            input_path = resolve_input(job_dir, input_path)
 
         # Recover the original input path from a prior run's meta/run.json
         # when resuming without re-passing it explicitly.
@@ -535,7 +557,8 @@ def _run_pipeline(
     )
 
     if fresh_job:
-        job_dir = new_job_dir(out_dir, input_path)
+        job_dir = new_job_dir(out_dir, input_path, project=project, team=team,
+                              naming_template=naming_template, custom=custom, storage=storage)
         job_id = job_dir.name
         config.job_id = job_id
         job.job_dir = job_dir
@@ -551,6 +574,7 @@ def _run_pipeline(
         except Exception:
             if fresh_job:
                 try:
+                    (job_dir / JOB_FILE).unlink(missing_ok=True)
                     job_dir.rmdir()  # Only our empty reservation; never remove contents.
                 except OSError:
                     pass

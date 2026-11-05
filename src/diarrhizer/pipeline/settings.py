@@ -8,6 +8,7 @@ from pathlib import Path
 from diarrhizer.audio_formats import AudioFormat
 from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.utils import write_json_atomic
+from diarrhizer.projects import export_path
 
 FULL_STAGES = ("convert", "transcribe", "diarize", "merge", "export")
 RECORDED_RUN_KEYS = (
@@ -24,6 +25,7 @@ RECORDED_RUN_KEYS = (
 #   artifacts are read best-effort so they can still be rebuilt.
 #   The full saved audio format survives removal/renaming of a personal profile. Speaker names
 #   prefer speakers.json (including an explicit empty map), then the last export's mapping.
+#   Portable jobs resolve their named export through job.json; legacy result.json remains supported.
 # @inputs: job directory, optional already-read metadata
 # @outputs: recorded run kwargs and stage names
 # @sideEffects: Reads job JSON only; never changes a queued job
@@ -99,7 +101,7 @@ def read_job_settings(job_dir: Path, meta: dict | None = None, *, include_speake
     if names_path.exists():
         names = read_object(names_path)
     else:
-        exported = _optional_object(job_dir / "export" / "result.json")
+        exported = _optional_object(export_path(job_dir, "json"))
         export_meta = exported.get("metadata") or {}
         names = export_meta.get("speakers", {}) if isinstance(export_meta, dict) else {}
     if not isinstance(names, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in names.items()):

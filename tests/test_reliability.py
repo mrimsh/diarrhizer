@@ -37,6 +37,25 @@ def _job(tmp_path):
     return job
 
 
+def test_project_rename_rejects_active_descendant_writer(tmp_path):
+    from diarrhizer.projects import reserve_job, rename_scope
+    job = reserve_job(tmp_path, Path("call.wav"), project="Project", team="Team")
+    ctx = multiprocessing.get_context("spawn")
+    ready = ctx.Event()
+    process = ctx.Process(target=_hold_lock, args=(str(job), ready))
+    process.start()
+    try:
+        assert ready.wait(15)
+        with pytest.raises(RuntimeError, match="busy"):
+            rename_scope(job.parent.parent, "Renamed")
+        assert job.exists()
+    finally:
+        process.terminate()
+        process.join(10)
+    moved = rename_scope(job.parent.parent, "Renamed")
+    assert (moved / "Team" / job.name).exists()
+
+
 def test_os_lock_rejects_second_writer_and_releases_after_process_termination(tmp_path):
     ctx = multiprocessing.get_context("spawn")
     ready = ctx.Event()

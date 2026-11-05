@@ -16,6 +16,7 @@ from diarrhizer.export.text_export import export_to_text
 from diarrhizer.pipeline.cache import is_stale
 from diarrhizer.utils import read_json, write_text_atomic
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance, digest, write_bundle, recover_bundles, bundle_valid
+from diarrhizer.projects import export_path
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext, PipelineConfig
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 #   list - run() and get_output_paths()/get_artifact_paths()/is_cache_valid()
 #   all derive from it, so none of them need editing for a new format.
 #   Registered outputs are a recoverable cache group with a journal and a hash manifest published last.
+#   Portable jobs name exports after their fixed job title; legacy jobs retain result.*.
 #   Render errors leave the old group untouched; interrupted writes complete on retry. is_cache_valid()
 #   is False, and --force-stage export deletes every output, if even one
 #   format is missing or stale, so formats can never drift out of sync with
@@ -122,7 +124,7 @@ class ExportStage:
         identity = digest(segments_input.read_text(encoding="utf-8"))
         for exporter in self.EXPORTERS:
             content = exporter.export_fn(segments, config, input_path)
-            output_file = job_dir / exporter.output_path
+            output_file = self.get_output_paths(job_dir)[exporter.name]
             if exporter.name == "json":
                 data = json.loads(content)
                 data["schema_version"] = SCHEMA_VERSION
@@ -175,7 +177,9 @@ class ExportStage:
             Dictionary of Exporter.name to path, one entry per registered
             Exporter in EXPORTERS.
         """
-        return {exporter.name: job_dir / exporter.output_path for exporter in self.EXPORTERS}
+        return {exporter.name: (export_path(job_dir, exporter.output_path.removeprefix("export/result."))
+                               if exporter.output_path.startswith("export/result.") else job_dir / exporter.output_path)
+                for exporter in self.EXPORTERS}
 
     def is_cache_valid(self, job: "JobContext") -> bool:
         """Check if every registered output exists, is newer than segments.json,
@@ -193,7 +197,7 @@ class ExportStage:
         return not self._speakers_mismatch(job)
 
     def _speakers_mismatch(self, job: "JobContext") -> bool:
-        data = read_json(job.job_dir / "export" / "result.json")
+        data = read_json(export_path(job.job_dir, "json"))
         if not isinstance(data, dict):
             return True
         stored = (data.get("metadata") or {}).get("speakers")

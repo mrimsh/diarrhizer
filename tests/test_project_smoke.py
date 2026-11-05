@@ -1,0 +1,42 @@
+"""Real FFmpeg smoke with synthetic media; no models, accounts or recordings."""
+
+import math
+import shutil
+import struct
+import wave
+from pathlib import Path
+
+import pytest
+
+from diarrhizer.pipeline.runner import run_pipeline
+from diarrhizer.pipeline.stages.convert import ConvertStage
+from diarrhizer.pipeline.stages.export import ExportStage
+from diarrhizer.pipeline.stages.merge import MergeStage
+from diarrhizer.projects import export_path, media_path
+from diarrhizer.summary.service import read_transcript
+from diarrhizer.utils import write_json_atomic
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg is not on PATH")
+def test_real_ffmpeg_project_smoke(tmp_path):
+    source = tmp_path / "synthetic.wav"
+    with wave.open(str(source), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(b"".join(struct.pack("<h", int(1000 * math.sin(2 * math.pi * 440 * i / 16000)))
+                                   for i in range(16000)))
+    result = run_pipeline(input_path=source, out_dir=tmp_path / "out", stages=[ConvertStage()],
+                          project="Smoke", team="Coders", audio_format="flac",
+                          storage={"original": "template", "working": "discard", "archive": "template"})
+    job = Path(result["job_dir"])
+    assert media_path(job, "original", "wav").read_bytes() == source.read_bytes()
+    assert media_path(job, "archive", "flac").read_bytes().startswith(b"fLaC")
+    assert not media_path(job, "working", "wav").exists()
+    write_json_atomic(job / "asr" / "transcript.json", {
+        "segments": [{"start": 0, "end": 1, "text": "Synthetic smoke test"}], "words": [],
+    })
+    run_pipeline(job_dir=job, out_dir=tmp_path / "out", stages=[MergeStage(), ExportStage()],
+                 speakers={"Speaker_00": "Alice"})
+    assert export_path(job, "json").is_file()
+    assert "Synthetic smoke test" in read_transcript(job)
