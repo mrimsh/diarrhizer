@@ -1,5 +1,9 @@
 # Architecture
 
+Application release: **2.0**, shared by the CLI, desktop GUI and Windows launcher.
+The [2.x roadmap](roadmap.md) describes the direction toward autonomous call logging, a separate
+call agent and optional integration skills; those capabilities remain planned.
+
 The independent [Windows launcher](launcher.md) is the first-run entry point. Its `diarrhizer_launcher`
 package uses the standard library and Tk, with no imports of Qt or the processing stack in its own
 process. A standalone bundle prepares one environment through checkpointed setup stages, reuses the

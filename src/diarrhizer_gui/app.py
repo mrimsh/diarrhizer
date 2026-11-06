@@ -3,6 +3,8 @@
 import multiprocessing
 import sys
 
+from diarrhizer import __version__
+
 ACCENT = "#a85520"
 
 STYLESHEET = f"""
@@ -45,6 +47,13 @@ QWidget#Sidebar {{
 """
 
 
+# [SEMANTIC-BEGIN] GUI:ENTRY
+# @purpose: Start the desktop GUI with the shared application release version
+# @description: Defers Qt/window imports until launch so spawned workers keep a lightweight entry point.
+# @outputs: Qt event-loop exit code
+# @sideEffects: Loads project .env, configures Qt and opens the main window; kills child processes on exit
+# @errors: Startup exceptions propagate to the caller
+# @see: APP:IDENTITY, GUI:MAIN_WINDOW, GUI:CHILD_TASKS
 def main() -> int:
     # Imported here, not at module level: pipeline jobs and doctor checks run
     # in spawned child processes, which re-import this module as __mp_main__ -
@@ -64,6 +73,7 @@ def main() -> int:
     app.setStyleSheet(STYLESHEET)
     app.setOrganizationName("Diarrhizer")
     app.setApplicationName("DiarrhizerGUI")
+    app.setApplicationVersion(__version__)
     # Pipeline/doctor children are not daemons; never leave one running.
     app.aboutToQuit.connect(kill_all)
 
@@ -71,6 +81,7 @@ def main() -> int:
     window.show()
 
     return app.exec()
+# [SEMANTIC-END] GUI:ENTRY
 
 
 if __name__ == "__main__":

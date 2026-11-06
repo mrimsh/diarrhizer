@@ -25,6 +25,7 @@ import threading
 import time
 from typing import Callable, Optional
 
+from diarrhizer import __version__
 from diarrhizer.adapters import llm
 from diarrhizer.adapters.llm import LLMError
 from diarrhizer.summary.provider_info import Account, LimitWindow, Limits, ModelOption
@@ -39,7 +40,13 @@ QUERY_TIMEOUT_SECONDS = 60
 # How long to wait for a reader thread to see the end of a pipe once its tool is dead.
 READER_JOIN_SECONDS = 5
 
-CLIENT_INFO = {"name": "diarrhizer", "title": "Diarrhizer", "version": "0.1.0"}
+# [SEMANTIC-BEGIN] ADAPTER:CLIENT_IDENTITY
+# @purpose: Identify this application release to the provider's own account tool
+# @outputs: clientInfo with the shared release version
+# @sideEffects: None; the account client sends this data when initializing its connection
+# @see: APP:IDENTITY, ADAPTER:LLM_ACCOUNTS
+CLIENT_INFO = {"name": "diarrhizer", "title": "Diarrhizer", "version": __version__}
+# [SEMANTIC-END] ADAPTER:CLIENT_IDENTITY
 
 # Callbacks: on_event(name, payload) - "url" (open this address in a browser) or "waiting" (the tool opened
 # the browser itself); should_cancel() - true once the user gave up.

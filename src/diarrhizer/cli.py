@@ -7,6 +7,7 @@ import sys
 import textwrap
 from pathlib import Path
 
+from diarrhizer import __author__, __version__
 from diarrhizer.audio_formats import BUILTIN_FORMATS, store_path
 from diarrhizer.diagnostics.doctor import run_doctor_checks
 from diarrhizer.env_file import load_project_env
@@ -241,12 +242,12 @@ def _run_chat(args: argparse.Namespace) -> int:
 # [SEMANTIC-BEGIN] CLI:ENTRY
 # @purpose: CLI entry point for Diarrhizer commands
 # @description: Provides doctor profiles, run, summarize/preview and chat; recover completes export/summary journals
-#   under a job lock without inference or provider calls.
+#   under a job lock without inference or provider calls. --version reports the shared application release.
 # @sideEffects: Loads project .env, parses args, runs diagnostics or pipeline, configures a StreamHandler
 #   (stdout, "%(message)s") on the "diarrhizer" package logger so stage/pipeline
 #   progress logged via logging (see PIPELINE:RUNNER) prints like the old print()s did
-# @errors: Exits with code 1 on invalid arguments
-# @see: DIAGNOSTICS:DOCTOR, PIPELINE:RUNNER
+# @errors: Returns 1 on command failure/missing command; argparse exits 2 on invalid arguments, 0 for help/version
+# @see: APP:IDENTITY, DIAGNOSTICS:DOCTOR, PIPELINE:RUNNER
 def main() -> int:
     """Main CLI entry point."""
     load_project_env()
@@ -254,8 +255,10 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(
         prog="diarrhizer",
-        description="Local Windows tool for processing call recordings"
+        description=f"Diarrhizer {__version__} — local Windows tool for processing call recordings",
+        epilog=f"By {__author__}",
     )
+    parser.add_argument("--version", action="version", version=f"Diarrhizer {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 

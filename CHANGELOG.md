@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased
+## 2.0 — 2026-11-06
+
+### Unified application release
+
+- Shared version **2.0** for the package, CLI, desktop GUI, Windows launcher and provider client identity.
+- CLI `--version` and versioned help; the GUI shows the version in its window title and sidebar,
+  and exposes it through Qt application metadata. The launcher and its Windows file/product
+  properties display the same version, with MRIMSH in company/copyright metadata.
+- Application authorship is **MRIMSH** in documentation, package metadata and interfaces.
+- Standalone Windows setup/launch/recovery wizard, including opening and editing an existing environment.
+- Projects and teams, configurable job names and media retention, and reusable participant lists.
+- The stabilization, reliability and quality work below is included in this release.
+
+### Direction for 2.x
+
+Increasing autonomy in call logging and creation of useful artifacts. Planned work includes a separate
+agent that joins calls and runs capture, transcription, diarization and summarization, with optional
+skills to post messages to chats and prepare/execute task-tracker API requests. This is a development
+direction, not functionality shipped in 2.0. See the [roadmap](docs/roadmap.md).
 
 ### Quality C1: RAM/VRAM and performance (2026-11-04)
 
@@ -53,5 +71,5 @@
 ## 0.1.0
 
 Initial local application: CLI and desktop GUI, pipeline, batch queue, playback, speaker names,
-summary templates/providers and persisted dialogues. The package version remains 0.1.0 until
-a release is deliberately tagged; unreleased changes are installed from this checkout.
+summary templates/providers and persisted dialogues. This was the initial package baseline,
+before the unified CLI/GUI release 2.0.

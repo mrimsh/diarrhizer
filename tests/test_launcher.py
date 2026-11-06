@@ -289,8 +289,10 @@ def test_real_shortcut_targets_pythonw_with_unicode_arguments(plan):
 
 def test_launcher_import_does_not_load_processing_or_qt():
     source = Path(__file__).resolve().parents[1] / "src"
+    # The package root contains only release identity; no core submodule may load here.
     script = (f"import sys; sys.path.insert(0, {str(source)!r}); import diarrhizer_launcher.app; "
-              "assert not any(n in sys.modules for n in ('torch','PySide6','whisperx','diarrhizer'))")
+              "assert not any(n in sys.modules for n in ('torch','PySide6','whisperx')); "
+              "assert not any(n.startswith('diarrhizer.') for n in sys.modules)")
     subprocess.run([sys.executable, "-I", "-c", script], check=True, timeout=20,
                    creationflags=system.CREATE_NO_WINDOW)
 

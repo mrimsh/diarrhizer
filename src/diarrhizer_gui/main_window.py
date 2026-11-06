@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from diarrhizer import __author__, __version__
 from diarrhizer_gui.environment import EnvironmentProbe
 from diarrhizer_gui.job_queue import CANCELLED, DONE, FAILED, PENDING, RUNNING, JobQueue
 from diarrhizer_gui.pipeline_worker import PipelineWorker
@@ -45,7 +46,7 @@ NAV_ITEMS = [
 NAV_LABELS = dict((key, label) for label, key in NAV_ITEMS)
 ROWS = {key: row for row, (_label, key) in enumerate(NAV_ITEMS)}
 
-APP_TITLE = "Diarrhizer"
+APP_TITLE = f"Diarrhizer {__version__}"
 
 
 # [SEMANTIC-BEGIN] GUI:MAIN_WINDOW
@@ -60,6 +61,7 @@ APP_TITLE = "Diarrhizer"
 #   Result changes are guarded before replacing/closing its editor. Queue allocation failures
 #   become failed items; planning a restart has no filesystem side effects.
 #   Project/team settings are passed into allocation; queued descendants prevent scope renames.
+#   The window title and sidebar retain the shared release version and sole application author.
 # @inputs: user actions on the screens
 # @outputs: pipeline jobs, screen navigation
 # @sideEffects: Spawns/kills child processes; files dropped on the window are added to New Job
@@ -94,7 +96,7 @@ class MainWindow(QMainWindow):
         self._job_status.clicked.connect(self._show_monitor)
         self._job_status.hide()
 
-        credit = QLabel("By MRIMSH, L. L. MRIMSH and all other LLMs")
+        credit = QLabel(f"{APP_TITLE}\nBy {__author__}")
         credit.setObjectName("CreditLabel")
         credit.setAlignment(Qt.AlignCenter)
         credit.setWordWrap(True)

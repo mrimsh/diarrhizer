@@ -1,5 +1,8 @@
 # Windows launcher
 
+Application release: **2.0** by **MRIMSH**. The setup window and Windows executable file/product
+properties display the shared release version; Windows company metadata names MRIMSH.
+
 `Diarrhizer.exe` is the graphical entry point for setup and everyday use on Windows 10/11 x64.
 The launcher includes its own Python interpreter and Tk interface; it needs neither an existing
 Diarrhizer `.venv` nor a manually installed launcher dependency. The processing application remains

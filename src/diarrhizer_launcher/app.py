@@ -12,6 +12,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
+from diarrhizer import __author__, __version__
+
 from .config import LauncherLock, Settings, State, application_source, launcher_home
 from .existing import inspect_environment, remember_environment
 from .launch import (
@@ -32,6 +34,7 @@ from .system import discover_pythons, gpu_description
 #   package changes. Closing during setup waits for child shutdown before releasing the single-instance lock.
 #   Selecting a venv reads its parameters asynchronously; adopting it is an explicit action. Runtime
 #   path edits are saved without pip; interpreter/device changes use the confirmed setup flow.
+#   Title/header display the shared application release and sole author without loading the processing stack.
 # @inputs: one local state file, user paths/device/download choices
 # @outputs: setup progress/log, retry/repair controls, GUI/shortcut/start-folder actions
 # @sideEffects: Native dialogs, background setup/probes and user-requested shortcuts
@@ -51,7 +54,7 @@ class Launcher:
         settings = self.state.settings if self.state else Settings.defaults(source, state_path.parent)
         self.variables = {key: (tk.BooleanVar(value=value) if isinstance(value, bool) else tk.StringVar(value=value))
                           for key, value in asdict(settings).items()}
-        root.title("Diarrhizer — запуск и настройка")
+        root.title(f"Diarrhizer {__version__} — запуск и настройка")
         root.geometry("980x820")
         root.minsize(850, 740)
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -64,7 +67,7 @@ class Launcher:
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
         body.rowconfigure(5, weight=1)
-        ttk.Label(body, text="Diarrhizer", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(body, text=f"Diarrhizer {__version__} · {__author__}", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         self.status = tk.StringVar(value="Поиск совместимого Python и проверка среды…" if probe
                                    else "Подготовьте окружение, затем откройте основной GUI.")
         ttk.Label(body, textvariable=self.status, wraplength=920).grid(row=1, column=0, sticky="w", pady=(4, 12))

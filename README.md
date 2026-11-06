@@ -1,12 +1,23 @@
-# Diarrhizer
+# Diarrhizer 2.0
 
-By MRIMSH, L. L. MRIMSH and all other LLMs
+By MRIMSH
 
 A local (on-prem) Windows tool for processing call recordings:
 input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker diarization (pyannote via WhisperX) → export (`.md/.txt/.srt/.json`).
 
 Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
 and a CLI (`python -m diarrhizer run …`).
+
+**2.0** is the shared release version for the CLI, desktop GUI and Windows launcher.
+Check it with `python -m diarrhizer --version`; the GUI shows it in the window title and sidebar.
+See the [2.0 release notes](CHANGELOG.md#20--2026-11-06).
+
+The direction for 2.x is an increasingly autonomous tool for logging calls and producing useful
+artifacts: transcripts, summaries, decisions and follow-up tasks. One planned direction is a separate
+agent that joins calls and runs capture, transcription, diarization and summarization itself, with
+optional skills for actions such as posting to a chat or preparing and executing task-tracker API
+requests. These are development goals; the 2.0 application processes supplied recordings.
+See the [2.x roadmap](docs/roadmap.md).
 
 The Windows **`Diarrhizer.exe` launcher** prepares Python, one `.venv`, CPU/CUDA dependencies,
 FFmpeg, model-cache and results paths through a graphical setup wizard. It runs without an existing
@@ -733,15 +744,19 @@ See `docs/troubleshooting.md` for detailed diagnostics.
 
 The pipeline, desktop GUI, batch/resume, playback, speaker naming, summaries and dialogues are implemented.
 
-Next: reproducible environments and quality measurements, recovery-safe artifacts, measured GUI performance,
-then transcript editing and optional realtime integration. See the [audit and prioritized plan](docs/project-audit-2026-11-01.md),
+The 2.x development vector is increasing autonomy in call logging and useful artifact creation.
+The [roadmap](docs/roadmap.md) describes the planned call agent and optional skills for chat and
+task-tracker integrations, building on the shared CLI/GUI core. Reliability, quality measurements,
+recovery and transcript editing support that direction. Realtime work remains research in
+[`docs/realtime.md`](docs/realtime.md) and `prototypes/realtime/`.
+See also the [audit and prioritized plan](docs/project-audit-2026-11-01.md),
 [development checks](docs/development.md) and [changelog](CHANGELOG.md).
 
 ---
 
 ## Author
 
-By MRIMSH, L. L. MRIMSH and all other LLMs
+MRIMSH
 
 ## License
 
