@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -56,7 +56,8 @@ from diarrhizer_gui.job_scan import (
 from diarrhizer_gui.screens.new_job_screen import hf_token_present
 from diarrhizer_gui.screens.restart_dialog import RestartDialog
 from diarrhizer_gui.screens.project_panel import ScopeDialog
-from diarrhizer.projects import job_context
+from diarrhizer_gui.screens.move_jobs_dialog import MoveJobsDialog
+from diarrhizer.projects import JobMoveError, job_context, move_jobs, scope_path
 
 STAGE_LABELS = [name[0].upper() for name, _ in STAGE_ARTIFACTS]  # C T D M E
 STAGE_TITLES = {
@@ -214,16 +215,19 @@ def sort_jobs(jobs: list, column: int, descending: bool) -> list:
 #   Default view is a project/team tree; independent toggles hide either grouping or show the flat table.
 #   Group settings edit the on-disk scope, including directory renames guarded against queued writers.
 #   (settings_keys.HISTORY_*); values that do not fit the table are ignored. "Файл" fills the free width
-#   until the user sets its width. The selected job stays selected across refresh() by job_id.
+#   until the user sets its width. Multiple selected jobs survive refresh, sort and grouping changes by path.
+#   Selecting a tree group includes its filtered descendants; hidden table rows never join a move.
+#   Batch moves recheck queued/busy jobs, preserve artifacts and notify live views of changed paths.
 # @inputs: job folders under the results folder; header clicks; header drags
-# @outputs: view_result_requested, runs_requested
-# @sideEffects: reads/writes QSettings; deletes job folders on request
+# @outputs: view_result_requested, runs_requested, jobs_moved(old-to-new paths)
+# @sideEffects: reads/writes QSettings; deletes or moves job folders on explicit request
 # @errors: Bad display settings fall back to defaults; scan/config I/O errors are shown without escaping Qt slots
 class HistoryScreen(QWidget):
     COLUMNS = ["Дата", "Файл", "Язык", "Спикеры", "Модель", "Этапы", "Действия"]
     view_result_requested = Signal(Path)
     runs_requested = Signal(list)  # [QueuedRun]
     scope_renamed = Signal(Path, Path)
+    jobs_moved = Signal(object)  # dict[Path, Path]; QVariantMap would discard non-string keys.
 
     def __init__(self, is_busy: Optional[Callable[[Path], bool]] = None, probe=None) -> None:
         super().__init__()
@@ -232,6 +236,8 @@ class HistoryScreen(QWidget):
         self._probe = probe  # EnvironmentProbe: restart settings disable cuda when it is unavailable
         self._jobs: list = []  # in display order
         self._scanned: list = []
+        self._rebuilding = False
+        self._display_grouped = True
         self._sort_column, self._sort_descending = self._load_sort()
         self._user_widths = self._load_widths()
         self._adjusting = False  # our own resizes are not the user's
@@ -261,7 +267,7 @@ class HistoryScreen(QWidget):
         self._filter_field = QLineEdit()
         self._filter_field.setPlaceholderText("Поиск по заданию, файлу, проекту или команде…")
         self._filter_field.setClearButtonEnabled(True)
-        self._filter_field.textChanged.connect(self._apply_filter)
+        self._filter_field.textChanged.connect(lambda _text: self._apply_filter())
         self._summary_label = QLabel()
         self._summary_label.setStyleSheet("color: #7d8394;")
         filter_row = QHBoxLayout()
@@ -280,7 +286,8 @@ class HistoryScreen(QWidget):
         self._tree = QTreeWidget()
         self._tree.setColumnCount(len(self.COLUMNS))
         self._tree.setHeaderLabels(self.COLUMNS)
-        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tree.setAlternatingRowColors(True)
         self._tree.itemDoubleClicked.connect(self._tree_double_click)
         self._tree.header().sectionClicked.connect(self._on_header_clicked)
@@ -293,6 +300,7 @@ class HistoryScreen(QWidget):
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setToolTip("Двойной щелчок по строке открывает результат")
         self._table.cellDoubleClicked.connect(self._on_double_click)
         header = self._table.horizontalHeader()
@@ -311,6 +319,20 @@ class HistoryScreen(QWidget):
             header.resizeSection(column, width)
         self._adjusting = False
         self._table.viewport().installEventFilter(self)
+        self._tree.itemSelectionChanged.connect(self._update_selection)
+        self._table.itemSelectionChanged.connect(self._update_selection)
+        self._selection_label = QLabel("Выбрано: 0")
+        self._move_button = QPushButton("Переместить…")
+        self._move_button.setEnabled(False)
+        self._move_button.clicked.connect(self._move_selected)
+        self._move_status = QLabel()
+        self._move_status.setWordWrap(True)
+        selection_row = QHBoxLayout()
+        selection_row.addWidget(self._selection_label)
+        selection_row.addWidget(self._move_button)
+        selection_row.addWidget(self._move_status, 1)
+        selection_hint = QLabel("Ctrl/Shift — несколько заданий; выбор группы — все задания в ней.")
+        selection_hint.setWordWrap(True)
 
         self._empty_label = QLabel(
             "Заданий пока нет — запустите обработку или укажите другую папку."
@@ -324,6 +346,8 @@ class HistoryScreen(QWidget):
         layout.addWidget(title)
         layout.addLayout(path_row)
         layout.addLayout(filter_row)
+        layout.addLayout(selection_row)
+        layout.addWidget(selection_hint)
         layout.addWidget(self._tree, stretch=1)
         layout.addWidget(self._table, stretch=1)
         layout.addWidget(self._empty_label)
@@ -430,7 +454,10 @@ class HistoryScreen(QWidget):
 
     def _populate(self, jobs: list) -> None:
         """Rebuild the table from `jobs` in the chosen order, keeping the selected job selected."""
-        selected = self._selected_job_id()
+        selected = self._selected_job_paths()
+        # Keep table selection too for the existing flat-table controls while the tree is shown.
+        table_selected = self._table_selected_paths()
+        self._rebuilding = True
         jobs = sort_jobs(jobs, self._sort_column, self._sort_descending)
         self._jobs = jobs
 
@@ -462,12 +489,11 @@ class HistoryScreen(QWidget):
             self._table.setCellWidget(row, 6, row_actions)
 
         self._fit_widths()
-        self._apply_filter()
-        if selected is not None:
-            for row, job in enumerate(jobs):
-                if str(job.job_dir) == selected:
-                    self._table.selectRow(row)
-                    break
+        self._display_grouped = self._grouped()
+        self._apply_filter(selected)
+        self._select_table_paths(table_selected if self._display_grouped else selected)
+        self._rebuilding = False
+        self._update_selection()
 
     def _selected_job_id(self) -> Optional[str]:
         rows = self._table.selectionModel().selectedRows()
@@ -475,7 +501,7 @@ class HistoryScreen(QWidget):
             return str(self._jobs[rows[0].row()].job_dir)
         return None
 
-    def _apply_filter(self) -> None:
+    def _apply_filter(self, selected_paths=None) -> None:
         needle = self._filter_field.text().strip().lower()
         shown = 0
         for row, job in enumerate(self._jobs):
@@ -487,7 +513,8 @@ class HistoryScreen(QWidget):
         if unfinished:
             text += f", не завершено {unfinished}"
         self._summary_label.setText(text)
-        self._populate_tree()
+        self._populate_tree(selected_paths)
+        self._update_selection()
 
     def _grouped(self):
         return self._group_projects.isChecked() or self._group_teams.isChecked()
@@ -497,9 +524,10 @@ class HistoryScreen(QWidget):
         self._settings.setValue(settings_keys.HISTORY_GROUP_TEAMS, self._group_teams.isChecked())
         self._populate(self._scanned)
 
-    def _populate_tree(self):
-        selected = self._tree.currentItem()
-        selected_path = selected.data(0, Qt.ItemDataRole.UserRole) if selected else None
+    def _populate_tree(self, selected_paths=None):
+        selected_paths = self._tree_selected_paths() if selected_paths is None else selected_paths
+        rebuilding = self._rebuilding
+        self._rebuilding = True
         collapsed = set()
         def remember(item):
             if item.childCount() and not item.isExpanded():
@@ -510,6 +538,7 @@ class HistoryScreen(QWidget):
             remember(self._tree.topLevelItem(i))
         self._tree.clear()
         if not self._grouped():
+            self._rebuilding = rebuilding
             return
         groups = {}
         needle = self._filter_field.text().strip().casefold()
@@ -544,9 +573,103 @@ class HistoryScreen(QWidget):
             actions.restart_requested.connect(self._restart)
             actions.delete_requested.connect(self._delete)
             self._tree.setItemWidget(leaf, 6, actions)
-            if str(job.job_dir) == selected_path:
-                self._tree.setCurrentItem(leaf)
+            if job.job_dir in selected_paths:
+                self._tree.setCurrentItem(leaf, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+                leaf.setSelected(True)
         self._tree.resizeColumnToContents(6)
+        self._rebuilding = rebuilding
+
+    def _table_selected_paths(self) -> set[Path]:
+        return {self._jobs[index.row()].job_dir for index in self._table.selectionModel().selectedRows()
+                if 0 <= index.row() < len(self._jobs) and not self._table.isRowHidden(index.row())}
+
+    def _tree_selected_paths(self) -> set[Path]:
+        paths = set()
+        def collect(item):
+            if item.data(0, Qt.ItemDataRole.UserRole + 1) == "job":
+                paths.add(Path(item.data(0, Qt.ItemDataRole.UserRole)))
+            for index in range(item.childCount()):
+                collect(item.child(index))
+        for item in self._tree.selectedItems():
+            collect(item)
+        return paths
+
+    def _selected_job_paths(self) -> set[Path]:
+        return self._tree_selected_paths() if self._display_grouped else self._table_selected_paths()
+
+    def _select_table_paths(self, paths):
+        self._table.clearSelection()
+        selection = self._table.selectionModel()
+        for row, job in enumerate(self._jobs):
+            if job.job_dir in paths and not self._table.isRowHidden(row):
+                index = self._table.model().index(row, 0)
+                selection.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+                selection.select(index,
+                                 QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+
+    def _select_job_paths(self, paths):
+        self._select_table_paths(paths)
+        self._tree.clearSelection()
+        def select(item):
+            if item.data(0, Qt.ItemDataRole.UserRole + 1) == "job" and Path(item.data(0, Qt.ItemDataRole.UserRole)) in paths:
+                self._tree.setCurrentItem(item, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+                item.setSelected(True)
+                parent = item.parent()
+                while parent is not None:
+                    parent.setExpanded(True)
+                    parent = parent.parent()
+            for index in range(item.childCount()):
+                select(item.child(index))
+        for index in range(self._tree.topLevelItemCount()):
+            select(self._tree.topLevelItem(index))
+        self._update_selection()
+
+    def _update_selection(self):
+        if self._rebuilding:
+            return
+        paths = self._selected_job_paths()
+        busy = any(self._is_busy(p) for p in paths)
+        self._selection_label.setText(f"Выбрано: {len(paths)}")
+        self._move_button.setEnabled(bool(paths) and not busy)
+        self._move_button.setToolTip("Среди выбранных есть выполняющиеся или ожидающие задания" if busy else
+                                    "Переместить выбранные задания в проект и команду")
+
+    def _move_selected(self):
+        paths = self._selected_job_paths()
+        if not paths:
+            return
+        try:
+            self._check_move_busy(paths)
+            root = Path(self._path_field.text())
+            jobs = [job for job in self._jobs if job.job_dir in paths]
+            project = jobs[0].project if len({job.project for job in jobs}) == 1 else ""
+            team = jobs[0].team if project and len({job.team for job in jobs}) == 1 else ""
+            dialog = MoveJobsDialog(self, root, len(paths), project, team)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            project, team = dialog.destination()
+            # The queue may have advanced while the dialog was open.
+            self._check_move_busy(paths)
+            destination = scope_path(root, project, team)
+            if self._is_busy(destination):
+                raise ValueError("В папке назначения есть выполняющиеся или ожидающие задания")
+            moved = move_jobs(root, [job.job_dir for job in jobs], project=project, team=team)
+        except (OSError, ValueError, RuntimeError) as exc:
+            if isinstance(exc, JobMoveError) and exc.moved:
+                self.jobs_moved.emit(exc.moved)
+            QMessageBox.warning(self, "Переместить задания", str(exc))
+            self.refresh()
+            return
+        if moved:
+            self.jobs_moved.emit(moved)
+        self.refresh()
+        self._select_job_paths({moved.get(p.resolve(), p) for p in paths})
+        self._move_status.setText(f"Перемещено заданий: {len(moved)}" if moved else
+                                  "Выбранные задания уже находятся в этой папке")
+
+    def _check_move_busy(self, paths):
+        if any(self._is_busy(p) for p in paths):
+            raise ValueError("Нельзя переместить выполняющиеся или ожидающие задания")
 
     def _tree_double_click(self, item, _column):
         if item.data(0, Qt.ItemDataRole.UserRole + 1) == "job":

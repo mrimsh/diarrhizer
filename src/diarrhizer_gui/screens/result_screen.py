@@ -227,6 +227,7 @@ class RediarizeDialog(QDialog):
 # @description: Switching/reloading results and closing the window ask to save/discard/cancel dirty names.
 #   An unopened result has no dirty state; saves hold the per-job OS write lock through re-export.
 #   Team-scoped suggestions are explicit roster entries; typing/saving a speaker alone never enrolls a name.
+#   Moving a job refreshes suggestions from its new team while preserving unsaved job-specific names.
 #   Invalid transcript JSON is shown as a readable error. Failed writes keep edits available to retry.
 #   Diarization requests only enqueue work; the runner backs up names when the stage actually starts.
 # @inputs: job artifacts and user edits
@@ -567,6 +568,14 @@ class ResultScreen(QWidget):
         except (OSError, ValueError, RuntimeError) as exc:
             self._set_status(str(exc), "#b23b35")
             return
+        self.refresh_team()
+
+    def refresh_team(self):
+        """Refresh destination-team suggestions after a job move without rebuilding its editor."""
+        if self._job_dir is None:
+            return
+        project, team = job_context(self._job_dir)
+        self._roster_dir = team or project or self._job_dir.parent
         known = self._known_names()
         for sid, field in self._speaker_fields.items():
             self._set_completer(field, known)

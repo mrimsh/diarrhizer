@@ -12,7 +12,7 @@ from diarrhizer.pipeline.runner import run_pipeline
 from diarrhizer.pipeline.stages.convert import ConvertStage
 from diarrhizer.pipeline.stages.export import ExportStage
 from diarrhizer.pipeline.stages.merge import MergeStage
-from diarrhizer.projects import export_path, media_path
+from diarrhizer.projects import export_path, media_path, move_jobs
 from diarrhizer.summary.service import read_transcript
 from diarrhizer.utils import write_json_atomic
 
@@ -40,3 +40,8 @@ def test_real_ffmpeg_project_smoke(tmp_path):
                  speakers={"Speaker_00": "Alice"})
     assert export_path(job, "json").is_file()
     assert "Synthetic smoke test" in read_transcript(job)
+    moved = move_jobs(tmp_path / "out", [job], project="Moved", team="Designers")[job]
+    assert media_path(moved, "archive", "flac").read_bytes().startswith(b"fLaC")
+    assert media_path(moved, "original", "wav").read_bytes() == source.read_bytes()
+    assert "Synthetic smoke test" in read_transcript(moved)
+    assert export_path(moved, "json").is_file()

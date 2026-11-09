@@ -134,6 +134,22 @@ the resolved target stays under the selected library root and is a discovered jo
 Writers in one project share an exclusive lock: a concurrent export or roster edit in that project
 returns a busy error while another writer is active; jobs in different projects remain independent.
 
+`projects.move_jobs()` (`LIBRARY:MOVE_JOBS`) moves a validated selection of discovered job folders within
+one library. It locks all source jobs before creating scopes, then locks destination jobs/project and uses
+directory renames without overwriting existing paths. Same-name folders get suffixes; identity/export/media
+filenames and rosters remain unchanged. Internal paths in `meta/run.json` (`input_path`, output/archive
+paths and source fingerprint path) follow moved jobs. Other artifact contents remain untouched. Failures
+attempt to restore metadata and moved directories; `JobMoveError.moved` reports any directories that the
+OS prevented restoring. This is rollback on ordinary errors, not a crash-atomic multi-folder transaction.
+
+History supports extended selection in both views; selecting a tree group deduplicates its filtered job
+descendants, and hidden table rows are excluded. Selection survives sorting, refresh and grouping toggles
+by full path. `MoveJobsDialog` is read-only until acceptance and supports existing/new projects and teams,
+including explicit empty roots without applying the project's default team. History rechecks queued/busy
+jobs after the modal dialog, emits `jobs_moved` as a Python object (Path-keyed mapping), refreshes the view
+and reselects moved jobs. MainWindow relocates live result/queue/monitor references; ResultScreen refreshes
+team completers without rebuilding the speaker editor or losing unsaved names.
+
 Speaker assignments (`speakers.json`) remain per-job. Explicit Add/Remove actions edit only the current
 team/root roster. Typing a new speaker name and exporting it never implicitly changes that roster.
 

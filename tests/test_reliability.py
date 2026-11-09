@@ -74,6 +74,28 @@ def test_os_lock_rejects_second_writer_and_releases_after_process_termination(tm
             pass  # Reentrant on this thread; old lock file is harmless.
 
 
+@pytest.mark.parametrize("lock_target", ["source", "destination"])
+def test_batch_move_refuses_busy_job_or_destination_without_partial_moves(tmp_path, lock_target):
+    from diarrhizer.projects import ensure_scope, move_jobs, reserve_job
+    a = reserve_job(tmp_path, Path("a.wav"), project="First")
+    b = reserve_job(tmp_path, Path("b.wav"), project="Second")
+    target = ensure_scope(tmp_path, "Target", "Team") if lock_target == "destination" else b
+    ctx = multiprocessing.get_context("spawn")
+    ready = ctx.Event()
+    process = ctx.Process(target=_hold_lock, args=(str(target), ready))
+    process.start()
+    try:
+        assert ready.wait(15)
+        with pytest.raises(RuntimeError, match="busy"):
+            move_jobs(tmp_path, [a, b], project="Target", team="Team")
+        assert a.exists() and b.exists()
+        if lock_target == "source":
+            assert not (tmp_path / "Target").exists()
+    finally:
+        process.terminate()
+        process.join(10)
+
+
 def test_job_names_are_reserved_atomically(tmp_path, monkeypatch):
     monkeypatch.setattr("diarrhizer.pipeline.runner.generate_job_id", lambda _: "same")
     with ThreadPoolExecutor(max_workers=8) as pool:

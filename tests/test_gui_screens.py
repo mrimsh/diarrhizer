@@ -991,6 +991,154 @@ def test_project_history_tree_and_independent_grouping(qapp, isolated, tmp_path)
     assert screen._tree.topLevelItemCount() == 1
 
 
+def _move_history_jobs(out):
+    from diarrhizer.projects import reserve_job
+    return [reserve_job(out, Path(f"{name}.wav"), project=project, team=team,
+                        naming_template="CUSTOM", custom=name)
+            for name, project, team in (("alpha", "First", "Coders"),
+                                       ("beta", "First", "Coders"), ("gamma", "Other", "Team"))]
+
+
+def _choose_move(monkeypatch, project, team="", after=None):
+    def choose(dialog):
+        dialog._project.setCurrentText(project)
+        dialog._team.setCurrentText(team)
+        if after:
+            after()
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(history_screen.MoveJobsDialog, "exec", choose)
+
+
+def test_history_multiselection_survives_refresh_sort_and_group_changes(qapp, isolated, tmp_path):
+    out = tmp_path / "out"
+    a, b, c = _move_history_jobs(out)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    screen = history_screen.HistoryScreen()
+    screen._select_job_paths({a, c})
+    screen.refresh()
+    screen._on_header_clicked(1)
+    assert screen._selected_job_paths() == {a, c}
+    screen._group_teams.setChecked(False)
+    assert screen._selected_job_paths() == {a, c}
+    screen._group_projects.setChecked(False)
+    assert screen._selected_job_paths() == {a, c}
+    assert len(screen._table.selectionModel().selectedRows()) == 2
+    assert screen._jobs[screen._table.currentRow()].job_dir in {a, c}
+    screen._group_teams.setChecked(True)
+    assert screen._selected_job_paths() == {a, c}
+    assert screen._selection_label.text() == "Выбрано: 2"
+    assert Path(screen._tree.currentItem().data(0, Qt.ItemDataRole.UserRole)) in {a, c}
+
+
+def test_history_group_selection_deduplicates_jobs_and_respects_filter(qapp, isolated, tmp_path):
+    out = tmp_path / "out"
+    a, b, c = _move_history_jobs(out)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    screen = history_screen.HistoryScreen()
+    screen._tree.selectAll()
+    assert screen._selected_job_paths() == {a, b, c}
+    screen._filter_field.setText("Coders")
+    screen._tree.selectAll()
+    assert screen._selected_job_paths() == {a, b}
+    screen._tree.clearSelection()
+    group = screen._tree.topLevelItem(0)
+    group.setSelected(True)
+    group.child(0).child(0).setSelected(True)
+    assert screen._selected_job_paths() == {a, b}
+    assert screen._selection_label.text() == "Выбрано: 2"
+
+
+@pytest.mark.parametrize("grouped", [True, False])
+def test_history_moves_only_selected_visible_jobs(qapp, isolated, tmp_path, monkeypatch, grouped):
+    out = tmp_path / "out"
+    a, b, c = _move_history_jobs(out)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    screen = history_screen.HistoryScreen()
+    if not grouped:
+        screen._group_projects.setChecked(False)
+        screen._group_teams.setChecked(False)
+    screen._select_job_paths({a, c})
+    screen._filter_field.setText("Coders")  # gamma is excluded from the transfer in either view.
+    received = []
+    screen.jobs_moved.connect(received.append)
+    _choose_move(monkeypatch, "New", "Designers")
+    screen._move_selected()
+    assert received == [{a: out / "New" / "Designers" / a.name}]
+    assert b.exists() and c.exists() and not a.exists()
+    assert (out / "New" / "Designers" / a.name / "job.json").exists()
+
+
+def test_move_dialog_cancel_is_read_only_and_lists_existing_teams(qapp, isolated, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    a, _, _ = _move_history_jobs(out)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    screen = history_screen.HistoryScreen()
+    screen._select_job_paths({a})
+    def cancel(dialog):
+        assert "Coders" in [dialog._team.itemText(i) for i in range(dialog._team.count())]
+        dialog._project.setCurrentText("Not created")
+        dialog._team.setCurrentText("Nor this")
+        return QDialog.DialogCode.Rejected
+    monkeypatch.setattr(history_screen.MoveJobsDialog, "exec", cancel)
+    received = []
+    screen.jobs_moved.connect(received.append)
+    screen._move_selected()
+    assert a.exists() and not (out / "Not created").exists()
+    assert received == []
+
+
+def test_history_checks_busy_selection_again_after_destination_dialog(qapp, isolated, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    a, b, _ = _move_history_jobs(out)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    busy = []
+    screen = history_screen.HistoryScreen(is_busy=lambda path: path in busy)
+    screen._select_job_paths({a, b})
+    assert screen._move_button.isEnabled()
+    warnings = _warnings(monkeypatch)
+    _choose_move(monkeypatch, "New", "Team", after=lambda: busy.append(b))
+    screen._move_selected()
+    assert a.exists() and b.exists() and not (out / "New").exists()
+    assert warnings and "ожидающие" in warnings[0]
+    screen._select_job_paths({a, b})
+    assert not screen._move_button.isEnabled()
+
+
+def test_moving_open_result_keeps_unsaved_names_and_refreshes_team(qapp, isolated, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from diarrhizer.projects import change_participant, ensure_scope, participants
+    from diarrhizer_gui.main_window import MainWindow
+    job = _finished_job(tmp_path)
+    root = tmp_path / "out"
+    target = ensure_scope(root, "New", "Designers")
+    change_participant(target, "Bob")
+    isolated().setValue(settings_keys.OUT_DIR, str(root))
+    result = result_screen.ResultScreen()
+    result.load(job)
+    result._speaker_fields["Speaker_00"].setText("Unsaved Alice")
+    new_job = new_job_screen.NewJobScreen()
+    queue = JobQueue()
+    queued = QueuedRun("full", {"job_dir": job, "out_dir": job.parent}, "old", status=DONE)
+    queue.add([queued])
+    host = SimpleNamespace(_queue=queue, _result=result, _new_job=new_job,
+                           _monitor=SimpleNamespace(_result_job_dir=job))
+    host._scope_renamed = lambda a, b: MainWindow._scope_renamed(host, a, b)
+    history = history_screen.HistoryScreen()
+    history.jobs_moved.connect(lambda moved: MainWindow._jobs_moved(host, moved))
+    history._select_job_paths({job})
+    _choose_move(monkeypatch, "New", "Designers")
+    history._move_selected()
+    destination = target / job.name
+    assert result._job_dir == queued.job_dir == host._monitor._result_job_dir == destination
+    assert queued.kwargs["out_dir"] == target
+    assert result._roster_dir == target
+    assert result._speaker_fields["Speaker_00"].text() == "Unsaved Alice"
+    assert result._save_button.isEnabled()
+    assert result._speaker_fields["Speaker_00"].completer().model().stringList() == ["Bob"]
+    assert participants(target) == ["Bob"]
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Discard)
+
+
 def test_result_speaker_roster_requires_explicit_add_and_preserves_typed_names(qapp, tmp_path):
     import shutil
     from diarrhizer.projects import reserve_job, change_participant, participants

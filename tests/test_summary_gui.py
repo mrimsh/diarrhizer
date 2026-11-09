@@ -624,11 +624,12 @@ def test_dialog_offers_the_defaults_and_says_where_the_text_goes(qapp, tmp_path,
     assert dialog._provider_combo.currentData() == "ChatGPT"
     assert dialog._create_button.isEnabled()
     assert "через Codex CLI (аккаунт ChatGPT)" in dialog._target_label.text()
-    assert "export/result.md" in dialog._target_label.text()
+    # Project jobs can have title-named exports; the caption describes the saved protocol.
+    assert "Сохранённый протокол (" in dialog._target_label.text()
 
     dialog._provider_combo.setCurrentIndex(dialog._provider_combo.findData("gw"))
     assert "на https://api.example.com/v1" in dialog._target_label.text()
-    assert "Протокол (export/result.md, " in dialog._target_label.text()  # the comma survived the formatting
+    assert f"Сохранённый протокол ({dialog._transcript_chars} симв.)" in dialog._target_label.text()
     assert "будут" not in dialog._status.text()
     assert dialog._view.toPlainText().startswith("Саммари для этого задания ещё не создавались")
 
@@ -1904,7 +1905,7 @@ def test_the_screen_shows_which_context_is_used_and_how_the_provider_handles_it(
     dialog = _open_chat(tmp_path)
 
     text = dialog._context_label.text()
-    assert "meeting.mp4" in text and "export/result.md" in text and "симв." in text and "токенов" in text
+    assert "meeting.mp4" in text and "сохранённый транскрипт" in text and "симв." in text and "токенов" in text
     assert "Codex" in text and "предел не задан" in text  # the default provider is the ChatGPT one
 
     dialog._provider_combo.setCurrentIndex(dialog._provider_combo.findData("gw"))

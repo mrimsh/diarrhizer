@@ -2,10 +2,11 @@
 
 import json
 import re
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 
-from diarrhizer.utils import write_json_atomic
+from diarrhizer.utils import write_json_atomic, write_text_atomic
 
 PROJECT_FILE = ".diarrhizer-project.json"
 TEAM_FILE = ".diarrhizer-team.json"
@@ -184,6 +185,146 @@ def rename_scope(directory: Path, name: str) -> Path:
             raise
     return target
 # [SEMANTIC-END] LIBRARY:SCOPES
+
+
+# [SEMANTIC-BEGIN] LIBRARY:MOVE_JOBS
+# @purpose: Move a selected batch of jobs into a project/team without overwriting recordings or exports
+# @description: Only discovered ordinary job directories under the library root are accepted. All source
+#   locks are acquired before creating scopes; both destination and source job locks protect renames.
+#   Folder collisions receive numeric suffixes; job identity, files, names and team rosters stay intact.
+#   Recorded paths inside moved jobs are relocated. Failures roll moved folders and metadata back;
+#   an incomplete rollback reports its remaining relocations so the GUI can keep live references correct.
+# @inputs: library root, selected job paths, explicit project/team (empty means its parent root)
+# @outputs: old-to-new directory mapping for jobs that changed location
+# @sideEffects: Creates destination scopes and lock files; renames job folders; updates internal run paths
+# @errors: ValueError for unsafe targets, OSError/RuntimeError for busy or failed moves; JobMoveError on incomplete rollback
+# @see: LIBRARY:SCOPES, ARTIFACTS:WRITE_LOCK, GUI:MOVE_JOBS
+class JobMoveError(RuntimeError):
+    def __init__(self, message: str, moved: dict[Path, Path]):
+        super().__init__(message)
+        self.moved = moved
+
+
+def _move_destination(root: Path, project: str, team: str) -> Path:
+    destination = scope_path(root, project, team)
+    directory = root
+    for name, marker in ((project, PROJECT_FILE), (team, TEAM_FILE)):
+        if name:
+            directory /= name
+            if directory.exists() and not (directory / marker).is_file():
+                raise ValueError(f"Папка уже существует и не является проектом/командой: {directory}")
+    return destination
+
+
+def _relocate_recorded_path(value, moves: dict[Path, Path]):
+    if isinstance(value, str):
+        path = Path(value)
+        if path.is_absolute():
+            for previous, current in moves.items():
+                if path.is_relative_to(previous):
+                    return str(current / path.relative_to(previous))
+    return value
+
+
+def _move_metadata(job: Path, moves: dict[Path, Path]) -> tuple[bytes, dict] | None:
+    file = job / "meta" / "run.json"
+    if not file.is_file():
+        return None
+    data = read_config(file)
+    updated = dict(data)
+    for key in ("input_path", "output_path"):
+        if key in updated:
+            updated[key] = _relocate_recorded_path(updated[key], moves)
+    for key in ("output_paths", "archive_paths"):
+        if isinstance(updated.get(key), list):
+            updated[key] = [_relocate_recorded_path(p, moves) for p in updated[key]]
+    if isinstance(updated.get("source_fingerprint"), dict):
+        fingerprint = dict(updated["source_fingerprint"])
+        if "path" in fingerprint:
+            fingerprint["path"] = _relocate_recorded_path(fingerprint["path"], moves)
+        updated["source_fingerprint"] = fingerprint
+    return (file.read_bytes(), updated) if updated != data else None
+
+
+def move_jobs(root: Path, jobs, *, project: str = "", team: str = "") -> dict[Path, Path]:
+    from diarrhizer.artifacts import job_write_lock
+    root = Path(root).resolve()
+    destination = _move_destination(root, project, team)
+    sources = []
+    available = {p.resolve() for p in iter_job_dirs(root)}
+    for job in jobs:
+        job = Path(job)
+        if not _ordinary_dir(job) or job.resolve() not in available:
+            raise ValueError(f"Не является заданием в {root}: {job}")
+        source = job.resolve()
+        if not source.is_relative_to(root) or source == root:
+            raise ValueError(f"Задание находится вне папки результатов: {job}")
+        if source not in sources:
+            sources.append(source)
+    moves = {}
+    for source in sources:
+        if source.parent == destination:
+            continue
+        target = destination / source.name
+        index = 2
+        while target.exists() or target in moves.values():
+            suffix = f"_{index}"
+            target = destination / f"{source.name[:120 - len(suffix)]}{suffix}"
+            index += 1
+        if not target.resolve().is_relative_to(root):
+            raise ValueError(f"Папка назначения находится вне результатов: {target}")
+        moves[source] = target
+    if not moves:
+        return {}
+    with ExitStack() as locks:
+        # Hold source locks even for no-op members: a busy selection is never partly moved.
+        for source in sorted(sources):
+            locks.enter_context(job_write_lock(source))
+            if not _ordinary_dir(source):
+                raise ValueError(f"Задание изменилось: {source}")
+        # Locking a not-yet-created project creates only a sibling lock file.
+        if project:
+            locks.enter_context(job_write_lock(root / project))
+        metadata = {source: _move_metadata(source, moves) for source in sources}
+        ensure_scope(root, project, team)
+        for target in sorted(moves.values()):
+            locks.enter_context(job_write_lock(target))
+        completed = {}
+        rewritten = []
+        try:
+            for source, target in moves.items():
+                if target.exists():
+                    raise FileExistsError(f"Папка назначения уже существует: {target}")
+                source.rename(target)
+                completed[source] = target
+            for source in sources:
+                target = moves.get(source, source)
+                if metadata[source] is not None:
+                    _, updated = metadata[source]
+                    rewritten.append(source)
+                    write_json_atomic(target / "meta" / "run.json", updated)
+        except Exception as exc:
+            failures = []
+            for source in reversed(rewritten):
+                try:
+                    # Restore the exact original record before returning its directory.
+                    write_text_atomic(moves.get(source, source) / "meta" / "run.json", metadata[source][0].decode("utf-8"))
+                except OSError as rollback_error:
+                    failures.append(str(rollback_error))
+            for source, target in reversed(list(completed.items())):
+                try:
+                    if source.exists():
+                        raise FileExistsError(f"Не удалось вернуть задание: {source}")
+                    target.rename(source)
+                    del completed[source]
+                except OSError as rollback_error:
+                    failures.append(str(rollback_error))
+            if failures:
+                raise JobMoveError(f"Перенос прерван: {exc}. Не удалось полностью отменить изменения: "
+                                   + "; ".join(failures), completed) from exc
+            raise
+    return moves
+# [SEMANTIC-END] LIBRARY:MOVE_JOBS
 
 
 # [SEMANTIC-BEGIN] LIBRARY:JOB_IDENTITY

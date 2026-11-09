@@ -61,6 +61,8 @@ APP_TITLE = f"Diarrhizer {__version__}"
 #   Result changes are guarded before replacing/closing its editor. Queue allocation failures
 #   become failed items; planning a restart has no filesystem side effects.
 #   Project/team settings are passed into allocation; queued descendants prevent scope renames.
+#   Batch job moves relocate live result/queue paths and refresh destination-team suggestions without
+#   discarding unsaved speaker names or enrolling those names in the destination roster.
 #   The window title and sidebar retain the shared release version and sole application author.
 # @inputs: user actions on the screens
 # @outputs: pipeline jobs, screen navigation
@@ -140,6 +142,7 @@ class MainWindow(QMainWindow):
         self._history.view_result_requested.connect(self._show_result)
         self._history.runs_requested.connect(self.enqueue)
         self._history.scope_renamed.connect(self._scope_renamed)
+        self._history.jobs_moved.connect(self._jobs_moved)
 
         self._result = ResultScreen()
         self._result.back_requested.connect(self._go_to_history)
@@ -225,13 +228,15 @@ class MainWindow(QMainWindow):
             return value
         for item in self._queue.items:
             item.job_dir = relocated(item.job_dir)
-            for key in ("job_dir", "out_dir"):
+            for key in ("job_dir", "out_dir", "input_path"):
                 if key in item.kwargs:
                     item.kwargs[key] = relocated(item.kwargs[key])
         result = self._result
         result._job_dir = relocated(result._job_dir)
         if hasattr(result, "_roster_dir"):
             result._roster_dir = relocated(result._roster_dir)
+        if isinstance(getattr(result, "_meta", None), dict) and result._meta.get("input_path"):
+            result._meta["input_path"] = str(relocated(result._meta["input_path"]))
         self._monitor._result_job_dir = relocated(self._monitor._result_job_dir)
         panel = self._new_job._project_panel
         from diarrhizer.projects import scope_path
@@ -243,6 +248,21 @@ class MainWindow(QMainWindow):
             moved = relocated(selected).relative_to(panel.root()).parts
             panel.project.setCurrentText(moved[0])
             panel.team.setCurrentText(moved[1] if len(moved) > 1 else "")
+
+    def _jobs_moved(self, moves: dict) -> None:
+        from diarrhizer.projects import job_context
+        for previous, current in moves.items():
+            self._scope_renamed(previous, current)
+        destinations = set(moves.values())
+        for item in self._queue.items:
+            if item.job_dir in destinations:
+                item.kwargs["out_dir"] = item.job_dir.parent
+                project, team = job_context(item.job_dir)
+                for key, value in (("project", project), ("team", team)):
+                    if key in item.kwargs:
+                        item.kwargs[key] = value.name if value else ""
+        if self._result._job_dir in destinations:
+            self._result.refresh_team()
 
     def _is_job_busy(self, job_dir: Path) -> bool:
         try:

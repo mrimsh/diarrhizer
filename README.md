@@ -248,6 +248,16 @@ to edit its settings, rename its folder or manage participants. Renaming moves t
 with all its contents; job titles and filenames keep the names assigned when they were created.
 Running/queued jobs prevent renaming their scope.
 
+To transfer existing jobs, select several rows with **Ctrl/Shift** (or **Ctrl+A** for all displayed jobs)
+and click **Переместить…**. Selecting a project/team group in the tree includes its jobs; the current
+search filter limits the selection. Choose an existing project/team or type new names in the dialog.
+Empty team means the project root; both fields empty mean the library root. Cancelling creates no folders.
+Job titles, files, speaker assignments and storage choices stay unchanged. Conflicting folder names receive
+numeric suffixes without overwriting existing jobs. Source/destination team rosters remain independent;
+an open result immediately uses suggestions from its new team and keeps any unsaved speaker names.
+Running/queued jobs cannot be moved. Ordinary move failures roll already-moved jobs back; if the OS also
+blocks that rollback, the error reports it and history refreshes to show the remaining locations.
+
 On **Результат**, speaker fields autocomplete from the current team's known participants; **Имена ▾**
 also lists them and lets you delete each saved name. **Добавить в команду** explicitly saves a new name
 for later calls. Simply typing/saving a speaker name only updates the current job. Project-root jobs
