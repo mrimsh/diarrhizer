@@ -16,6 +16,23 @@ This will verify Python version, FFmpeg, torch/torchaudio, CUDA, torchcodec, cri
 
 ---
 
+## Merge fails: `ASR segment timestamps must be finite, non-negative and ordered`
+
+WhisperX alignment can produce a segment whose end precedes its start (for example,
+`start=1422.584`, `end=1422.564`). Merge now preserves the text, collapses this interval to
+its start and records an alignment warning; the duration of that segment remains uncertain.
+The original `asr/transcript.json` is preserved.
+
+After updating and restarting the GUI, use History → **Продолжить**, or resume from merge:
+
+```powershell
+python -m diarrhizer run --job-dir "<job folder>" --from-stage merge
+```
+
+ASR and diarization do not need to be repeated for reversed bounds. If the error instead reports
+missing, non-finite or negative bounds, it includes the segment index and values. Restart
+**transcribe** from History → **Перезапустить этап** to regenerate unusable ASR timing.
+
 ## `pip install` fails: `No matching distribution found for whisperx==3.3.1`
 
 **Symptom:**

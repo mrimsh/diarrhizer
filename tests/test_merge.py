@@ -2,6 +2,7 @@
 
 import json
 import random
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,40 @@ from diarrhizer.pipeline.stages.merge import (
 
 def test_empty_transcript_returns_empty_list():
     assert assign_speakers([], [], [{"start": 0, "end": 1, "speaker": "Speaker_00"}]) == []
+
+
+@pytest.mark.parametrize("start,end", [(1422.584, 1422.564), (2286.893, 2285.893)])
+@pytest.mark.parametrize("with_words", [False, True])
+@pytest.mark.parametrize("with_diarization", [False, True])
+def test_reversed_segment_bounds_preserve_text_with_explicit_timing_warning(
+    start, end, with_words, with_diarization,
+):
+    segments = [{"start": start, "end": end, "text": "Original  text!"}]
+    words = [{"start": None, "end": None, "word": "Original", "segment_index": 0},
+             {"start": start, "end": start + 0.1, "word": "text!", "segment_index": 0}] if with_words else []
+    diar = [{"start": start - 2, "end": start + 2, "speaker": "Speaker_01"}] if with_diarization else []
+    original = deepcopy((segments, words, diar))
+
+    result = assign_speakers(segments, words, diar)
+
+    assert len(result) == 1
+    seg = result[0]
+    assert seg["text"] == "Original  text!"
+    assert seg["start"] == seg["end"] == start
+    assert seg["speaker_id"] == ("Speaker_01" if with_diarization else "Speaker_00")
+    assert str(end) in seg["alignment_warning"]
+    assert "timing uncertain" in seg["alignment_warning"]
+    assert [w["word"] for w in seg["words"]] == [w["word"] for w in words]
+    assert all(w["start"] is None and w["end"] is None for w in seg["words"])
+    assert (segments, words, diar) == original
+
+
+@pytest.mark.parametrize("start,end", [(None, 2), (1, None), (float("nan"), 2),
+                                      (1, float("inf")), (-1, 2), (2, -1)])
+def test_unusable_segment_bounds_report_index_and_values(start, end):
+    with pytest.raises(ValueError, match="segment 1, start=.*end=.*Re-run the transcribe"):
+        assign_speakers([{"start": 0, "end": 1, "text": "ok"},
+                         {"start": start, "end": end, "text": "keep"}], [], [])
 
 
 def test_empty_diarization_defaults_all_segments_to_speaker_00():
@@ -366,6 +401,23 @@ def test_run_without_transcript_file_still_raises_file_not_found(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="Transcript not found"):
         MergeStage().run(_job(job_dir))
+
+
+def test_run_recovers_reversed_bounds_and_records_warning_without_rewriting_asr(tmp_path, caplog):
+    job_dir = tmp_path / "job"
+    path = job_dir / "asr" / "transcript.json"
+    path.parent.mkdir(parents=True)
+    original = json.dumps({"segments": [{"start": 1422.584, "end": 1422.564, "text": "Keep me"}]})
+    path.write_text(original, encoding="utf-8")
+
+    result = MergeStage().run(_job(job_dir))
+
+    assert result["status"] == "completed"
+    output = json.loads((job_dir / "merged" / "segments.json").read_text(encoding="utf-8"))
+    assert output["segments"][0]["text"] == "Keep me"
+    assert output["metadata"]["warnings"] == ["Segment 0: " + output["segments"][0]["alignment_warning"]]
+    assert "alignment warnings" in caplog.text
+    assert path.read_text(encoding="utf-8") == original
 
 
 def test_run_with_diarization_file_present_assigns_real_speakers(tmp_path):

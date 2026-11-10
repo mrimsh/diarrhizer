@@ -278,6 +278,12 @@ If word text is incomplete or its timings are missing/unordered, the segment is 
 its original text and a whole-segment speaker. `alignment_warning` on the segment and
 `metadata.warnings` explain the fallback. SRT never reconstructs text from an incomplete word list.
 
+If alignment produces a segment whose finite, non-negative `end` precedes `start`, merge keeps
+its text unsplit and sets `end = start`. This zero-duration fallback does not claim a reliable
+duration: `alignment_warning` records the original bounds, `metadata.warnings` carries it to
+exports, and the stage logs a warning count. The ASR artifact is unchanged. Missing, non-finite
+or negative segment bounds still raise an error naming the segment index and bounds.
+
 ### Resume and cache identity
 
 `pipeline/settings.py` (`CONFIG:RESUME`) is the shared CLI/GUI reader. The public runner applies

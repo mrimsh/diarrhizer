@@ -29,13 +29,15 @@ logger = logging.getLogger(__name__)
 #   outnumber the ASR segments they came from, since an ASR segment spanning a speaker change
 #   is split at that boundary (MERGE:SPEAKER_TURNS).
 #   Partial or inconsistent alignment retains the original segment text unsplit and records a warning.
+#   Reversed finite, non-negative segment bounds collapse to the start with an alignment warning;
+#   the source transcript is never rewritten. Missing/non-finite/negative bounds remain errors.
 #   cache_version=2 invalidates results predating text-preserving merge, only when merge is in range.
 #   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
 # @inputs: artifacts/asr/transcript.json (required), artifacts/diar/diarization.json (optional)
 # @outputs: artifacts/merged/segments.json
 # @sideEffects: Reads JSON files, writes merged segments to disk,
-#   logs progress via logging (INFO, extra={"stage": "merge"})
-# @errors: FileNotFoundError if transcript.json is missing
+#   logs progress and alignment warning counts (INFO/WARNING, extra={"stage": "merge"})
+# @errors: FileNotFoundError if transcript.json is missing; ValueError for unusable ASR timing
 # @see: STAGE:TRANSCRIBE, STAGE:DIARIZE, MERGE:ASSIGN_SPEAKERS, MERGE:SPEAKER_TURNS
 class MergeStage:
     """Stage for merging ASR transcripts with speaker diarization."""
@@ -143,6 +145,13 @@ class MergeStage:
         # Write merged segments to JSON
         write_json_atomic(segments_output, output_data)
 
+        if output_data["metadata"]["warnings"]:
+            logger.warning(
+                "[%s] %d segment(s) have alignment warnings; see metadata.warnings in %s",
+                self.NAME, len(output_data["metadata"]["warnings"]), segments_output,
+                extra={"stage": self.NAME},
+            )
+
         logger.info(f"[{self.NAME}] Completed in {duration:.2f}s", extra={"stage": self.NAME})
         logger.info(
             f"[{self.NAME}] Segments: {len(merged_segments)} "
@@ -235,10 +244,12 @@ DEFAULT_MIN_TURN_DURATION = 0.4
 #   in seg["words"]. Output segments can therefore outnumber input ASR segments.
 #   segment_index preserves ownership of untimed words. Incomplete/non-monotonic timing or
 #   incomplete word text falls back to an unsplit original segment, never dropping text.
+#   Finite non-negative end < start is a recoverable alignment defect: collapse to start,
+#   retain text unsplit and record the original bounds in alignment_warning, without mutating inputs.
 # @inputs: transcript_segments, transcript_words, diar_segments
 # @outputs: List of merged segments with speaker_id, one speaker per segment
 # @sideEffects: None (pure function)
-# @errors: ValueError for invalid or unordered segment timestamps
+# @errors: ValueError for unusable segment times (index/bounds included) or unordered starts
 # @see: STAGE:MERGE, MERGE:SPEAKER_TURNS
 def assign_speakers(
     transcript_segments: list[dict],
@@ -285,24 +296,23 @@ def assign_speakers(
     if not transcript_segments:
         return []
 
-    for seg in transcript_segments:
+    normalized_segments = []
+    for index, seg in enumerate(transcript_segments):
         if not _valid_times(seg):
-            raise ValueError("ASR segment timestamps must be finite, non-negative and ordered")
-
-    # Default speaker if no diarization
-    default_speaker = "Speaker_00"
-
-    # If no diarization, assign all to default speaker
-    if not diar_segments and not transcript_words:
-        return [
-            {
-                "start": seg["start"],
-                "end": seg["end"],
-                "speaker_id": default_speaker,
-                "text": seg.get("text", ""),
-            }
-            for seg in transcript_segments
-        ]
+            start, end = seg.get("start"), seg.get("end")
+            if _valid_times({"start": end, "end": start}):
+                seg = {**seg, "end": start, "alignment_warning": (
+                    f"Reversed ASR segment bounds (start={start!r}, end={end!r}); "
+                    "end set to start, timing uncertain; original text kept unsplit"
+                )}
+            else:
+                raise ValueError(
+                    "ASR segment timestamps must be finite, non-negative and ordered "
+                    f"(segment {index}, start={start!r}, end={end!r}). "
+                    "Re-run the transcribe stage to restore segment timing."
+                )
+        normalized_segments.append(seg)
+    transcript_segments = normalized_segments
 
     # Use source ownership first. Legacy flat words use a binary time lookup;
     # unlike the old forward cursor it also handles unsorted word timestamps.
@@ -340,16 +350,18 @@ def assign_speakers(
         valid_times = words and all(_valid_times(w) for w in words)
         ordered = valid_times and [w["start"] for w in words] == sorted(w["start"] for w in words)
 
-        if words and (not complete_text or not ordered):
+        timing_warning = seg.get("alignment_warning")
+        if timing_warning or (words and (not complete_text or not ordered)):
             speaker = _find_overlapping_speaker(seg_start, seg_end, diar_segments)
             # Preserve available words as diagnostic data; exporters must keep
             # the original text when it does not match the word list.
             retained = [{"word": w.get("word", ""), "speaker_id": speaker,
-                         "start": w["start"] if _valid_times(w) and ordered else None,
-                         "end": w["end"] if _valid_times(w) and ordered else None} for w in words]
+                         "start": w["start"] if _valid_times(w) and ordered and not timing_warning else None,
+                         "end": w["end"] if _valid_times(w) and ordered and not timing_warning else None}
+                        for w in (words or [])]
             merged_segments.append({
                 "start": seg_start, "end": seg_end, "speaker_id": speaker, "text": seg_text,
-                "alignment_warning": "Incomplete or unordered word alignment; original text kept unsplit",
+                "alignment_warning": timing_warning or "Incomplete or unordered word alignment; original text kept unsplit",
                 "words": retained,
             })
             continue
