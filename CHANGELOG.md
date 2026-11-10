@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1 — Unreleased
+
+- Require a minor version increment in every new commit, including documentation, tests and merges,
+  with the version bump in the same commit as the changes (see AGENTS.md).
+- Advance the shared application version to 2.1; CLI, GUI, launcher and newly built distribution
+  metadata use the complete recorded `MAJOR.MINOR` value.
+
 ## 2.0 — 2026-11-06
 
 ### Unified application release

@@ -2,14 +2,21 @@
 
 ## Release version
 
-The current application release is **2.0** by **MRIMSH**. `src/diarrhizer/__init__.py` defines
+The current source version is **2.1** by **MRIMSH**. `src/diarrhizer/__init__.py` defines
 `__version__` for the CLI (`python -m diarrhizer --version`), GUI window/sidebar and Qt metadata,
 Windows launcher and provider client identity. Setuptools reads that same value when building
 package metadata; no processing libraries are imported to read the version. After changing it,
 reinstall an editable package with `python -m pip install --no-deps --no-build-isolation -e .`
 to refresh the installed distribution metadata used in artifact provenance.
 
-For the GitHub release, use the `chore(release): 2.0` marker commit as the target for tag `v2.0`
+The [version policy](../AGENTS.md#version-policy-must-follow) requires one minor increment in
+every new commit, including documentation, tests and merges: `2.0 → 2.1 → 2.2` (and `2.9 → 2.10`).
+Include the bump in that same commit, update current-version documentation and the changelog,
+and show the full `MAJOR.MINOR` everywhere. Amending keeps one increment from the parent.
+Only an explicit major-version change resets the minor component. Recorded versions work in
+installed packages without Git; publishing a GitHub release remains a separate action.
+
+The published 2.0 GitHub release uses the `chore(release): 2.0` marker commit for tag `v2.0`
 and the [2.0 changelog entry](../CHANGELOG.md#20--2026-11-06) as release notes.
 Build the wheel and standalone Windows launcher from that commit using the checks below and the
 [launcher build instructions](launcher.md#build-and-validate).

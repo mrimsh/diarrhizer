@@ -79,6 +79,26 @@ If a task requires a token, instruct the user to set `HF_TOKEN` / `HUGGINGFACE_H
 
 ---
 
+## Version policy (must-follow)
+
+- Use the composite application version `MAJOR.MINOR`, for example `2.0`, `2.1`, `2.2`.
+- Every new commit must increment `MINOR` by exactly one relative to its first parent,
+  including documentation-only, test-only, tooling and merge commits. Keep `MAJOR` unchanged
+  unless the user explicitly requests a new major version; then reset `MINOR` to zero.
+  Minor numbers do not roll over at 9: `2.9` is followed by `2.10`.
+- Include the version bump in the same commit as the changes, never in a separate follow-up
+  commit. When amending a commit, keep one increment relative to its parent, not one per amend.
+- The single source of truth is `src/diarrhizer/__init__.py::__version__`. Show the full
+  `MAJOR.MINOR` value in CLI, GUI, launcher and built package/executable metadata; import it
+  rather than hardcoding interface versions. Never derive the version from Git at runtime.
+- Update current-version documentation and the changelog with the bump. Preserve historical
+  release notes and published tags/assets; a source commit does not itself publish a release.
+- Before committing, verify `python -m diarrhizer --version`, refresh editable distribution
+  metadata as described in `docs/development.md`, and check that the staged version has advanced
+  from the parent. Do not create a commit or publish solely because this policy exists.
+
+---
+
 ## How to work on changes
 
 When implementing a change:
@@ -87,4 +107,5 @@ When implementing a change:
 3) Implement (prefer the existing pipeline/stage/adapters structure).
 4) Add/adjust basic checks (at least `doctor` expectations and a minimal smoke run if possible).
 5) Update docs if user-facing behavior changed.
+6) Before a commit, apply the version policy above and include the bump in that commit.
 
