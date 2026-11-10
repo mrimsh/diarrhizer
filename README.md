@@ -258,6 +258,17 @@ an open result immediately uses suggestions from its new team and keeps any unsa
 Running/queued jobs cannot be moved. Ordinary move failures roll already-moved jobs back; if the OS also
 blocks that rollback, the error reports it and history refreshes to show the remaining locations.
 
+You can also drag the selected jobs onto a project/team group in the history tree, including empty
+projects/teams. Dropping opens the same destination dialog; the tree changes only after confirmation.
+The toolbar button is labelled **Переместить / переименовать…**. Enable
+**Переименовать задания и сохранённые файлы по шаблону назначения** to use the target project/team's
+inherited naming template. The preview shows each old/new name and collision suffix before applying.
+The original job date and its CUSTOM value are preserved; an optional common CUSTOM value can replace it.
+Renaming updates the job folder/title, retained originals/working audio/archives, and MD/TXT/SRT/JSON
+export filenames. Retention rules stay in effect; no external original is moved or renamed.
+Existing jobs with legacy `result.*` exports are supported. Restart an already-open GUI after updating
+the source/install so the new controls are loaded.
+
 On **Результат**, speaker fields autocomplete from the current team's known participants; **Имена ▾**
 also lists them and lets you delete each saved name. **Добавить в команду** explicitly saves a new name
 for later calls. Simply typing/saving a speaker name only updates the current job. Project-root jobs

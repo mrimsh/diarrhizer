@@ -576,6 +576,11 @@ class ResultScreen(QWidget):
             return
         project, team = job_context(self._job_dir)
         self._roster_dir = team or project or self._job_dir.parent
+        identity = read_object(self._job_dir / "job.json")
+        if identity:
+            self._title_label.setText(identity["title"])
+            self._meta = read_object(self._job_dir / "meta" / "run.json")
+            self._subtitle_label.setText(self._subtitle())
         known = self._known_names()
         for sid, field in self._speaker_fields.items():
             self._set_completer(field, known)

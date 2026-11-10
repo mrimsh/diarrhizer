@@ -179,3 +179,82 @@ def test_incomplete_rollback_reports_actual_remaining_paths(tmp_path, monkeypatc
     assert caught.value.moved == {a: tmp_path / "New" / "a"}
     assert b.exists() and not a.exists()
     assert (caught.value.moved[a] / "notes.txt").read_text() == "keep me"
+
+
+@pytest.mark.parametrize("portable", [False, True])
+def test_rename_uses_destination_template_and_keeps_export_bundle_and_audio(tmp_path, portable):
+    from diarrhizer.projects import JOB_FILE, media_path, plan_job_moves
+    job = (reserve_job(tmp_path, Path("source.wav"), project="Old") if portable else
+           _legacy(tmp_path, "call_20261002_120000"))
+    if portable:
+        identity = read_config(job / JOB_FILE)
+        write_json_atomic(job / JOB_FILE, {**identity, "created_at": "2026-10-02T12:00:00"})
+    external = tmp_path.parent / (tmp_path.name + "-external.wav")
+    external.write_bytes(b"external original")
+    audio = media_path(job, "working", "wav")
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"working audio")
+    (job / "original").mkdir()
+    (job / "original" / "source.wav").write_bytes(b"retained original")
+    write_json_atomic(job / "meta" / "run.json", {"input_path": str(external), "output_path": str(audio)})
+    write_json_atomic(job / "merged" / "segments.json", {
+        "segments": [{"start": 0, "end": 1, "text": "Unchanged transcript", "speaker_id": "Speaker_00"}],
+    })
+    run_pipeline(job_dir=job, out_dir=tmp_path, stages=[ExportStage()], speakers={"Speaker_00": "Alice"})
+    team = ensure_scope(tmp_path, "New", "Designers")
+    save_scope(team, {"naming_template": "TEAM-YYYY_MM_DD-PROJECT-CUSTOM"})
+    before = _files(job)
+    preview = plan_job_moves(tmp_path, [job], project="New", team="Designers", rename=True, custom="daily")
+    assert job.exists() and _files(job) == before
+    assert preview[job].name == "Designers-2026_10_02-New-daily"
+    moved = move_jobs(tmp_path, [job], project="New", team="Designers", rename=True, custom="daily")
+    target = moved[job]
+    assert target == preview[job]
+    assert read_config(target / JOB_FILE)["title"] == target.name
+    assert media_path(target, "working", "wav").read_bytes() == b"working audio"
+    assert media_path(target, "original", "wav").read_bytes() == b"retained original"
+    assert media_path(target, "working", "wav").stem == target.name
+    assert export_path(target, "md").stem == target.name
+    assert "Alice" in read_transcript(target)
+    assert bundle_valid(target / "export", "manifest.json")
+    assert read_config(target / "meta" / "run.json")["output_path"] == str(media_path(target, "working", "wav"))
+    assert external.read_bytes() == b"external original"
+    run_pipeline(job_dir=target, out_dir=tmp_path, stages=[ExportStage()], speakers={"Speaker_00": "Bob"})
+    assert "Bob" in read_transcript(target)
+
+
+def test_rename_failure_restores_media_identity_exports_and_manifest(tmp_path, monkeypatch):
+    job = reserve_job(tmp_path, Path("call.wav"), project="Old")
+    audio = job / "audio" / "working" / "call.wav"
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b"audio")
+    snapshot = _files(job)
+    original = projects.write_json_atomic
+    def fail_identity(path, data):
+        if Path(path).name == "job.json":
+            raise OSError("synthetic identity write error")
+        return original(path, data)
+    monkeypatch.setattr(projects, "write_json_atomic", fail_identity)
+    with pytest.raises(OSError, match="identity write"):
+        move_jobs(tmp_path, [job], project="New", rename=True)
+    assert _files(job) == snapshot
+
+
+def test_rename_in_place_and_preview_collisions(tmp_path):
+    from diarrhizer.projects import plan_job_moves
+    a = reserve_job(tmp_path, Path("a.wav"), project="Project")
+    b = reserve_job(tmp_path, Path("b.wav"), project="Project")
+    save_scope(a.parent, {"naming_template": "PROJECT-CUSTOM"})
+    preview = plan_job_moves(tmp_path, [a, b], project="Project", rename=True, custom="daily")
+    assert [p.name for p in preview.values()] == ["Project-daily", "Project-daily_2"]
+    assert move_jobs(tmp_path, [a, b], project="Project", rename=True, custom="daily") == preview
+
+
+def test_rename_rejects_damaged_export_before_touching_files(tmp_path):
+    job = reserve_job(tmp_path, Path("call.wav"), project="Old")
+    write_json_atomic(job / "export" / "manifest.json", {"broken": True})
+    snapshot = _files(job)
+    with pytest.raises(ValueError, match="экспорт"):
+        move_jobs(tmp_path, [job], project="New", rename=True)
+    assert _files(job) == snapshot
+    assert not (tmp_path / "New").exists()

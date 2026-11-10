@@ -1068,6 +1068,63 @@ def test_history_moves_only_selected_visible_jobs(qapp, isolated, tmp_path, monk
     assert (out / "New" / "Designers" / a.name / "job.json").exists()
 
 
+def test_internal_drop_emits_frozen_paths_and_ignores_job_or_external_targets(qapp, monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtCore import QPointF
+    from PySide6.QtWidgets import QTreeWidgetItem
+    paths = {Path("one"), Path("two")}
+    tree = history_screen.JobTree(lambda: paths)
+    group = QTreeWidgetItem(["Team"])
+    group.setData(0, Qt.ItemDataRole.UserRole + 2, ("Project", "Team"))
+    leaf = QTreeWidgetItem(["Job"])
+    tree.addTopLevelItem(group)
+    group.addChild(leaf)
+    received = []
+    tree.move_dropped.connect(lambda p, project, team: received.append((p, project, team)))
+    accepted, ignored = [], []
+    event = SimpleNamespace(source=lambda: tree, position=lambda: QPointF(0, 0),
+                            acceptProposedAction=lambda: accepted.append(True), ignore=lambda: ignored.append(True))
+    tree._drag_paths = set(paths)
+    monkeypatch.setattr(tree, "itemAt", lambda pos: group)
+    tree.dropEvent(event)
+    tree._drag_paths = set()
+    qapp.processEvents()
+    assert received == [(paths, "Project", "Team")]
+    assert accepted == [True]
+    tree._drag_paths = paths
+    monkeypatch.setattr(tree, "itemAt", lambda pos: leaf)
+    tree.dropEvent(event)
+    event.source = lambda: None
+    monkeypatch.setattr(tree, "itemAt", lambda pos: group)
+    tree.dropEvent(event)
+    assert len(ignored) == 2
+
+
+def test_drop_on_empty_team_opens_rename_preview_and_executes_same_plan(qapp, isolated, tmp_path, monkeypatch):
+    from diarrhizer.projects import ensure_scope, read_config, save_scope
+    root = tmp_path / "out"
+    a, b, _ = _move_history_jobs(root)
+    target = ensure_scope(root, "Mobile", "Developers")
+    save_scope(target, {"naming_template": "PROJECT-TEAM-CUSTOM"})
+    isolated().setValue(settings_keys.OUT_DIR, str(root))
+    screen = history_screen.HistoryScreen()
+    groups = [screen._tree.topLevelItem(i) for i in range(screen._tree.topLevelItemCount())]
+    mobile = next(item for item in groups if item.text(0) == "Mobile")
+    assert screen._tree.drop_destination(mobile.child(0)) == ("Mobile", "Developers")
+    def accept(dialog):
+        assert dialog.destination() == ("Mobile", "Developers")
+        dialog._rename.setChecked(True)
+        dialog._custom.setText("daily")
+        assert "Mobile-Developers-daily_2" in dialog._names_preview.toPlainText()
+        assert a.exists() and b.exists()
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(history_screen.MoveJobsDialog, "exec", accept)
+    screen._drop_jobs({a, b}, "Mobile", "Developers")
+    assert not a.exists() and not b.exists()
+    assert read_config(target / "Mobile-Developers-daily" / "job.json")["title"] == "Mobile-Developers-daily"
+    assert (target / "Mobile-Developers-daily_2").is_dir()
+
+
 def test_move_dialog_cancel_is_read_only_and_lists_existing_teams(qapp, isolated, tmp_path, monkeypatch):
     out = tmp_path / "out"
     a, _, _ = _move_history_jobs(out)

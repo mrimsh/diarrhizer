@@ -191,9 +191,11 @@ def rename_scope(directory: Path, name: str) -> Path:
 # @purpose: Move a selected batch of jobs into a project/team without overwriting recordings or exports
 # @description: Only discovered ordinary job directories under the library root are accepted. All source
 #   locks are acquired before creating scopes; both destination and source job locks protect renames.
-#   Folder collisions receive numeric suffixes; job identity, files, names and team rosters stay intact.
+#   Folder collisions receive numeric suffixes; by default job identity/files stay intact. Rosters are never merged.
 #   Recorded paths inside moved jobs are relocated. Failures roll moved folders and metadata back;
 #   an incomplete rollback reports its remaining relocations so the GUI can keep live references correct.
+#   Optional rename uses destination defaults with the original job date; managed retained media and
+#   exports follow the new title. File/identity/manifest changes join the ordinary-error rollback.
 # @inputs: library root, selected job paths, explicit project/team (empty means its parent root)
 # @outputs: old-to-new directory mapping for jobs that changed location
 # @sideEffects: Creates destination scopes and lock files; renames job folders; updates internal run paths
@@ -246,10 +248,111 @@ def _move_metadata(job: Path, moves: dict[Path, Path]) -> tuple[bytes, dict] | N
     return (file.read_bytes(), updated) if updated != data else None
 
 
-def move_jobs(root: Path, jobs, *, project: str = "", team: str = "") -> dict[Path, Path]:
-    from diarrhizer.artifacts import job_write_lock
+def _move_name(job, project, team, template, custom):
+    identity = read_config(job / JOB_FILE)
+    meta = read_config(job / "meta" / "run.json")
+    date = identity.get("created_at") or meta.get("start_time")
+    if not date:
+        match = re.search(r"_(\d{8})_\d{6}(?:_\d+)?$", job.name)
+        date = datetime.strptime(match[1], "%Y%m%d").isoformat() if match else datetime.fromtimestamp(job.stat().st_mtime).isoformat()
+    try:
+        created = datetime.fromisoformat(date)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"Некорректная дата задания {job}: {date!r}") from exc
+    source = identity.get("source_name") or Path(meta.get("input_path") or f"{job.name}.wav").name
+    value = identity.get("custom", "") if custom is None else custom
+    title = render_name(template, project=project, team=team, custom=value, source=Path(source).stem,
+                        date=created.strftime("%Y_%m_%d"))
+    return title, {**identity, "source_name": source, "created_at": created.isoformat(),
+                   "custom": value, "naming_template": template}
+
+
+def plan_job_moves(root: Path, jobs, *, project: str = "", team: str = "", rename: bool = False,
+                   custom: str | None = None) -> dict[Path, Path]:
+    """Read-only preview using the same date, destination defaults and collisions as execution."""
     root = Path(root).resolve()
     destination = _move_destination(root, project, team)
+    available = {p.resolve() for p in iter_job_dirs(root)}
+    template = inherited_settings(root, project, team)["naming_template"] if rename else None
+    moves = {}
+    for job in jobs:
+        job = Path(job)
+        if not _ordinary_dir(job) or job.resolve() not in available:
+            raise ValueError(f"Не является заданием в {root}: {job}")
+        source = job.resolve()
+        if source in moves:
+            continue
+        name = _move_name(source, project, team, template, custom)[0] if rename else source.name
+        target = destination / name
+        index = 2
+        while (target.exists() and target != source) or target in moves.values():
+            suffix = f"_{index}"
+            target = destination / f"{name[:120 - len(suffix)]}{suffix}"
+            index += 1
+        if not target.resolve().is_relative_to(root):
+            raise ValueError(f"Папка назначения находится вне результатов: {target}")
+        moves[source] = target
+    return moves
+
+
+def _renamed_files(job, title, identity):
+    """Only app-owned media/exports; user notes, chats, summaries and external originals stay intact."""
+    old_identity = read_config(job / JOB_FILE)
+    files = {}
+    storage = validate_storage(old_identity.get("storage")) if old_identity else dict(DEFAULT_STORAGE)
+    if not old_identity:
+        from diarrhizer.audio_formats import AudioFormat, WAV_FORMAT
+        recorded = read_config(job / "meta" / "run.json").get("config", {}).get("audio_format")
+        fmt = AudioFormat.from_dict(recorded) if isinstance(recorded, dict) else WAV_FORMAT
+        storage["working"] = "original" if fmt.keeps_wav else "discard"
+        storage["archive"] = "original" if fmt.writes_archive else "discard"
+    for kind, directory, legacy in (("original", "original", ""), ("working", "audio/working", "normalized"),
+                                     ("archive", "audio/archive", "archive")):
+        candidates = list((job / directory).glob("*"))
+        if not old_identity and legacy:
+            candidates += list((job / "audio").glob(f"{legacy}*.*"))
+        old_stem = (Path(old_identity["source_name"]).stem if storage[kind] != "template" else old_identity["title"]) if old_identity else legacy
+        for file in candidates:
+            if not file.is_file():
+                continue
+            suffix = file.stem.removeprefix(old_stem)
+            if kind != "original" and suffix not in ("", "_left", "_right"):
+                continue
+            suffix = "" if kind == "original" else suffix
+            discarded = kind == "working" and storage[kind] == "discard"
+            stem = Path(identity["source_name"]).stem if discarded else title
+            target = Path(directory) / f"{stem}{suffix}{file.suffix}"
+            if target in files.values():
+                raise ValueError(f"Совпадают имена файлов после переименования: {target}")
+            files[file.relative_to(job)] = target
+            if not discarded:
+                storage[kind] = "template"
+    old_title = old_identity.get("title", "result")
+    for file in (job / "export").glob(f"{old_title}.*"):
+        if file.is_file():
+            files[file.relative_to(job)] = Path("export") / (title + file.name[len(old_title):])
+    if list((job / "export").glob(".*.pending.json")):
+        raise ValueError(f"Сначала восстановите незавершённый экспорт задания: {job}")
+    for previous, target in files.items():
+        if previous != target and (job / target).exists():
+            raise FileExistsError(f"Файл назначения уже существует: {job / target}")
+    identity.update(title=title, storage=storage)
+    manifest = read_config(job / "export" / "manifest.json")
+    if (job / "export" / "manifest.json").exists():
+        from diarrhizer.artifacts import bundle_valid
+        if not bundle_valid(job / "export", "manifest.json"):
+            raise ValueError(f"Сначала восстановите повреждённый экспорт задания: {job}")
+    if manifest:
+        names = {a.name: b.name for a, b in files.items() if a.parent == Path("export")}
+        manifest["files"] = {names.get(name, name): digest for name, digest in manifest["files"].items()}
+    return files, identity, manifest
+
+
+def move_jobs(root: Path, jobs, *, project: str = "", team: str = "", rename: bool = False,
+              custom: str | None = None) -> dict[Path, Path]:
+    from diarrhizer.artifacts import job_write_lock
+    root = Path(root).resolve()
+    _move_destination(root, project, team)
     sources = []
     available = {p.resolve() for p in iter_job_dirs(root)}
     for job in jobs:
@@ -261,19 +364,8 @@ def move_jobs(root: Path, jobs, *, project: str = "", team: str = "") -> dict[Pa
             raise ValueError(f"Задание находится вне папки результатов: {job}")
         if source not in sources:
             sources.append(source)
-    moves = {}
-    for source in sources:
-        if source.parent == destination:
-            continue
-        target = destination / source.name
-        index = 2
-        while target.exists() or target in moves.values():
-            suffix = f"_{index}"
-            target = destination / f"{source.name[:120 - len(suffix)]}{suffix}"
-            index += 1
-        if not target.resolve().is_relative_to(root):
-            raise ValueError(f"Папка назначения находится вне результатов: {target}")
-        moves[source] = target
+    moves = {a: b for a, b in plan_job_moves(root, sources, project=project, team=team,
+                                           rename=rename, custom=custom).items() if rename or a != b}
     if not moves:
         return {}
     with ExitStack() as locks:
@@ -285,18 +377,44 @@ def move_jobs(root: Path, jobs, *, project: str = "", team: str = "") -> dict[Pa
         # Locking a not-yet-created project creates only a sibling lock file.
         if project:
             locks.enter_context(job_write_lock(root / project))
-        metadata = {source: _move_metadata(source, moves) for source in sources}
+        renames = {}
+        if rename:
+            template = inherited_settings(root, project, team)["naming_template"]
+            for source, target in moves.items():
+                _, identity = _move_name(source, project, team, template, custom)
+                renames[source] = _renamed_files(source, target.name, identity)
+        file_paths = {source / a: moves[source] / b for source, (files, _, _) in renames.items() for a, b in files.items()}
+        metadata = {source: _move_metadata(source, {**file_paths, **moves}) for source in sources}
         ensure_scope(root, project, team)
         for target in sorted(moves.values()):
             locks.enter_context(job_write_lock(target))
         completed = {}
         rewritten = []
+        file_changes = []
+        records = []
         try:
             for source, target in moves.items():
+                if source == target:
+                    continue
                 if target.exists():
                     raise FileExistsError(f"Папка назначения уже существует: {target}")
                 source.rename(target)
                 completed[source] = target
+            for source, (files, identity, manifest) in renames.items():
+                target = moves[source]
+                for previous, current in files.items():
+                    if previous == current:
+                        continue
+                    old, new = target / previous, target / current
+                    new.parent.mkdir(parents=True, exist_ok=True)
+                    old.rename(new)
+                    file_changes.append((old, new))
+                for relative, data in ((Path(JOB_FILE), identity), (Path("export/manifest.json"), manifest)):
+                    if not data:
+                        continue
+                    file = target / relative
+                    records.append((file, file.read_bytes() if file.exists() else None))
+                    write_json_atomic(file, data)
             for source in sources:
                 target = moves.get(source, source)
                 if metadata[source] is not None:
@@ -311,6 +429,20 @@ def move_jobs(root: Path, jobs, *, project: str = "", team: str = "") -> dict[Pa
                     write_text_atomic(moves.get(source, source) / "meta" / "run.json", metadata[source][0].decode("utf-8"))
                 except OSError as rollback_error:
                     failures.append(str(rollback_error))
+            for file, data in reversed(records):
+                try:
+                    if data is None:
+                        file.unlink(missing_ok=True)
+                    else:
+                        write_text_atomic(file, data.decode("utf-8"))
+                except OSError as rollback_error:
+                    failures.append(str(rollback_error))
+            for old, new in reversed(file_changes):
+                try:
+                    old.parent.mkdir(parents=True, exist_ok=True)
+                    new.rename(old)
+                except OSError as rollback_error:
+                    failures.append(str(rollback_error))
             for source, target in reversed(list(completed.items())):
                 try:
                     if source.exists():
@@ -321,7 +453,8 @@ def move_jobs(root: Path, jobs, *, project: str = "", team: str = "") -> dict[Pa
                     failures.append(str(rollback_error))
             if failures:
                 raise JobMoveError(f"Перенос прерван: {exc}. Не удалось полностью отменить изменения: "
-                                   + "; ".join(failures), completed) from exc
+                                   + "; ".join(failures),
+                                   {**completed, **{a: b for a, b in moves.items() if a == b}}) from exc
             raise
     return moves
 # [SEMANTIC-END] LIBRARY:MOVE_JOBS

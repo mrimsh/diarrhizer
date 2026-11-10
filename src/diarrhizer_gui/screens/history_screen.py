@@ -15,7 +15,8 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QMimeData, QSettings, Qt, QTimer, Signal
+from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -57,7 +58,7 @@ from diarrhizer_gui.screens.new_job_screen import hf_token_present
 from diarrhizer_gui.screens.restart_dialog import RestartDialog
 from diarrhizer_gui.screens.project_panel import ScopeDialog
 from diarrhizer_gui.screens.move_jobs_dialog import MoveJobsDialog
-from diarrhizer.projects import JobMoveError, job_context, move_jobs, scope_path
+from diarrhizer.projects import JobMoveError, job_context, list_scopes, move_jobs, scope_path
 
 STAGE_LABELS = [name[0].upper() for name, _ in STAGE_ARTIFACTS]  # C T D M E
 STAGE_TITLES = {
@@ -205,6 +206,71 @@ def sort_jobs(jobs: list, column: int, descending: bool) -> list:
     return [job for _, job in present] + [job for key, job in keyed if key is None]
 
 
+# [SEMANTIC-BEGIN] GUI:JOB_DRAG
+# @purpose: Drag selected history jobs onto project/team groups through the shared move dialog
+# @description: Only internal drags are accepted; drops emit frozen source paths and destination names.
+#   Qt never rearranges tree nodes itself, so cancel/failed disk moves cannot misrepresent the library.
+# @inputs: selected-path getter, pointer target group (blank viewport means library root)
+# @outputs: move_dropped(paths, project, team)
+# @sideEffects: Native drag UI only; no filesystem writes
+# @errors: Invalid/external drops are ignored
+# @see: GUI:HISTORY_TABLE, GUI:MOVE_JOBS
+class JobTree(QTreeWidget):
+    move_dropped = Signal(object, str, str)
+
+    def __init__(self, paths):
+        super().__init__()
+        self._paths = paths
+        self._drag_paths = set()
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def startDrag(self, _actions):
+        self._drag_paths = self._paths()
+        if not self._drag_paths:
+            return
+        mime = QMimeData()
+        mime.setData("application/x-diarrhizer-jobs", b"jobs")
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        try:
+            drag.exec(Qt.DropAction.MoveAction)
+        finally:
+            self._drag_paths = set()
+
+    def drop_destination(self, item):
+        if item is None:
+            return ("", "")
+        return item.data(0, Qt.ItemDataRole.UserRole + 2)
+
+    def dragEnterEvent(self, event):
+        if event.source() is self and self._drag_paths:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if (event.source() is self and self._drag_paths
+                and self.drop_destination(self.itemAt(event.position().toPoint())) is not None):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        destination = self.drop_destination(self.itemAt(event.position().toPoint()))
+        if event.source() is not self or not self._drag_paths or destination is None:
+            event.ignore()
+            return
+        paths = set(self._drag_paths)
+        event.acceptProposedAction()
+        # Open the modal picker after the native drop handler has returned.
+        QTimer.singleShot(0, lambda: self.move_dropped.emit(paths, *destination))
+# [SEMANTIC-END] GUI:JOB_DRAG
+
+
 # [SEMANTIC-BEGIN] GUI:HISTORY_TABLE
 # @purpose: List the jobs of the results folder with sorting by column and user-set column widths
 # @description: self._jobs is always in the order shown, so self._jobs[row] is the job of table row `row`
@@ -218,6 +284,7 @@ def sort_jobs(jobs: list, column: int, descending: bool) -> list:
 #   until the user sets its width. Multiple selected jobs survive refresh, sort and grouping changes by path.
 #   Selecting a tree group includes its filtered descendants; hidden table rows never join a move.
 #   Batch moves recheck queued/busy jobs, preserve artifacts and notify live views of changed paths.
+#   Internal drops and the toolbar open the same optional destination-template renaming preview.
 # @inputs: job folders under the results folder; header clicks; header drags
 # @outputs: view_result_requested, runs_requested, jobs_moved(old-to-new paths)
 # @sideEffects: reads/writes QSettings; deletes or moves job folders on explicit request
@@ -283,7 +350,8 @@ class HistoryScreen(QWidget):
         edit_group = QPushButton("Параметры группы…")
         edit_group.clicked.connect(self._edit_group)
         filter_row.addWidget(edit_group)
-        self._tree = QTreeWidget()
+        self._tree = JobTree(self._selected_job_paths)
+        self._tree.move_dropped.connect(self._drop_jobs)
         self._tree.setColumnCount(len(self.COLUMNS))
         self._tree.setHeaderLabels(self.COLUMNS)
         self._tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -322,7 +390,7 @@ class HistoryScreen(QWidget):
         self._tree.itemSelectionChanged.connect(self._update_selection)
         self._table.itemSelectionChanged.connect(self._update_selection)
         self._selection_label = QLabel("Выбрано: 0")
-        self._move_button = QPushButton("Переместить…")
+        self._move_button = QPushButton("Переместить / переименовать…")
         self._move_button.setEnabled(False)
         self._move_button.clicked.connect(self._move_selected)
         self._move_status = QLabel()
@@ -331,7 +399,8 @@ class HistoryScreen(QWidget):
         selection_row.addWidget(self._selection_label)
         selection_row.addWidget(self._move_button)
         selection_row.addWidget(self._move_status, 1)
-        selection_hint = QLabel("Ctrl/Shift — несколько заданий; выбор группы — все задания в ней.")
+        selection_hint = QLabel("Выделите задания (Ctrl/Shift) и перетащите на проект/команду в дереве "
+                               "или нажмите «Переместить / переименовать…».")
         selection_hint.setWordWrap(True)
 
         self._empty_label = QLabel(
@@ -557,6 +626,7 @@ class HistoryScreen(QWidget):
                     group = QTreeWidgetItem([label])
                     group.setData(0, Qt.ItemDataRole.UserRole, str(directory) if directory else repr(key))
                     group.setData(0, Qt.ItemDataRole.UserRole + 1, "scope" if directory else "empty")
+                    group.setData(0, Qt.ItemDataRole.UserRole + 2, (job.project, job.team if len(key) > 1 else ""))
                     parent.addChild(group)
                     group.setExpanded(str(directory) not in collapsed)
                     groups[key] = group
@@ -576,6 +646,34 @@ class HistoryScreen(QWidget):
             if job.job_dir in selected_paths:
                 self._tree.setCurrentItem(leaf, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
                 leaf.setSelected(True)
+        if not needle:
+            root = Path(self._path_field.text())
+            for project in list_scopes(root):
+                parent = self._tree.invisibleRootItem()
+                if self._group_projects.isChecked():
+                    key = (project,)
+                    if key not in groups:
+                        group = QTreeWidgetItem([project])
+                        group.setData(0, Qt.ItemDataRole.UserRole, str(root / project))
+                        group.setData(0, Qt.ItemDataRole.UserRole + 1, "scope")
+                        group.setData(0, Qt.ItemDataRole.UserRole + 2, (project, ""))
+                        parent.addChild(group)
+                        group.setExpanded(True)
+                        groups[key] = group
+                    parent = groups[key]
+                if self._group_teams.isChecked():
+                    for team in list_scopes(root / project, teams=True):
+                        key = (project, team)
+                        if key not in groups:
+                            group = QTreeWidgetItem([team])
+                            group.setData(0, Qt.ItemDataRole.UserRole, str(root / project / team))
+                            group.setData(0, Qt.ItemDataRole.UserRole + 1, "scope")
+                            group.setData(0, Qt.ItemDataRole.UserRole + 2, (project, team))
+                            parent.addChild(group)
+                            groups[key] = group
+        if self._grouped() and self._tree.topLevelItemCount():
+            self._tree.show()
+            self._empty_label.hide()
         self._tree.resizeColumnToContents(6)
         self._rebuilding = rebuilding
 
@@ -635,7 +733,12 @@ class HistoryScreen(QWidget):
                                     "Переместить выбранные задания в проект и команду")
 
     def _move_selected(self):
-        paths = self._selected_job_paths()
+        self._move_paths(self._selected_job_paths())
+
+    def _drop_jobs(self, paths, project, team):
+        self._move_paths(paths, (project, team))
+
+    def _move_paths(self, paths, destination_hint=None):
         if not paths:
             return
         try:
@@ -644,7 +747,9 @@ class HistoryScreen(QWidget):
             jobs = [job for job in self._jobs if job.job_dir in paths]
             project = jobs[0].project if len({job.project for job in jobs}) == 1 else ""
             team = jobs[0].team if project and len({job.team for job in jobs}) == 1 else ""
-            dialog = MoveJobsDialog(self, root, len(paths), project, team)
+            if destination_hint is not None:
+                project, team = destination_hint
+            dialog = MoveJobsDialog(self, root, len(paths), project, team, jobs=[job.job_dir for job in jobs])
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             project, team = dialog.destination()
@@ -653,7 +758,7 @@ class HistoryScreen(QWidget):
             destination = scope_path(root, project, team)
             if self._is_busy(destination):
                 raise ValueError("В папке назначения есть выполняющиеся или ожидающие задания")
-            moved = move_jobs(root, [job.job_dir for job in jobs], project=project, team=team)
+            moved = move_jobs(root, [job.job_dir for job in jobs], project=project, team=team, **dialog.rename_options())
         except (OSError, ValueError, RuntimeError) as exc:
             if isinstance(exc, JobMoveError) and exc.moved:
                 self.jobs_moved.emit(exc.moved)

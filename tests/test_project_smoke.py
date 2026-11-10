@@ -40,7 +40,7 @@ def test_real_ffmpeg_project_smoke(tmp_path):
                  speakers={"Speaker_00": "Alice"})
     assert export_path(job, "json").is_file()
     assert "Synthetic smoke test" in read_transcript(job)
-    moved = move_jobs(tmp_path / "out", [job], project="Moved", team="Designers")[job]
+    moved = move_jobs(tmp_path / "out", [job], project="Moved", team="Designers", rename=True)[job]
     assert media_path(moved, "archive", "flac").read_bytes().startswith(b"fLaC")
     assert media_path(moved, "original", "wav").read_bytes() == source.read_bytes()
     assert "Synthetic smoke test" in read_transcript(moved)

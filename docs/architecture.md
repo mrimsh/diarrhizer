@@ -150,6 +150,20 @@ jobs after the modal dialog, emits `jobs_moved` as a Python object (Path-keyed m
 and reselects moved jobs. MainWindow relocates live result/queue/monitor references; ResultScreen refreshes
 team completers without rebuilding the speaker editor or losing unsaved names.
 
+`plan_job_moves()` is a read-only preview shared with execution. Optional `rename=True` renders the
+destination's inherited naming template with the original creation date (legacy timestamp/mtime fallback),
+source stem and per-job CUSTOM value, or an explicit common override. The collision-resolved title is
+stored in `job.json`. Managed media/export renames and identity/export-manifest rewrites join the move's
+rollback; export bytes/hashes remain intact and manifest filenames follow the renamed outputs. Legacy
+jobs gain portable identity/media paths. Internal cache files, conversations, summaries and user notes
+retain their filenames. Working audio marked for discard remains temporary. External originals are untouched.
+
+`JobTree` (`GUI:JOB_DRAG`) accepts internal drops on scope groups (or blank space for the library root).
+The source selection is frozen at drag start; Qt never performs its default item relocation. The drop
+opens the same read-only preview/confirmation dialog after the native drop handler returns. Empty scope
+groups are discovered from markers and remain available as targets. Dropping onto jobs or dragging external
+files into this tree is rejected. MainWindow's existing file-import drop remains available outside history.
+
 Speaker assignments (`speakers.json`) remain per-job. Explicit Add/Remove actions edit only the current
 team/root roster. Typing a new speaker name and exporting it never implicitly changes that roster.
 
