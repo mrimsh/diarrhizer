@@ -283,6 +283,7 @@ def main() -> int:
     run_parser.add_argument("--name-template", default=None,
                             help="Job/file name template (default for projects: PROJECT-YYYY_MM_DD-TEAM); also CUSTOM/SOURCE")
     run_parser.add_argument("--name-value", default=None, help="Text substituted for CUSTOM")
+    run_parser.add_argument("--recorded-at", default=None, help="Local recording date/time: YYYY-MM-DDTHH:MM:SS (new jobs)")
     for kind in ("original", "working", "archive"):
         run_parser.add_argument(f"--{kind}-storage", choices=("original", "template", "discard"), default=None,
                                 help=f"{kind} file retention: original name, template name, or discard")
@@ -588,6 +589,7 @@ def main() -> int:
         #   batch moves on, and a summary is printed at the end.
         #   Resume restores saved settings/stages/names; only explicitly supplied flags override them.
         #   Optional projects/teams share portable directory-local defaults, naming and independent media retention with GUI.
+        #   --recorded-at supplies recording wall time for date/time naming tokens without changing run timestamps.
         # @inputs: args.input, args.out, args.job_dir, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.from_stage, args.to_stage, args.speakers, args.min_turn_duration, ASR params, audio_profile, audio_format, keep_wav
         # @outputs: Artifacts in out/ directory
         # @sideEffects: Creates job directories, writes artifacts to disk
@@ -670,7 +672,7 @@ def main() -> int:
 
         library_options = {key: value for key, value in {
             "project": args.project, "team": args.team, "naming_template": args.name_template,
-            "custom": args.name_value,
+            "custom": args.name_value, "recorded_at": args.recorded_at,
         }.items() if value is not None}
         storage = {kind: getattr(args, f"{kind}_storage") for kind in ("original", "working", "archive")
                    if getattr(args, f"{kind}_storage") is not None}

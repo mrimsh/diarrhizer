@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from diarrhizer.utils import write_json_atomic, write_text_atomic
+from diarrhizer.recording_time import job_recording_time, local_datetime
 
 PROJECT_FILE = ".diarrhizer-project.json"
 TEAM_FILE = ".diarrhizer-team.json"
@@ -15,7 +16,7 @@ JOB_FILE = "job.json"
 DEFAULT_TEMPLATE = "PROJECT-YYYY_MM_DD-TEAM"
 STORAGE_MODES = ("original", "template", "discard")
 DEFAULT_STORAGE = {"original": "discard", "working": "original", "archive": "original"}
-_TOKEN = re.compile(r"\{\{\s*(project|team|date|custom|source)\s*\}\}|PROJECT|TEAM|YYYY_MM_DD|CUSTOM|SOURCE", re.IGNORECASE)
+_TOKEN = re.compile(r"\{\{\s*(project|team|date|time|custom|source)\s*\}\}|PROJECT|TEAM|YYYY_MM_DD|HH_MM_SS|CUSTOM|SOURCE", re.IGNORECASE)
 _RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", re.IGNORECASE)
 
 
@@ -196,6 +197,8 @@ def rename_scope(directory: Path, name: str) -> Path:
 #   an incomplete rollback reports its remaining relocations so the GUI can keep live references correct.
 #   Optional rename uses destination defaults with the original job date; managed retained media and
 #   exports follow the new title. File/identity/manifest changes join the ordinary-error rollback.
+#   Explicit recorded_at edits recording time without changing processing created_at; optional template
+#   overrides support renaming in place as well as moving. Preview and execution share these overrides.
 # @inputs: library root, selected job paths, explicit project/team (empty means its parent root)
 # @outputs: old-to-new directory mapping for jobs that changed location
 # @sideEffects: Creates destination scopes and lock files; renames job folders; updates internal run paths
@@ -248,32 +251,30 @@ def _move_metadata(job: Path, moves: dict[Path, Path]) -> tuple[bytes, dict] | N
     return (file.read_bytes(), updated) if updated != data else None
 
 
-def _move_name(job, project, team, template, custom):
+def _move_name(job, project, team, template, custom, recorded_at=None):
     identity = read_config(job / JOB_FILE)
     meta = read_config(job / "meta" / "run.json")
-    date = identity.get("created_at") or meta.get("start_time")
-    if not date:
-        match = re.search(r"_(\d{8})_\d{6}(?:_\d+)?$", job.name)
-        date = datetime.strptime(match[1], "%Y%m%d").isoformat() if match else datetime.fromtimestamp(job.stat().st_mtime).isoformat()
-    try:
-        created = datetime.fromisoformat(date)
-    except (ValueError, TypeError) as exc:
-        raise ValueError(f"Некорректная дата задания {job}: {date!r}") from exc
+    original = job_recording_time(job)
+    recorded = local_datetime(recorded_at) if recorded_at is not None else original
     source = identity.get("source_name") or Path(meta.get("input_path") or f"{job.name}.wav").name
     value = identity.get("custom", "") if custom is None else custom
     title = render_name(template, project=project, team=team, custom=value, source=Path(source).stem,
-                        date=created.strftime("%Y_%m_%d"))
-    return title, {**identity, "source_name": source, "created_at": created.isoformat(),
+                        date=recorded.strftime("%Y_%m_%d"), time=recorded.strftime("%H_%M_%S"))
+    return title, {**identity, "source_name": source, "created_at": identity.get("created_at") or meta.get("start_time") or original.isoformat(),
+                   "recorded_at": recorded.isoformat(),
                    "custom": value, "naming_template": template}
 
 
 def plan_job_moves(root: Path, jobs, *, project: str = "", team: str = "", rename: bool = False,
-                   custom: str | None = None) -> dict[Path, Path]:
+                   custom: str | None = None, recorded_at: str | None = None,
+                   naming_template: str | None = None) -> dict[Path, Path]:
     """Read-only preview using the same date, destination defaults and collisions as execution."""
     root = Path(root).resolve()
     destination = _move_destination(root, project, team)
     available = {p.resolve() for p in iter_job_dirs(root)}
-    template = inherited_settings(root, project, team)["naming_template"] if rename else None
+    if recorded_at is not None and not rename:
+        raise ValueError("Изменение даты записи требует переименования задания")
+    template = (naming_template if naming_template is not None else inherited_settings(root, project, team)["naming_template"]) if rename else None
     moves = {}
     for job in jobs:
         job = Path(job)
@@ -282,7 +283,7 @@ def plan_job_moves(root: Path, jobs, *, project: str = "", team: str = "", renam
         source = job.resolve()
         if source in moves:
             continue
-        name = _move_name(source, project, team, template, custom)[0] if rename else source.name
+        name = _move_name(source, project, team, template, custom, recorded_at)[0] if rename else source.name
         target = destination / name
         index = 2
         while (target.exists() and target != source) or target in moves.values():
@@ -349,7 +350,8 @@ def _renamed_files(job, title, identity):
 
 
 def move_jobs(root: Path, jobs, *, project: str = "", team: str = "", rename: bool = False,
-              custom: str | None = None) -> dict[Path, Path]:
+              custom: str | None = None, recorded_at: str | None = None,
+              naming_template: str | None = None) -> dict[Path, Path]:
     from diarrhizer.artifacts import job_write_lock
     root = Path(root).resolve()
     _move_destination(root, project, team)
@@ -365,7 +367,8 @@ def move_jobs(root: Path, jobs, *, project: str = "", team: str = "", rename: bo
         if source not in sources:
             sources.append(source)
     moves = {a: b for a, b in plan_job_moves(root, sources, project=project, team=team,
-                                           rename=rename, custom=custom).items() if rename or a != b}
+                                           rename=rename, custom=custom, recorded_at=recorded_at,
+                                           naming_template=naming_template).items() if rename or a != b}
     if not moves:
         return {}
     with ExitStack() as locks:
@@ -379,9 +382,9 @@ def move_jobs(root: Path, jobs, *, project: str = "", team: str = "", rename: bo
             locks.enter_context(job_write_lock(root / project))
         renames = {}
         if rename:
-            template = inherited_settings(root, project, team)["naming_template"]
+            template = naming_template if naming_template is not None else inherited_settings(root, project, team)["naming_template"]
             for source, target in moves.items():
-                _, identity = _move_name(source, project, team, template, custom)
+                _, identity = _move_name(source, project, team, template, custom, recorded_at)
                 renames[source] = _renamed_files(source, target.name, identity)
         file_paths = {source / a: moves[source] / b for source, (files, _, _) in renames.items() for a, b in files.items()}
         metadata = {source: _move_metadata(source, {**file_paths, **moves}) for source in sources}
@@ -465,18 +468,20 @@ def move_jobs(root: Path, jobs, *, project: str = "", team: str = "", rename: bo
 # @description: Templates accept PROJECT/TEAM/YYYY_MM_DD/CUSTOM/SOURCE or {{project/team/date/custom/source}}.
 #   Missing optional fields collapse adjacent separators. Job titles are fixed at creation; collisions
 #   receive numeric suffixes. job.json stores relative paths so moving/renaming scopes needs no rewrites.
+#   recorded_at stores recording wall time separately from created_at processing time; date/time tokens
+#   use that recording value. Omitted values retain existing behavior for API/CLI callers.
 # @inputs: root, source path, project/team, template/custom text, per-type storage modes
 # @outputs: job directory, immutable identity/settings, export and retained-media paths
 # @sideEffects: reserve_job creates scope and job folders; other helpers only read or transform
 # @errors: ValueError for invalid templates/storage/names; OSError for disk failures
 # @see: LIBRARY:SCOPES, PIPELINE:EXECUTE, STAGE:CONVERT, STAGE:EXPORT
 def render_name(template: str = DEFAULT_TEMPLATE, *, project: str = "", team: str = "",
-                custom: str = "", source: str = "", date: str | None = None) -> str:
+                custom: str = "", source: str = "", date: str | None = None, time: str | None = None) -> str:
     values = {"project": project, "team": team, "custom": custom, "source": source,
-              "date": date or datetime.now().strftime("%Y_%m_%d")}
+              "date": date or datetime.now().strftime("%Y_%m_%d"), "time": time or datetime.now().strftime("%H_%M_%S")}
     def substitute(match):
         key = (match.group(1) or match.group()).lower()
-        return values["date" if key == "yyyy_mm_dd" else key]
+        return values[{"yyyy_mm_dd": "date", "hh_mm_ss": "time"}.get(key, key)]
     if not isinstance(template, str) or not template.strip():
         raise ValueError("Шаблон названия не может быть пустым")
     name = _TOKEN.sub(substitute, template)
@@ -516,7 +521,8 @@ def inherited_settings(root: Path, project: str = "", team: str = "") -> dict:
 
 
 def reserve_job(root: Path, source: Path, *, project: str = "", team: str | None = None,
-                naming_template: str | None = None, custom: str = "", storage: dict | None = None) -> Path:
+                naming_template: str | None = None, custom: str = "", storage: dict | None = None,
+                recorded_at: str | None = None) -> Path:
     defaults = inherited_settings(root, project)
     if storage is not None and not isinstance(storage, dict):
         raise ValueError("Настройки хранения должны быть объектом")
@@ -526,8 +532,9 @@ def reserve_job(root: Path, source: Path, *, project: str = "", team: str | None
     modes = validate_storage({**defaults["storage"], **(storage or {})})
     source = Path(source)
     created = datetime.now()
+    recorded = local_datetime(recorded_at) if recorded_at is not None else created.replace(microsecond=0)
     name = render_name(template, project=project, team=team, custom=custom, source=source.stem,
-                       date=created.strftime("%Y_%m_%d"))
+                       date=recorded.strftime("%Y_%m_%d"), time=recorded.strftime("%H_%M_%S"))
     parent = ensure_scope(root, project, team)
     parent.mkdir(parents=True, exist_ok=True)
     candidate = parent / name
@@ -543,7 +550,7 @@ def reserve_job(root: Path, source: Path, *, project: str = "", team: str | None
     try:
         write_json_atomic(candidate / JOB_FILE, {"title": candidate.name, "created_at": created.isoformat(),
                           "naming_template": template, "custom": custom, "source_name": source.name,
-                          "storage": modes})
+                          "storage": modes, "recorded_at": recorded.isoformat()})
     except Exception:
         candidate.rmdir()
         raise

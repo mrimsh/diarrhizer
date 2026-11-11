@@ -188,7 +188,8 @@ def test_rename_uses_destination_template_and_keeps_export_bundle_and_audio(tmp_
            _legacy(tmp_path, "call_20261002_120000"))
     if portable:
         identity = read_config(job / JOB_FILE)
-        write_json_atomic(job / JOB_FILE, {**identity, "created_at": "2026-10-02T12:00:00"})
+        write_json_atomic(job / JOB_FILE, {**identity, "created_at": "2026-10-02T12:00:00",
+                                         "recorded_at": "2026-10-02T12:00:00"})
     external = tmp_path.parent / (tmp_path.name + "-external.wav")
     external.write_bytes(b"external original")
     audio = media_path(job, "working", "wav")

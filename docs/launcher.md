@@ -1,6 +1,6 @@
 # Windows launcher
 
-Current source version: **2.4** by **MRIMSH**. The setup window and rebuilt Windows executable file/product
+Current source version: **2.5** by **MRIMSH**. The setup window and rebuilt Windows executable file/product
 properties display the shared release version; Windows company metadata names MRIMSH.
 
 `Diarrhizer.exe` is the graphical entry point for setup and everyday use on Windows 10/11 x64.

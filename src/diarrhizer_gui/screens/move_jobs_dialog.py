@@ -7,7 +7,9 @@ from PySide6.QtWidgets import (
     QMessageBox, QPlainTextEdit, QVBoxLayout,
 )
 
-from diarrhizer.projects import inherited_settings, list_scopes, plan_job_moves, scope_path
+from diarrhizer.projects import inherited_settings, list_scopes, plan_job_moves, read_config, scope_path
+from diarrhizer.recording_time import job_recording_time
+from diarrhizer_gui.screens.recording_time import RecordingTimeEditor
 
 
 # [SEMANTIC-BEGIN] GUI:MOVE_JOBS
@@ -15,6 +17,8 @@ from diarrhizer.projects import inherited_settings, list_scopes, plan_job_moves,
 # @description: Empty project selects the library root; empty team selects the project root explicitly.
 #   Optional renaming previews the destination template with each job's original date and custom value.
 #   Cancel never creates directories or renames files. The accepted choice is executed by History.
+#   Recording time can be overridden explicitly, separately from processing time; template edits
+#   apply to the selected jobs only and never overwrite project/team defaults.
 # @inputs: library root, selection count and initial project/team
 # @outputs: destination() project/team names after acceptance
 # @sideEffects: Reads directory markers only; cancel leaves the library untouched
@@ -25,6 +29,7 @@ class MoveJobsDialog(QDialog):
         super().__init__(parent)
         self._root = Path(root)
         self._jobs = list(jobs)
+        self._template_scope = None
         self.setWindowTitle("Переместить задания")
         self.resize(680, 480)
         self._project = QComboBox()
@@ -41,7 +46,14 @@ class MoveJobsDialog(QDialog):
         self._preview.setWordWrap(True)
         self._rename = QCheckBox("Переименовать задания и сохранённые файлы по шаблону назначения")
         self._template = QLineEdit()
-        self._template.setReadOnly(True)
+        self._recording_override = QCheckBox("Изменить дату и время записи для выбранных заданий")
+        source = None
+        if self._jobs:
+            identity = read_config(self._jobs[0] / "job.json")
+            meta = read_config(self._jobs[0] / "meta" / "run.json")
+            source = identity.get("source_name") or meta.get("input_path")
+        self._recording = RecordingTimeEditor(job_recording_time(self._jobs[0]) if self._jobs else None, source)
+        self._recording.setEnabled(False)
         self._custom = QLineEdit()
         self._custom.setPlaceholderText("Пусто — сохранить своё значение каждого задания")
         self._names_preview = QPlainTextEdit()
@@ -52,17 +64,21 @@ class MoveJobsDialog(QDialog):
         form.addRow("Команда:", self._team)
         form.addRow("Папка назначения:", self._preview)
         form.addRow(self._rename)
+        form.addRow(self._recording_override)
+        form.addRow("Дата/время записи:", self._recording)
         form.addRow("Шаблон назначения:", self._template)
+        form.addRow("", QLabel("PROJECT · TEAM · YYYY_MM_DD · HH_MM_SS · CUSTOM · SOURCE"))
         form.addRow("Новое значение CUSTOM:", self._custom)
         form.addRow("Предпросмотр:", self._names_preview)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Переместить")
+        self._apply_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         hint = QLabel("Выберите проект и команду или введите новые названия. Пустая команда означает корень проекта. "
-                      "Дата задания сохраняется. При совпадении имён добавится числовой суффикс. "
-                      "Шаблон меняется в параметрах проекта/команды. Внешний оригинал не переименовывается.")
+                      "По умолчанию дата записи сохраняется. HH_MM_SS добавляет время в имя. "
+                      "При совпадении имён добавится числовой суффикс. Внешний оригинал не переименовывается.")
         hint.setWordWrap(True)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"Выбрано заданий: {count}"))
@@ -71,7 +87,10 @@ class MoveJobsDialog(QDialog):
         layout.addWidget(buttons)
         self._project.currentTextChanged.connect(self._load_teams)
         self._team.currentTextChanged.connect(self._update_preview)
-        self._rename.toggled.connect(self._update_preview)
+        self._rename.toggled.connect(self._rename_toggled)
+        self._recording_override.toggled.connect(self._recording_toggled)
+        self._recording.changed.connect(self._update_preview)
+        self._template.textChanged.connect(self._update_preview)
         self._custom.textChanged.connect(self._update_preview)
         self._load_teams()
         self._team.setCurrentText(team)
@@ -100,7 +119,11 @@ class MoveJobsDialog(QDialog):
         try:
             project, team = self.destination()
             self._preview.setText(str(scope_path(self._root, project, team)))
-            self._template.setText(inherited_settings(self._root, project, team)["naming_template"])
+            if self._template_scope != (project, team):
+                self._template_scope = (project, team)
+                self._template.blockSignals(True)
+                self._template.setText(inherited_settings(self._root, project, team)["naming_template"])
+                self._template.blockSignals(False)
             self._custom.setEnabled(self._rename.isChecked())
             plans = plan_job_moves(self._root, self._jobs, project=project, team=team, **self.rename_options())
             self._names_preview.setPlainText("\n".join(f"{a.name} → {b.name}" for a, b in plans.items()))
@@ -109,7 +132,38 @@ class MoveJobsDialog(QDialog):
             self._names_preview.setPlainText(str(exc))
 
     def rename_options(self):
-        return {"rename": self._rename.isChecked(), "custom": self._custom.text() or None}
+        options = {"rename": self._rename.isChecked(), "custom": self._custom.text() or None}
+        if self._rename.isChecked():
+            options["naming_template"] = self._template.text()
+            if self._recording_override.isChecked():
+                options["recorded_at"] = self._recording.value()
+        return options
+
+    def _rename_toggled(self, enabled):
+        if not enabled:
+            self._recording_override.setChecked(False)
+        self._update_preview()
+
+    def _recording_toggled(self, enabled):
+        if enabled:
+            self._rename.setChecked(True)
+        self._recording.setEnabled(enabled)
+        self._update_preview()
+
+    def edit_recording(self):
+        self.setWindowTitle("Изменить дату и имя задания")
+        self._apply_button.setText("Переименовать")
+        self._project.setEnabled(False)
+        self._team.setEnabled(False)
+        self._rename.setChecked(True)
+        self._recording_override.setChecked(True)
+        template = self._template.text()
+        compact = "".join(template.lower().split())
+        if "yyyy_mm_dd" not in compact and "{{date}}" not in compact:
+            template += "-YYYY_MM_DD"
+        if "hh_mm_ss" not in compact and "{{time}}" not in compact:
+            template += "-HH_MM_SS"
+        self._template.setText(template)
 
     def _accept(self):
         try:

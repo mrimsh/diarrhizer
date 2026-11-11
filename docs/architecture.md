@@ -1,6 +1,6 @@
 # Architecture
 
-Current source version: **2.1**, shared by the CLI, desktop GUI and Windows launcher.
+Current source version: **2.5**, shared by the CLI, desktop GUI and Windows launcher.
 The [2.x roadmap](roadmap.md) describes the direction toward autonomous call logging, a separate
 call agent and optional integration skills; those capabilities remain planned.
 
@@ -168,6 +168,20 @@ Speaker assignments (`speakers.json`) remain per-job. Explicit Add/Remove action
 team/root roster. Typing a new speaker name and exporting it never implicitly changes that roster.
 
 ### Job
+
+Recording wall time is captured separately as `job.json.recorded_at`; `created_at` continues to identify
+job allocation/processing, and `meta/run.json` stage timestamps are untouched. `recording_time.py`
+(`JOB:RECORDING_TIME`) validates naive local ISO values, proposes conservative filename dates and provides
+legacy fallbacks. `reserve_job(recorded_at=...)` uses recording time for date/time template tokens. The
+runner/CLI forward explicit values only for fresh allocation, and queued GUI jobs capture a per-file value
+before their worker starts. Omitted CLI/API values preserve the current-time naming behavior.
+
+The New Job editor shows per-file proposals and permits explicit edits/Now; proposals have no filesystem
+effects. `plan_job_moves` and `move_jobs` accept optional recording time and per-operation naming template
+overrides for existing jobs. Recording-time edits require renaming and use the existing lock/rollback
+transaction for identity, filenames and manifest paths. Processing timestamps, transcript content, fixed
+pipeline cache names and project defaults are preserved. History uses explicit recording time for display
+and sorting, falling back to existing legacy behavior when none exists.
 
 "One processing run for one file."
 

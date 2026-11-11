@@ -938,6 +938,71 @@ def test_project_job_planning_is_read_only(qapp, isolated, tmp_path):
     assert not out.exists()
 
 
+def test_new_job_proposes_per_file_times_and_manual_or_now_values_win(qapp, isolated, tmp_path):
+    from datetime import datetime
+    a = _touch(tmp_path / "call 2020-05-06 07-08-09.wav")
+    b = _touch(tmp_path / "call 2021-02-03 12-13-14.wav")
+    screen = new_job_screen.NewJobScreen()
+    screen._mode_combo.setCurrentIndex(screen._mode_combo.findData("asr_only"))
+    screen.add_paths([a, b])
+    assert screen._recording.value() == "2020-05-06T07:08:09"
+    screen._files.setCurrentItem(screen._files.item(1))
+    assert screen._recording.value() == "2021-02-03T12:13:14"
+    screen._recording.set_value("2018-09-10T11:12:13", emit=True)
+    assert screen._recording_times[str(a)] == "2020-05-06T07:08:09"
+    assert screen._recording_times[str(b)] == "2018-09-10T11:12:13"
+    screen._recording.from_filename()
+    assert screen._recording_times[str(b)] == "2021-02-03T12:13:14"
+    screen._recording._now.click()
+    assert abs((datetime.fromisoformat(screen._recording_times[str(b)]) - datetime.now()).total_seconds()) < 3
+    screen._recording.set_value("2018-09-10T11:12:13", emit=True)
+    received = []
+    screen.runs_requested.connect(received.append)
+    screen._emit_run_requested()
+    assert [run.kwargs["recorded_at"] for run in received[0]] == ["2020-05-06T07:08:09", "2018-09-10T11:12:13"]
+
+
+def test_history_date_name_action_previews_and_applies_time_in_place(qapp, isolated, tmp_path, monkeypatch):
+    from diarrhizer.projects import read_config
+    job = _finished_job(tmp_path)
+    root = tmp_path / "out"
+    isolated().setValue(settings_keys.OUT_DIR, str(root))
+    screen = history_screen.HistoryScreen()
+    screen._select_job_paths({job})
+    assert screen._rename_button.isEnabled()
+    def accept(dialog):
+        assert dialog._recording_override.isChecked()
+        assert dialog._rename.isChecked()
+        dialog._recording.set_value("2018-09-10T11:12:13", emit=True)
+        dialog._template.setText("YYYY_MM_DD-HH_MM_SS-CUSTOM")
+        dialog._custom.setText("Call")
+        assert "2018_09_10-11_12_13-Call" in dialog._names_preview.toPlainText()
+        assert job.exists()
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(history_screen.MoveJobsDialog, "exec", accept)
+    screen._rename_selected()
+    renamed = root / "2018_09_10-11_12_13-Call"
+    assert renamed.is_dir() and not job.exists()
+    data = read_config(renamed / "job.json")
+    assert data["recorded_at"] == "2018-09-10T11:12:13"
+    assert data["created_at"] == "2026-01-01T00:00:00"
+    assert "11:12:13" in screen._jobs[0].date_label
+
+
+def test_cancel_date_edit_does_not_change_existing_job(qapp, isolated, tmp_path, monkeypatch):
+    job = _finished_job(tmp_path)
+    isolated().setValue(settings_keys.OUT_DIR, str(tmp_path / "out"))
+    screen = history_screen.HistoryScreen()
+    screen._select_job_paths({job})
+    before = {str(file.relative_to(job)): file.read_bytes() for file in job.rglob("*") if file.is_file()}
+    def cancel(dialog):
+        dialog._recording.set_value("2018-09-10T11:12:13", emit=True)
+        return QDialog.DialogCode.Rejected
+    monkeypatch.setattr(history_screen.MoveJobsDialog, "exec", cancel)
+    screen._rename_selected()
+    assert {str(file.relative_to(job)): file.read_bytes() for file in job.rglob("*") if file.is_file()} == before
+
+
 def test_project_busy_includes_unallocated_pending_jobs(tmp_path):
     from types import SimpleNamespace
     from diarrhizer_gui.main_window import MainWindow

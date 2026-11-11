@@ -285,6 +285,7 @@ class JobTree(QTreeWidget):
 #   Selecting a tree group includes its filtered descendants; hidden table rows never join a move.
 #   Batch moves recheck queued/busy jobs, preserve artifacts and notify live views of changed paths.
 #   Internal drops and the toolbar open the same optional destination-template renaming preview.
+#   The separate date/name action edits one job in place, including its recording wall time.
 # @inputs: job folders under the results folder; header clicks; header drags
 # @outputs: view_result_requested, runs_requested, jobs_moved(old-to-new paths)
 # @sideEffects: reads/writes QSettings; deletes or moves job folders on explicit request
@@ -393,11 +394,15 @@ class HistoryScreen(QWidget):
         self._move_button = QPushButton("Переместить / переименовать…")
         self._move_button.setEnabled(False)
         self._move_button.clicked.connect(self._move_selected)
+        self._rename_button = QPushButton("Изменить дату / имя…")
+        self._rename_button.setEnabled(False)
+        self._rename_button.clicked.connect(self._rename_selected)
         self._move_status = QLabel()
         self._move_status.setWordWrap(True)
         selection_row = QHBoxLayout()
         selection_row.addWidget(self._selection_label)
         selection_row.addWidget(self._move_button)
+        selection_row.addWidget(self._rename_button)
         selection_row.addWidget(self._move_status, 1)
         selection_hint = QLabel("Выделите задания (Ctrl/Shift) и перетащите на проект/команду в дереве "
                                "или нажмите «Переместить / переименовать…».")
@@ -729,6 +734,7 @@ class HistoryScreen(QWidget):
         busy = any(self._is_busy(p) for p in paths)
         self._selection_label.setText(f"Выбрано: {len(paths)}")
         self._move_button.setEnabled(bool(paths) and not busy)
+        self._rename_button.setEnabled(len(paths) == 1 and not busy)
         self._move_button.setToolTip("Среди выбранных есть выполняющиеся или ожидающие задания" if busy else
                                     "Переместить выбранные задания в проект и команду")
 
@@ -738,7 +744,12 @@ class HistoryScreen(QWidget):
     def _drop_jobs(self, paths, project, team):
         self._move_paths(paths, (project, team))
 
-    def _move_paths(self, paths, destination_hint=None):
+    def _rename_selected(self):
+        paths = self._selected_job_paths()
+        if len(paths) == 1:
+            self._move_paths(paths, edit_recording=True)
+
+    def _move_paths(self, paths, destination_hint=None, edit_recording=False):
         if not paths:
             return
         try:
@@ -750,6 +761,8 @@ class HistoryScreen(QWidget):
             if destination_hint is not None:
                 project, team = destination_hint
             dialog = MoveJobsDialog(self, root, len(paths), project, team, jobs=[job.job_dir for job in jobs])
+            if edit_recording:
+                dialog.edit_recording()
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             project, team = dialog.destination()

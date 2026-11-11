@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 #   stage", CLI --job-dir --from-stage) leaves the record true to what produced the artifacts.
 #   Optional project/team/template/storage reserve portable job.json identities; legacy callers retain
 #   timestamp names. Project locks protect scope moves, and retained originals can restore missing sources.
+#   Explicit recording wall time is captured in job identity for naming independently of processing time.
 # @inputs: input_path, config, out_dir, stages, job_dir, force, force_stage, from_stage, to_stage, audio_format
 # @outputs: Artifacts on disk per stage definitions
 # @sideEffects: Creates job directory, writes artifacts to disk, deletes artifacts when force is used,
@@ -211,7 +212,8 @@ def generate_job_id(input_path: str | Path) -> str:
 
 
 def new_job_dir(out_dir: str | Path, input_path: str | Path, *, project: str = "", team: str | None = None,
-                naming_template: str | None = None, custom: str = "", storage: dict | None = None) -> Path:
+                naming_template: str | None = None, custom: str = "", storage: dict | None = None,
+                recorded_at: str | None = None) -> Path:
     """Atomically reserve a fresh job directory, avoiding concurrent name collisions.
 
     generate_job_id() has one-second resolution, so two files with the same
@@ -219,9 +221,9 @@ def new_job_dir(out_dir: str | Path, input_path: str | Path, *, project: str = "
     otherwise land in - and mix artifacts into - the same folder. Callers that
     start several jobs pass the result to run_pipeline(job_dir=...).
     """
-    if project or team or naming_template is not None or storage is not None or custom:
+    if project or team or naming_template is not None or storage is not None or custom or recorded_at is not None:
         return reserve_job(Path(out_dir), Path(input_path), project=project, team=team,
-                           naming_template=naming_template, custom=custom, storage=storage)
+                           naming_template=naming_template, custom=custom, storage=storage, recorded_at=recorded_at)
     base = Path(out_dir) / generate_job_id(input_path)
     base.parent.mkdir(parents=True, exist_ok=True)
     candidate = base
@@ -302,6 +304,7 @@ _RESUMABLE_SETTINGS = (
 #   Existing jobs are write-locked before settings are read; fresh jobs reserve their name atomically
 #   before preflight (empty reservations are removed on failure). Export journals are recovered under the lock before any stage can reuse the bundle.
 #   New project/team jobs use portable naming/storage identity; resume keeps that identity unchanged.
+#   A supplied recorded_at is for new-job allocation only; metadata edits use the locked rename API.
 # @inputs: input/out paths, optional job/stages, explicit configuration overrides
 # @outputs: per-stage results and artifacts
 # @sideEffects: Reads saved settings, then executes pipeline stages with disk/GPU effects
@@ -341,6 +344,7 @@ def run_pipeline(
     naming_template: str | None = None,
     custom: str = "",
     storage: dict | None = None,
+    recorded_at: str | None = None,
 ) -> dict:
     """Run a job with explicit overrides > recorded settings > defaults.
 
@@ -358,7 +362,7 @@ def run_pipeline(
                          force=force, force_stage=force_stage, from_stage=from_stage,
                          to_stage=to_stage, keep_wav=keep_wav,
                          preserve_speakers="speakers" in overrides, project=project, team=team,
-                         naming_template=naming_template, custom=custom, storage=storage, **settings)
+                         naming_template=naming_template, custom=custom, storage=storage, recorded_at=recorded_at, **settings)
 # [SEMANTIC-END] PIPELINE:EXECUTE
 
 
@@ -396,6 +400,7 @@ def _run_pipeline(
     naming_template: str | None = None,
     custom: str = "",
     storage: dict | None = None,
+    recorded_at: str | None = None,
 ) -> dict:
     """Run the processing pipeline for a media file.
 
@@ -558,7 +563,7 @@ def _run_pipeline(
 
     if fresh_job:
         job_dir = new_job_dir(out_dir, input_path, project=project, team=team,
-                              naming_template=naming_template, custom=custom, storage=storage)
+                              naming_template=naming_template, custom=custom, storage=storage, recorded_at=recorded_at)
         job_id = job_dir.name
         config.job_id = job_id
         job.job_dir = job_dir

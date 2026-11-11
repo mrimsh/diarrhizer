@@ -1,4 +1,4 @@
-# Diarrhizer 2.4
+# Diarrhizer 2.5
 
 By MRIMSH
 
@@ -8,7 +8,7 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
 and a CLI (`python -m diarrhizer run …`).
 
-**2.4** is the shared application version for the CLI, desktop GUI and Windows launcher.
+**2.5** is the shared application version for the CLI, desktop GUI and Windows launcher.
 Check it with `python -m diarrhizer --version`; the GUI shows it in the window title and sidebar.
 The launcher downloads the current GitHub `main` application when setting up or updating an environment;
 the downloaded application's version can differ from the launcher's own build version.
@@ -272,6 +272,36 @@ Renaming updates the job folder/title, retained originals/working audio/archives
 export filenames. Retention rules stay in effect; no external original is moved or renamed.
 Existing jobs with legacy `result.*` exports are supported. Restart an already-open GUI after updating
 the source/install so the new controls are loaded.
+
+### Recording date and time
+
+Recording time is independent of transcription/processing time. On **Новое задание**, select a file
+and review **Дата/время записи выделенных файлов**. Recognized timestamps in its filename are proposed
+automatically, for example `2026-10-02 15-04-33`, `2026_10_02_15_04_33`, `20261002_150433` or
+`02.10.2026 15.04.33`. Invalid dates, ambiguous day/month formats and multiple different timestamps
+are left for manual entry. A date without time is proposed at `00:00:00`; review it before starting.
+**Из имени файла** restores the proposal; **Сейчас** inserts the current local clock value. Editing a
+multi-selection applies that value to its selected files. Other files in the batch retain their own dates.
+Unrecognized filenames default to the time they were added. No job files are created while editing.
+
+In **История заданий**, select one job and click **Изменить дату / имя…** to set a different recording
+date/time and rename it in place. The editable per-job template and preview include both date and time
+for this action; saving does not change the project's defaults. The transfer dialog also offers the
+explicit **Изменить дату и время записи для выбранных заданий** checkbox for a common batch override.
+History displays/sorts by recording time. Existing media/export renames keep their rollback and locking
+behavior; original processing time, transcript text and the external source file remain intact.
+
+Templates support `HH_MM_SS` or `{{time}}` as well as `YYYY_MM_DD` / `{{date}}`, for example
+`PROJECT-YYYY_MM_DD-HH_MM_SS-TEAM`. The default template remains `PROJECT-YYYY_MM_DD-TEAM`.
+The CLI accepts an explicit local timestamp for a new job:
+
+```powershell
+python -m diarrhizer run "call.mp4" --project "Project" --recorded-at "2026-10-02T15:04:33" --name-template "PROJECT-YYYY_MM_DD-HH_MM_SS-TEAM"
+```
+
+Times are local wall-clock values with second precision. Filename proposals do not infer a timezone.
+`job.json` stores `recorded_at` separately from `created_at`; older jobs fall back to their recorded
+processing time or timestamp in the job folder name until explicitly edited.
 
 On **Результат**, speaker fields autocomplete from the current team's known participants; **Имена ▾**
 also lists them and lets you delete each saved name. **Добавить в команду** explicitly saves a new name

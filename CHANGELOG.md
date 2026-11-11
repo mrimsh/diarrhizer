@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.5 — 2026-11-11
+
+- Store recording date/time separately from processing time; propose conservative timestamps from
+  input filenames with per-file manual editing, filename reset and a Now button.
+- Edit an existing job's recording date/time and name in place with a shared preview and rollback;
+  preserve processing timestamps, transcript contents and external originals.
+- Support recording-time tokens `HH_MM_SS` / `{{time}}`, explicit CLI `--recorded-at`, and recording-time
+  history sorting. Keep the default naming template unchanged and preserve legacy-job compatibility.
+
 ## 2.4 — 2026-11-11
 
 - Download current GitHub `main` source for launcher setup, repair and application updates, pinned

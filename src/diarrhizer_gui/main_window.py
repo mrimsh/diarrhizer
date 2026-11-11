@@ -340,7 +340,7 @@ class MainWindow(QMainWindow):
             # Light import (no torch): the runner module itself only needs the stdlib.
             from diarrhizer.pipeline.runner import new_job_dir
 
-            options = {k: item.kwargs[k] for k in ("project", "team", "naming_template", "custom", "storage")
+            options = {k: item.kwargs[k] for k in ("project", "team", "naming_template", "custom", "storage", "recorded_at")
                        if k in item.kwargs}
             item.kwargs["job_dir"] = new_job_dir(item.kwargs["out_dir"], item.kwargs["input_path"], **options)
             item.job_dir = Path(item.kwargs["job_dir"])

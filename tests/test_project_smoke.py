@@ -28,6 +28,7 @@ def test_real_ffmpeg_project_smoke(tmp_path):
                                    for i in range(16000)))
     result = run_pipeline(input_path=source, out_dir=tmp_path / "out", stages=[ConvertStage()],
                           project="Smoke", team="Coders", audio_format="flac",
+                          recorded_at="2021-02-03T04:05:06", naming_template="PROJECT-YYYY_MM_DD-HH_MM_SS-TEAM",
                           storage={"original": "template", "working": "discard", "archive": "template"})
     job = Path(result["job_dir"])
     assert media_path(job, "original", "wav").read_bytes() == source.read_bytes()
@@ -40,7 +41,9 @@ def test_real_ffmpeg_project_smoke(tmp_path):
                  speakers={"Speaker_00": "Alice"})
     assert export_path(job, "json").is_file()
     assert "Synthetic smoke test" in read_transcript(job)
-    moved = move_jobs(tmp_path / "out", [job], project="Moved", team="Designers", rename=True)[job]
+    moved = move_jobs(tmp_path / "out", [job], project="Moved", team="Designers", rename=True,
+                      recorded_at="2022-03-04T05:06:07", naming_template="PROJECT-YYYY_MM_DD-HH_MM_SS-TEAM")[job]
+    assert "2022_03_04-05_06_07" in moved.name
     assert media_path(moved, "archive", "flac").read_bytes().startswith(b"fLaC")
     assert media_path(moved, "original", "wav").read_bytes() == source.read_bytes()
     assert "Synthetic smoke test" in read_transcript(moved)

@@ -1,6 +1,7 @@
 """Project/team selection and portable scope settings (no pipeline imports)."""
 
 from pathlib import Path
+from datetime import datetime
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -64,8 +65,8 @@ class ScopeDialog(QDialog):
         form = QFormLayout()
         form.addRow("Название:", self._name)
         form.addRow("Шаблон названия:", self._template)
-        hint = QLabel("PROJECT · TEAM · YYYY_MM_DD · CUSTOM · SOURCE\n"
-                      "Также: {{project}}, {{team}}, {{date}}, {{custom}}, {{source}}")
+        hint = QLabel("PROJECT · TEAM · YYYY_MM_DD · HH_MM_SS · CUSTOM · SOURCE\n"
+                      "Также: {{project}}, {{team}}, {{date}}, {{time}}, {{custom}}, {{source}}")
         hint.setWordWrap(True)
         form.addRow("", hint)
         if scope_file(self.directory).name == PROJECT_FILE:
@@ -157,6 +158,8 @@ class ProjectPanel(QWidget):
         super().__init__()
         self._root_getter = root_getter
         self._is_busy = is_busy
+        self._recorded_at = None
+        self._source_name = "запись"
         self.project = QComboBox()
         self.team = QComboBox()
         for combo in (self.project, self.team):
@@ -182,7 +185,7 @@ class ProjectPanel(QWidget):
         root_button.clicked.connect(lambda: self._edit("root"))
         form.addRow("", root_button)
         form.addRow("Шаблон названия:", self.template)
-        form.addRow("", QLabel("PROJECT · YYYY_MM_DD · TEAM · CUSTOM · SOURCE"))
+        form.addRow("", QLabel("PROJECT · YYYY_MM_DD · HH_MM_SS · TEAM · CUSTOM · SOURCE"))
         form.addRow("Своё значение:", self.custom)
         self.storage = storage_fields(form)
         form.addRow("Будет создано:", self.preview)
@@ -246,7 +249,7 @@ class ProjectPanel(QWidget):
         project = self.project.currentText().strip()
         team = self.team.currentText().strip()
         scope_path(self.root(), project, team)
-        render_name(self.template.text(), project=project, team=team, custom=self.custom.text(), source="запись")
+        render_name(self.template.text(), project=project, team=team, custom=self.custom.text(), source=self._source_name)
         return {"project": project, "team": team, "naming_template": self.template.text(),
                 "custom": self.custom.text(), "storage": {k: c.currentData() for k, c in self.storage.items()}}
 
@@ -254,11 +257,18 @@ class ProjectPanel(QWidget):
         try:
             options = self.options()
             name = render_name(options["naming_template"], project=options["project"], team=options["team"],
-                               custom=options["custom"], source="запись")
+                               custom=options["custom"], source=self._source_name,
+                               date=self._recorded_at.strftime("%Y_%m_%d") if self._recorded_at else None,
+                               time=self._recorded_at.strftime("%H_%M_%S") if self._recorded_at else None)
             self.preview.setText(str(scope_path(self.root(), options["project"], options["team"]) / name))
         except (ValueError, OSError) as exc:
             self.preview.setText(str(exc))
         self.changed.emit()
+
+    def set_recording_context(self, source, recorded_at):
+        self._source_name = Path(source).stem
+        self._recorded_at = datetime.fromisoformat(recorded_at)
+        self._preview()
 
     def _edit(self, kind):
         try:

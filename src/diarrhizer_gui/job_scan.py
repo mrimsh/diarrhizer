@@ -117,6 +117,7 @@ def _read_meta(job_dir: Path) -> dict:
 # @description: Main artifacts define completed stages; export manifests reject incomplete bundles.
 #   Legacy exports remain readable. Hidden OS lock files are not jobs; deletion acquires the job lock.
 #   Scope marker files drive recursive project/team discovery; only actual job folders can be deleted.
+#   History displays/sorts explicit recording time when present, otherwise the legacy processing date.
 # @inputs: output root and job directories
 # @outputs: stage state, history rows or removal of a selected job
 # @sideEffects: Reads artifacts; delete_job removes the selected directory
@@ -254,7 +255,7 @@ def scan_jobs(out_dir: Path) -> list:
         identity = read_config(job_dir / JOB_FILE)
         project_dir, team_dir = job_context(job_dir)
         try:
-            date = datetime.fromisoformat(identity["created_at"]) if identity else _parse_job_date(job_dir.name, job_dir)
+            date = datetime.fromisoformat(identity.get("recorded_at") or identity["created_at"]) if identity else _parse_job_date(job_dir.name, job_dir)
         except (KeyError, ValueError, TypeError):
             date = _parse_job_date(job_dir.name, job_dir)
 
@@ -274,7 +275,7 @@ def scan_jobs(out_dir: Path) -> list:
                 job_id=job_dir.name,
                 job_dir=job_dir,
                 input_name=input_name,
-                date_label=date.strftime("%Y-%m-%d %H:%M"),
+                date_label=date.strftime("%Y-%m-%d %H:%M:%S") if identity.get("recorded_at") else date.strftime("%Y-%m-%d %H:%M"),
                 sort_key=date,
                 language=str(pipeline_config.get("language", "—")),
                 speakers=speakers,

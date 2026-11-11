@@ -13,6 +13,7 @@ EnvironmentProbe (checked in a child process), not from importing torch here.
 """
 
 import os
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QSettings, Qt, Signal
@@ -44,6 +45,8 @@ from diarrhizer.media import MEDIA_EXTENSIONS, expand_media_paths, is_media_file
 from diarrhizer_gui import custom_models, settings_keys
 from diarrhizer_gui.job_queue import QueuedRun
 from diarrhizer_gui.screens.project_panel import ProjectPanel
+from diarrhizer_gui.screens.recording_time import RecordingTimeEditor
+from diarrhizer.recording_time import suggest_recording_time
 
 MEDIA_FILTER = (
     "Медиафайлы (" + " ".join(f"*{ext}" for ext in MEDIA_EXTENSIONS) + ");;Все файлы (*.*)"
@@ -193,6 +196,16 @@ class FileList(QListWidget):
 # [SEMANTIC-END] GUI:FILE_LIST
 
 
+# [SEMANTIC-BEGIN] GUI:NEW_JOB
+# @purpose: Plan queued media jobs with independent user-editable recording timestamps and shared settings
+# @description: Filename timestamps are proposals shown in an editor; manual edits/Now win. Each batch
+#   file keeps its own recording time; editing a multi-selection applies the chosen value to those files.
+#   The queue captures timestamps before processing, and planning never creates or renames job artifacts.
+# @inputs: media files, recording-time editor, project/team and processing settings
+# @outputs: QueuedRun items with explicit recorded_at wall time
+# @sideEffects: Reads media paths; remembers processing choices in QSettings on Run
+# @errors: Invalid run choices are shown on the form before queuing
+# @see: JOB:RECORDING_TIME, GUI:RECORDING_TIME, GUI:PROJECT_SELECTION, GUI:JOB_QUEUE
 class NewJobScreen(QWidget):
     runs_requested = Signal(list)  # [QueuedRun]
 
@@ -201,6 +214,7 @@ class NewJobScreen(QWidget):
         self._settings = QSettings("Diarrhizer", "DiarrhizerGUI")
         self._probe = probe
         self._busy = False
+        self._recording_times = {}
 
         title = QLabel("Новое задание")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
@@ -257,6 +271,12 @@ class NewJobScreen(QWidget):
         files_box.addWidget(self._files)
         files_box.addLayout(files_buttons)
         files_box.addWidget(files_hint)
+        self._recording = RecordingTimeEditor()
+        self._recording.setEnabled(False)
+        self._recording.changed.connect(self._recording_edited)
+        self._files.currentItemChanged.connect(self._recording_selection)
+        files_box.addWidget(QLabel("Дата/время записи выделенных файлов:"))
+        files_box.addWidget(self._recording)
 
         self._out_field = QLineEdit()
         self._out_field.setReadOnly(True)
@@ -480,9 +500,31 @@ class NewJobScreen(QWidget):
             entry = QListWidgetItem(f"{path.name}    ({path.parent})")
             entry.setData(Qt.ItemDataRole.UserRole, key)
             entry.setToolTip(key)
+            proposed = suggest_recording_time(path)
+            self._recording_times[key] = (proposed or datetime.now()).replace(microsecond=0).isoformat()
             self._files.addItem(entry)
+            if self._files.currentItem() is None:
+                self._files.setCurrentItem(entry, QItemSelectionModel.SelectionFlag.NoUpdate)
             added += 1
         return added
+
+    def _recording_selection(self, current, previous=None):
+        self._recording.setEnabled(current is not None)
+        if current is not None:
+            source = current.data(Qt.ItemDataRole.UserRole)
+            self._recording.set_source(source)
+            self._recording.set_value(self._recording_times[source])
+            self._project_panel.set_recording_context(source, self._recording.value())
+
+    def _recording_edited(self):
+        selected = self._files.selectedItems()
+        if not selected and self._files.currentItem() is not None:
+            selected = [self._files.currentItem()]
+        for item in selected:
+            self._recording_times[item.data(Qt.ItemDataRole.UserRole)] = self._recording.value()
+        current = self._files.currentItem()
+        if current is not None:
+            self._project_panel.set_recording_context(current.data(Qt.ItemDataRole.UserRole), self._recording.value())
 
     def set_busy(self, busy: bool) -> None:
         """While a batch runs, new jobs go to the end of the queue."""
@@ -762,9 +804,12 @@ class NewJobScreen(QWidget):
             common["asr_initial_prompt"] = prompt
 
         runs = [
-            QueuedRun(mode=mode, kwargs={**common, "input_path": path}, label=Path(path).name)
+            QueuedRun(mode=mode, kwargs={**common, "input_path": path,
+                                        "recorded_at": self._recording_times[path]}, label=Path(path).name)
             for path in self._selected_files()
         ]
         self._remember()
         self._files.clear()
+        self._recording_times.clear()
         self.runs_requested.emit(runs)
+# [SEMANTIC-END] GUI:NEW_JOB
