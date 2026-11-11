@@ -1,6 +1,6 @@
 # Windows launcher
 
-Current source version: **2.1** by **MRIMSH**. The setup window and rebuilt Windows executable file/product
+Current source version: **2.4** by **MRIMSH**. The setup window and rebuilt Windows executable file/product
 properties display the shared release version; Windows company metadata names MRIMSH.
 
 `Diarrhizer.exe` is the graphical entry point for setup and everyday use on Windows 10/11 x64.
@@ -21,7 +21,8 @@ a normal Python installation in one selected virtual environment. There is no se
    verified with SHA-256 before use. The UI displays the actual download size when the server supplies it.
 5. Press **Подготовить окружение** and confirm the displayed paths and installation plan.
 
-The stages are Python preparation, venv preparation, FFmpeg preparation, constrained dependency
+Before installation the launcher resolves and downloads the latest GitHub main snapshot. The setup
+stages are Python preparation, venv preparation, FFmpeg preparation, constrained dependency
 installation, diagnostics, and GUI start-file creation. Overall progress counts stages; package
 installation has an activity indicator because pip does not provide a reliable overall percentage.
 Downloads report byte progress. The detailed output is streamed into the window and a durable log.
@@ -34,7 +35,7 @@ than replacing the old environment. Changing the Python minor version inside an 
 The installer uses `requirements/constraints-stable.txt`, `base.txt` and exactly one of `cpu.txt` /
 `cuda-cu121.txt`, then installs the application with its `gui` extra. Torch/torchaudio must match
 **2.3.1+cpu** or **2.3.1+cu121**. The application is installed normally, without an editable link to the
-launcher's temporary extracted files. A launcher rebuild is needed to distribute changed application code.
+launcher's temporary extracted files. Updated application code is downloaded without rebuilding the launcher.
 
 NVIDIA hardware/driver detection runs before CUDA installation. Final checks also verify Torch CUDA,
 CTranslate2 CUDA device discovery and a small CUDA tensor operation. A detected GPU alone is not
@@ -79,18 +80,29 @@ run during setup or repair. A missing/damaged environment disables GUI launch un
 
 ## Recovery and storage
 
-### Updating after git pull
+### Downloading the latest application
 
-`git pull` changes the checkout, not an existing executable or a regular installation in `.venv`.
-An older standalone exe contains the source snapshot from its build and can reinstall that older
-application even while it refreshes dependencies. Close the main GUI before updating.
+The launcher downloads the current **`main` branch** of `mrimsh/diarrhizer` for setup, repair and
+**Обновить приложение**. This includes commits not yet published as GitHub Releases. Git, `git pull`,
+and a new launcher build for each application version are unnecessary. Close the main GUI first.
 
-New launchers located in the checkout root or its `dist` directory use the adjacent Git checkout
-as the application source, including its current requirements. For an exe outside a checkout, opening
-a venv directly inside a checkout (for example `diarrhizer-main/.venvcuda`) also selects that checkout.
-Otherwise the launcher uses its bundled source. The chosen source path and version appear in the launcher and setup log.
-An existing old exe must be rebuilt/replaced once to receive this behavior; alternatively run
-`Diarrhizer.pyw` from the updated checkout with an installed Python/Tk.
+The GitHub API resolves `main` to one commit SHA. Its archive is downloaded over HTTPS, validated and
+stored atomically under `launcher/sources/<SHA>`. Only application sources, requirements and package
+metadata are extracted; traversal/symlinks and excessive archive sizes are rejected. Subsequent attempts
+check GitHub again and reuse the immutable cache when that SHA is unchanged. `source.json` records the
+downloaded version, commit and path. Changed revisions invalidate application-install checkpoints even
+if the version number did not change. The downloaded requirements are used for full setup/repair.
+
+The window/log shows the downloaded application version and commit. The title and executable metadata
+identify the launcher build; this can differ from the application downloaded from GitHub.
+A one-time replacement of an older launcher exe is needed to receive this downloader functionality.
+GUI setup always uses GitHub, regardless of the exe/venv/checkout location; local checkout detection is
+only used for source-development defaults, not as a substitute for downloading the current application.
+
+If GitHub cannot be reached or returns an invalid archive, the launcher reports an error and offers
+retry. It never silently installs its bundled old snapshot. A download failure preserves an already
+ready environment, its start files and GUI access. No models, results or existing packages are changed
+by downloading. Internet access is required during setup/update; ordinary GUI launch remains offline.
 
 Open the existing environment and press **Обновить приложение** to reinstall only Diarrhizer,
 without reinstalling Torch/CUDA or downloading models. Diagnostics still run afterward. Installation
@@ -135,7 +147,8 @@ build/launcher-env/Scripts/python.exe -m pip install -r requirements/launcher-bu
 build/launcher-env/Scripts/python.exe tools/build_launcher.py --smoke-test
 ```
 
-The result is **`dist/Diarrhizer.exe`**. Distribute that file; no sibling source tree or launcher packages
+The result is **`dist/Diarrhizer.exe`**. The build includes certifi's CA bundle alongside the system trust
+store for verified HTTPS downloads; TLS verification remains enabled. Distribute the exe; no sibling source tree or launcher packages
 are required. PyInstaller is a build-only dependency and is excluded from processing requirements.
 The payload allowlist is the `src` tree, requirements and public package metadata; recordings, model
 caches, `.env`, user settings and virtual environments are excluded. CI builds and opens/closes the

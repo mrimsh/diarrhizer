@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4 — 2026-11-11
+
+- Download current GitHub `main` source for launcher setup, repair and application updates, pinned
+  to an immutable commit with a local source cache; no Git installation or launcher rebuild per app version.
+- Show downloaded version/revision; preserve the working environment on download failure instead of
+  silently reinstalling an older bundled application. Launcher and downloaded application versions may differ.
+
 ## 2.3 — Unreleased
 
 - Open and re-export old results containing reversed segment intervals without losing transcript

@@ -1,5 +1,6 @@
 """Restartable setup stages; all long work runs outside the UI thread."""
 
+import json
 import os
 import re
 import shutil
@@ -9,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import system
-from .config import State, source_version
+from .config import State, atomic_text, source_version
 
 STEPS = (
     ("python", "Проверка и подготовка Python"),
@@ -21,6 +22,7 @@ STEPS = (
 )
 
 STEP_HINTS = {
+    "source": "Проверьте доступ к GitHub и повторите загрузку. Старая встроенная версия не устанавливалась.",
     "python": "Проверьте путь к Python 3.11/3.12 x64 и доступ к Интернету для загрузки.",
     "venv": "Проверьте доступ к папке окружения. Для несовместимой или сломанной venv выберите новую пустую папку.",
     "ffmpeg": "Выберите комплект ffmpeg.exe + ffprobe.exe либо разрешите их загрузку.",
@@ -102,16 +104,18 @@ def check_ready(state: State) -> tuple[bool, str]:
 # @description: Checkpoint only successful stages. Existing environments need approval; no directory
 #   is deleted or cleared. Resume skips successful stages; repair reruns them and keeps packages/data.
 #   Install uses the repository's CPU/cu121 requirements and shared constraints, then a regular install
-#   of the bundled application, so a one-file launcher's temporary extraction is never an editable source.
+#   of the selected source snapshot, so downloaded/extracted files are never an editable install source.
 #   Successful setup also snapshots parameters in the venv for reopening it by directory.
 #   Application-only updates leave dependencies intact; source/installed versions are verified.
+#   GUI setup resolves GitHub main before touching the environment; source revisions invalidate checkpoints.
 # @inputs: settings state, source payload, event callback, explicit existing-environment approval
 # @outputs: ready state, durable log, GUI start files; queue events for progress/errors
 # @sideEffects: Local filesystem writes, hidden child processes, optional verified downloads and pip network
 # @errors: Each failed step persists its name/log and remains retryable; setup never records credentials
 # @see: LAUNCHER:CONFIG, LAUNCHER:PROBES, LAUNCHER:DOWNLOAD, LAUNCHER:START, DIAGNOSTICS:DOCTOR
 class SetupWorker:
-    def __init__(self, state: State, state_path: Path, source: Path, emit, *, approve_existing: bool = False):
+    def __init__(self, state: State, state_path: Path, source: Path, emit, *, approve_existing: bool = False,
+                 remote: bool = False):
         self.state, self.state_path, self.source, self.emit = state, state_path, source, emit
         self.home = state_path.parent
         self.approve_existing = approve_existing
@@ -119,6 +123,7 @@ class SetupWorker:
         self._stream = None
         self.repair = False
         self.application_only = False
+        self.remote = remote
 
     def log(self, text: str) -> None:
         text = re.sub(r"hf_[A-Za-z0-9]+", "[HF_TOKEN]", text)
@@ -177,6 +182,7 @@ class SetupWorker:
         step = "python"
         self.repair = repair or self.state.repair
         self.application_only = application_only or (self.state.update_only and not repair)
+        was_ready = self.state.ready
         try:
             self.state.settings.validate(self.source, self.home)
             self.home.mkdir(parents=True, exist_ok=True)
@@ -189,9 +195,29 @@ class SetupWorker:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as stream:
                 self._stream = stream
-                self.state.ready = False
                 self.state.repair = self.repair
                 self.state.update_only = self.application_only
+                if self.remote:
+                    from .repository import latest_source
+                    step = "source"
+                    self.emit({"kind": "stage", "index": 0, "total": len(STEPS),
+                               "message": "Загрузка актуальных исходников с GitHub (main)"})
+                    self.source, revision = latest_source(self.home, self._download_event, self.cancel)
+                    self.state.settings.validate(self.source, self.home)
+                    receipt = self.home / "source.json"
+                    try:
+                        recorded = json.loads(receipt.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        recorded = {}
+                    previous = recorded.get("revision") if isinstance(recorded, dict) else None
+                    if revision != previous:
+                        self.state.completed = [s for s in self.state.completed
+                                                if s not in {"dependencies", "diagnostics", "entrypoint"}]
+                    atomic_text(receipt, json.dumps({"revision": revision, "version": source_version(self.source),
+                                                     "path": str(self.source)}))
+                    self.log(f"GitHub main: {revision}; версия {source_version(self.source)}")
+                    self.emit({"kind": "source", "revision": revision, "version": source_version(self.source)})
+                self.state.ready = False
                 version = source_version(self.source)
                 if application_only or (version and self.state.application_version != version):
                     self.state.completed = [s for s in self.state.completed
@@ -226,7 +252,7 @@ class SetupWorker:
                 self.log("Готово. Модели не загружались. HF-токен можно указать в настройках основного GUI.")
                 self.emit({"kind": "done"})
         except Exception as exc:  # noqa: BLE001 - worker boundary must persist any failed stage
-            self.state.ready = False
+            self.state.ready = was_ready if step == "source" else False
             self.state.failed_step = step
             self.state.error = str(exc) + ("" if self.cancel.is_set() else " " + STEP_HINTS[step])
             try:

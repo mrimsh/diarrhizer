@@ -21,7 +21,6 @@ from .config import (
     State,
     application_source,
     launcher_home,
-    source_version,
 )
 from .existing import inspect_environment, remember_environment
 from .launch import (
@@ -31,6 +30,7 @@ from .launch import (
     start_gui,
     write_start_files,
 )
+from .repository import SOURCE_LABEL
 from .setup import STEPS, SetupWorker, check_ready
 from .system import discover_pythons, gpu_description
 
@@ -62,7 +62,7 @@ class Launcher:
         settings = self.state.settings if self.state else Settings.defaults(source, state_path.parent)
         self.variables = {key: (tk.BooleanVar(value=value) if isinstance(value, bool) else tk.StringVar(value=value))
                           for key, value in asdict(settings).items()}
-        root.title(f"Diarrhizer {__version__} — запуск и настройка")
+        root.title(f"Лаунчер Diarrhizer {__version__} — запуск и настройка")
         root.geometry("980x820")
         root.minsize(850, 740)
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -75,7 +75,7 @@ class Launcher:
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
         body.rowconfigure(5, weight=1)
-        ttk.Label(body, text=f"Diarrhizer {__version__} · {__author__}", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(body, text=f"Лаунчер Diarrhizer {__version__} · {__author__}", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         self.status = tk.StringVar(value="Поиск совместимого Python и проверка среды…" if probe
                                    else "Подготовьте окружение, затем откройте основной GUI.")
         ttk.Label(body, textvariable=self.status, wraplength=920).grid(row=1, column=0, sticky="w", pady=(4, 12))
@@ -113,7 +113,7 @@ class Launcher:
         self._path_row(form, 7, "Кэш моделей", "cache")
         self._path_row(form, 8, "Результаты обработки", "output")
         self._path_row(form, 9, "Настройки приложения", "config_dir")
-        self.source_text = tk.StringVar(value=f"Источник приложения {source_version(source) or ''}: {source}")
+        self.source_text = tk.StringVar(value=f"Источник приложения: {SOURCE_LABEL} · версия определяется при загрузке")
         ttk.Label(form, textvariable=self.source_text,
                   wraplength=900).grid(row=11, column=0, columnspan=4, sticky="w", pady=(4, 0))
         ttk.Label(form, text="Зависимости: общие ограничения проекта + CPU / CUDA. Установка может занять несколько ГБ.\n"
@@ -267,7 +267,8 @@ class Launcher:
         self.setup_button.configure(state="normal" if idle else "disabled")
         label = "Применить параметры" if self.available and changed else "Подготовить окружение"
         if self.state and self.state.failed_step and not changed:
-            title = dict(STEPS).get(self.state.failed_step, self.state.failed_step)
+            title = "Загрузка исходников" if self.state.failed_step == "source" else dict(STEPS).get(
+                self.state.failed_step, self.state.failed_step)
             label = "Повторить: " + title
         self.setup_button.configure(text=label)
         self.repair_button.configure(state="normal" if idle and self.state else "disabled")
@@ -308,10 +309,9 @@ class Launcher:
                 text += "\n\nОкружение уже существует. Разрешить установку / обновление его пакетов?"
             if repair:
                 text += "\n\nВосстановление переустановит зависимости; возможна повторная загрузка пакетов."
-            text += f"\n\nИсточник приложения: {self.source}\nВерсия: {source_version(self.source) or 'не указана'}"
+            text += f"\n\nИсточник приложения: {SOURCE_LABEL}. Актуальная версия будет скачана перед установкой."
             if update:
-                text = (f"Обновить только Diarrhizer из {self.source}?\n"
-                        f"Версия: {source_version(self.source) or 'не указана'}\n"
+                text = (f"Скачать и установить актуальный Diarrhizer из {SOURCE_LABEL}?\n"
                         "Библиотеки CPU/CUDA переустанавливаться не будут. Закройте основной GUI перед обновлением.")
             if not messagebox.askyesno("Подтвердить настройку", text, parent=self.root, default="no"):
                 return
@@ -321,7 +321,7 @@ class Launcher:
             self.available = False
             self.busy = True
             self.worker = SetupWorker(self.state, self.state_path, self.source, self.events.put,
-                                      approve_existing=existing)
+                                      approve_existing=existing, remote=True)
             self.refresh()
             threading.Thread(target=lambda: self.worker.run(repair=repair, application_only=update), daemon=True).start()
         except (ValueError, OSError) as exc:
@@ -347,7 +347,6 @@ class Launcher:
                         self.state = event["state"]
                         if getattr(sys, "frozen", False):
                             self.source = application_source(Path(self.state.settings.venv))
-                            self.source_text.set(f"Источник приложения {source_version(self.source) or ''}: {self.source}")
                         for key, value in asdict(self.state.settings).items():
                             self.variables[key].set(value)
                         self.log_path.set("Журнал: " + (self.state.log or str(self.state_path.parent / "logs")))
@@ -355,6 +354,8 @@ class Launcher:
                     self.stage.set("Среда готова" if self.available else "Требуется настройка / восстановление")
                     self.overall["value"] = len(STEPS) if self.available else 0
                 self.refresh()
+            elif kind == "source":
+                self.source_text.set(f"{SOURCE_LABEL} · версия {event['version']} · коммит {event['revision'][:12]}")
             elif kind == "log":
                 self._append(event["message"])
                 if self.state and self.state.log:
@@ -375,7 +376,7 @@ class Launcher:
                 self.download_status.set(text + (f" из {total / 1048576:.1f} МБ" if total else ""))
             elif kind in {"done", "error"}:
                 self.busy = False
-                self.available = kind == "done"
+                self.available = kind == "done" or (event.get("step") == "source" and self.state.ready)
                 self.detail.stop()
                 self.download_status.set("")
                 # Probes/downloads resolve automatic paths. Keep those values on failure too,
@@ -387,7 +388,8 @@ class Launcher:
                     self.stage.set("Настройка завершена")
                     self.status.set("Готово. Запустите Diarrhizer, создайте ярлык или откройте папку запуска GUI.")
                 else:
-                    self.stage.set("Не удалось завершить: " + dict(STEPS).get(event["step"], event["step"]))
+                    title = "Загрузка исходников" if event["step"] == "source" else dict(STEPS).get(event["step"], event["step"])
+                    self.stage.set("Не удалось завершить: " + title)
                     self.status.set(event["message"] + " Журнал сохранён; шаг можно повторить.")
                 self.refresh()
                 if self.closing:

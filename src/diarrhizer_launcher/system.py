@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import urllib.request
@@ -121,11 +122,23 @@ def gpu_description() -> str:
 # @purpose: Download Python/FFmpeg with checksum verification and byte progress
 # @description: Partial files never become executable downloads; FFmpeg extraction copies only two
 #   named binaries, so archive paths cannot escape the component directory.
+#   HTTPS adds the bundled certifi CA set to system trust without disabling certificate/hostname checks.
 # @inputs: HTTPS URL, expected SHA-256, component folder, event callback
 # @outputs: verified cached installer or FFmpeg executables
 # @sideEffects: Network access and local component/cache files
 # @errors: ValueError for checksum/archive errors; network/OSError failures leave a retryable step
 # @see: LAUNCHER:SETUP
+def open_https(url, *, timeout=45):
+    context = ssl.create_default_context()
+    try:
+        import certifi
+    except ImportError:
+        pass  # Source-only runs can use the Windows trust store without additional packages.
+    else:
+        context.load_verify_locations(cafile=certifi.where())
+    return urllib.request.urlopen(url, context=context, timeout=timeout)
+
+
 def download(url: str, target: Path, expected_sha256: str, emit) -> Path:
     if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256):
         raise ValueError("Источник не предоставил корректную контрольную сумму SHA-256.")
@@ -136,7 +149,7 @@ def download(url: str, target: Path, expected_sha256: str, emit) -> Path:
     digest = hashlib.sha256()
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "Diarrhizer-Launcher/1"})
-        with urllib.request.urlopen(request, timeout=45) as response, partial.open("wb") as stream:
+        with open_https(request) as response, partial.open("wb") as stream:
             total = int(response.headers.get("Content-Length", 0))
             received = 0
             while chunk := response.read(512 * 1024):
@@ -158,7 +171,7 @@ def _sha256(path: Path) -> str:
 
 
 def install_ffmpeg(home: Path, emit) -> str:
-    with urllib.request.urlopen(FFMPEG_URL + ".sha256", timeout=30) as response:
+    with open_https(FFMPEG_URL + ".sha256", timeout=30) as response:
         checksum = response.read(4096).decode("ascii").split()[0]
     archive = download(FFMPEG_URL, home / "downloads" / "ffmpeg.zip", checksum, emit)
     folder = home / "components" / "ffmpeg" / checksum[:16] / "bin"
