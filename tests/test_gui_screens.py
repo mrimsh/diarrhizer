@@ -962,6 +962,50 @@ def test_new_job_proposes_per_file_times_and_manual_or_now_values_win(qapp, isol
     assert [run.kwargs["recorded_at"] for run in received[0]] == ["2020-05-06T07:08:09", "2018-09-10T11:12:13"]
 
 
+def test_new_job_input_format_updates_proposal_until_explicitly_applied(qapp, isolated, tmp_path):
+    media = _touch(tmp_path / "call 02_10_26_15-04-33.wav")
+    screen = new_job_screen.NewJobScreen()
+    screen._mode_combo.setCurrentIndex(screen._mode_combo.findData("asr_only"))
+    screen.add_paths([media])
+    editor = screen._recording
+    editor.set_value("2018-09-10T11:12:13", emit=True)
+    editor._format.setText("DD_MM_YY_HH-mm-SS")
+    assert editor._proposal.isEnabled()
+    assert "2026-10-02 15:04:33" in editor.hint.text()
+    assert screen._recording_times[str(media)] == "2018-09-10T11:12:13"
+    screen._project_panel.template.setText("DD.MM.YYYY_HH-mm-SS")
+    assert "10.09.2018_11-12-13" in screen._project_panel.preview.text()
+    editor._proposal.click()
+    assert editor.value() == "2026-10-02T15:04:33"
+    assert screen._recording_times[str(media)] == "2026-10-02T15:04:33"
+    assert "02.10.2026_15-04-33" in screen._project_panel.preview.text()
+    editor._format.setText("DD_mm_YY_HH-mm-SS")
+    assert not editor._proposal.isEnabled()
+    assert "MM (месяц)" in editor.hint.text()
+    assert editor.value() == "2026-10-02T15:04:33"
+    received = []
+    screen.runs_requested.connect(received.append)
+    screen._emit_run_requested()
+    assert received[0][0].kwargs["recorded_at"] == "2026-10-02T15:04:33"
+
+
+@pytest.mark.parametrize("template", ["DD.MM.YYYY_HH-mm-SS", "DD_MM_YY_HH-mm-SS", "{{date}}-{{time}}"])
+def test_date_name_action_preserves_complete_atomic_templates(qapp, isolated, tmp_path, template):
+    from diarrhizer_gui.screens.move_jobs_dialog import MoveJobsDialog
+    job = _finished_job(tmp_path)
+    dialog = MoveJobsDialog(None, tmp_path / "out", 1, jobs=[job])
+    dialog._template.setText(template)
+    dialog.edit_recording()
+    assert dialog._template.text() == template
+    dialog._recording.set_value("2026-10-02T15:04:33", emit=True)
+    assert "15" in dialog._names_preview.toPlainText()
+    dialog.show()
+    qapp.processEvents()
+    assert dialog._recording.edit.height() >= dialog._recording.edit.minimumSizeHint().height()
+    assert dialog._recording._format.height() >= dialog._recording._format.minimumSizeHint().height()
+    dialog.close()
+
+
 def test_history_date_name_action_previews_and_applies_time_in_place(qapp, isolated, tmp_path, monkeypatch):
     from diarrhizer.projects import read_config
     job = _finished_job(tmp_path)
@@ -974,7 +1018,7 @@ def test_history_date_name_action_previews_and_applies_time_in_place(qapp, isola
         assert dialog._recording_override.isChecked()
         assert dialog._rename.isChecked()
         dialog._recording.set_value("2018-09-10T11:12:13", emit=True)
-        dialog._template.setText("YYYY_MM_DD-HH_MM_SS-CUSTOM")
+        dialog._template.setText("YYYY_MM_DD-HH_mm_SS-CUSTOM")
         dialog._custom.setText("Call")
         assert "2018_09_10-11_12_13-Call" in dialog._names_preview.toPlainText()
         assert job.exists()

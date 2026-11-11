@@ -1,18 +1,40 @@
 """Project/team selection and portable scope settings (no pipeline imports)."""
 
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 from diarrhizer.projects import (
-    PROJECT_FILE, TEAM_FILE, DEFAULT_TEMPLATE, DEFAULT_STORAGE, change_participant,
-    ensure_scope, inherited_settings, list_scopes, participants, read_config,
-    render_name, rename_scope, save_scope, scope_file, scope_path,
+    DEFAULT_STORAGE,
+    DEFAULT_TEMPLATE,
+    PROJECT_FILE,
+    TEAM_FILE,
+    change_participant,
+    ensure_scope,
+    inherited_settings,
+    list_scopes,
+    participants,
+    read_config,
+    rename_scope,
+    render_name,
+    save_scope,
+    scope_file,
+    scope_path,
 )
 
 STORAGE_LABELS = (("С исходным именем", "original"), ("По шаблону задания", "template"),
@@ -65,7 +87,9 @@ class ScopeDialog(QDialog):
         form = QFormLayout()
         form.addRow("Название:", self._name)
         form.addRow("Шаблон названия:", self._template)
-        hint = QLabel("PROJECT · TEAM · YYYY_MM_DD · HH_MM_SS · CUSTOM · SOURCE\n"
+        hint = QLabel("PROJECT · TEAM · CUSTOM · SOURCE\n"
+                      "YYYY / YY · MM — месяц · DD · HH · mm — минуты · SS\n"
+                      "Например: DD.MM.YYYY_HH-mm-SS\n"
                       "Также: {{project}}, {{team}}, {{date}}, {{time}}, {{custom}}, {{source}}")
         hint.setWordWrap(True)
         form.addRow("", hint)
@@ -185,7 +209,8 @@ class ProjectPanel(QWidget):
         root_button.clicked.connect(lambda: self._edit("root"))
         form.addRow("", root_button)
         form.addRow("Шаблон названия:", self.template)
-        form.addRow("", QLabel("PROJECT · YYYY_MM_DD · HH_MM_SS · TEAM · CUSTOM · SOURCE"))
+        form.addRow("", QLabel("PROJECT · TEAM · CUSTOM · SOURCE\n"
+                               "YYYY / YY · MM — месяц · DD · HH · mm — минуты · SS"))
         form.addRow("Своё значение:", self.custom)
         self.storage = storage_fields(form)
         form.addRow("Будет создано:", self.preview)

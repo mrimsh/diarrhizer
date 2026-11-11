@@ -6,8 +6,13 @@ from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 
+from diarrhizer.recording_time import (
+    DATE_TIME_FORMATS,
+    DATE_TIME_TOKEN,
+    job_recording_time,
+    local_datetime,
+)
 from diarrhizer.utils import write_json_atomic, write_text_atomic
-from diarrhizer.recording_time import job_recording_time, local_datetime
 
 PROJECT_FILE = ".diarrhizer-project.json"
 TEAM_FILE = ".diarrhizer-team.json"
@@ -16,7 +21,8 @@ JOB_FILE = "job.json"
 DEFAULT_TEMPLATE = "PROJECT-YYYY_MM_DD-TEAM"
 STORAGE_MODES = ("original", "template", "discard")
 DEFAULT_STORAGE = {"original": "discard", "working": "original", "archive": "original"}
-_TOKEN = re.compile(r"\{\{\s*(project|team|date|time|custom|source)\s*\}\}|PROJECT|TEAM|YYYY_MM_DD|HH_MM_SS|CUSTOM|SOURCE", re.IGNORECASE)
+_TOKEN = re.compile(r"(?i:\{\{\s*(project|team|date|time|custom|source)\s*\}\}|PROJECT|TEAM|CUSTOM|SOURCE)|"
+                    + DATE_TIME_TOKEN.pattern)
 _RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", re.IGNORECASE)
 
 
@@ -302,7 +308,7 @@ def _renamed_files(job, title, identity):
     files = {}
     storage = validate_storage(old_identity.get("storage")) if old_identity else dict(DEFAULT_STORAGE)
     if not old_identity:
-        from diarrhizer.audio_formats import AudioFormat, WAV_FORMAT
+        from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat
         recorded = read_config(job / "meta" / "run.json").get("config", {}).get("audio_format")
         fmt = AudioFormat.from_dict(recorded) if isinstance(recorded, dict) else WAV_FORMAT
         storage["working"] = "original" if fmt.keeps_wav else "discard"
@@ -465,7 +471,9 @@ def move_jobs(root: Path, jobs, *, project: str = "", team: str = "", rename: bo
 
 # [SEMANTIC-BEGIN] LIBRARY:JOB_IDENTITY
 # @purpose: Plan names without writes and reserve portable jobs with independently retained source files
-# @description: Templates accept PROJECT/TEAM/YYYY_MM_DD/CUSTOM/SOURCE or {{project/team/date/custom/source}}.
+# @description: Templates accept PROJECT/TEAM/CUSTOM/SOURCE, case-sensitive YYYY/YY/MM/DD/HH/mm/SS
+#   components with literal separators, and {{project/team/date/time/custom/source}} aliases.
+#   MM is month and mm is minute; inserted values are never expanded again.
 #   Missing optional fields collapse adjacent separators. Job titles are fixed at creation; collisions
 #   receive numeric suffixes. job.json stores relative paths so moving/renaming scopes needs no rewrites.
 #   recorded_at stores recording wall time separately from created_at processing time; date/time tokens
@@ -477,18 +485,51 @@ def move_jobs(root: Path, jobs, *, project: str = "", team: str = "", rename: bo
 # @see: LIBRARY:SCOPES, PIPELINE:EXECUTE, STAGE:CONVERT, STAGE:EXPORT
 def render_name(template: str = DEFAULT_TEMPLATE, *, project: str = "", team: str = "",
                 custom: str = "", source: str = "", date: str | None = None, time: str | None = None) -> str:
-    values = {"project": project, "team": team, "custom": custom, "source": source,
-              "date": date or datetime.now().strftime("%Y_%m_%d"), "time": time or datetime.now().strftime("%H_%M_%S")}
-    def substitute(match):
-        key = (match.group(1) or match.group()).lower()
-        return values[{"yyyy_mm_dd": "date", "hh_mm_ss": "time"}.get(key, key)]
     if not isinstance(template, str) or not template.strip():
         raise ValueError("Шаблон названия не может быть пустым")
-    name = _TOKEN.sub(substitute, template)
+    now = datetime.now()
+    values = {"project": project, "team": team, "custom": custom, "source": source,
+              "date": date or now.strftime("%Y_%m_%d"), "time": time or now.strftime("%H_%M_%S")}
+    if name_time_tokens(template):
+        recorded = datetime.strptime(f"{values['date']} {values['time']}", "%Y_%m_%d %H_%M_%S")
+        values.update({token: recorded.strftime(fmt) for token, fmt in DATE_TIME_FORMATS.items()})
+    chunks, empty_positions, end, size = [], set(), 0, 0
+    for match in _TOKEN.finditer(template):
+        literal = template[end:match.start()]
+        chunks.append(literal)
+        size += len(literal)
+        token = match.group()
+        value = values[token] if token in DATE_TIME_FORMATS else values[(match.group(1) or token).lower()]
+        if not value:
+            empty_positions.add(size)
+        chunks.append(value)
+        size += len(value)
+        end = match.end()
+    chunks.append(template[end:])
+    name = "".join(chunks)
     if "{{" in name or "}}" in name:
         raise ValueError("Неизвестная подстановка в шаблоне")
-    name = re.sub(r"[-_ ]{2,}", "-", name).strip("-_ ")
+    # Only separators adjoining omitted fields collapse; literal separators keep their exact form.
+    for match in reversed(list(re.finditer(r"[-_ ]+", name))):
+        if any(match.start() <= position <= match.end() for position in empty_positions):
+            name = name[:match.start()] + "-" + name[match.end():]
+    name = name.strip("-_ ")
     return valid_name(name)
+
+
+def name_time_tokens(template: str) -> set[str]:
+    result = set()
+    for match in _TOKEN.finditer(template):
+        token = match.group()
+        if token in DATE_TIME_FORMATS:
+            result.add(token)
+        elif match.group(1):
+            alias = match.group(1).lower()
+            if alias == "date":
+                result.update(("YYYY", "MM", "DD"))
+            elif alias == "time":
+                result.update(("HH", "mm", "SS"))
+    return result
 
 
 def validate_storage(storage: dict | None) -> dict:

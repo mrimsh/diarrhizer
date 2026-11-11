@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.6 — 2026-11-11
+
+- Use independent, case-sensitive date/time wildcards `YYYY`, `YY`, `MM`, `DD`, `HH`, `mm`, `SS`
+  with configurable order and literal separators in job and file names; `MM` is month, `mm` is minute.
+- Parse input filenames with the same date/time tokens through an optional format field;
+  preview suggestions before applying them, retaining automatic detection and manual date/time editing.
+- Preserve complete custom date/time templates when editing existing jobs and keep the date/time
+  controls readable in the rename dialog. Existing fixed date/time aliases remain supported.
+
 ## 2.5 — 2026-11-11
 
 - Store recording date/time separately from processing time; propose conservative timestamps from

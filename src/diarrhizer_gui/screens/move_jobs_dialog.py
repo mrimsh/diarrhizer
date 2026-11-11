@@ -3,11 +3,26 @@
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
-    QMessageBox, QPlainTextEdit, QVBoxLayout,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPlainTextEdit,
+    QVBoxLayout,
 )
 
-from diarrhizer.projects import inherited_settings, list_scopes, plan_job_moves, read_config, scope_path
+from diarrhizer.projects import (
+    inherited_settings,
+    list_scopes,
+    name_time_tokens,
+    plan_job_moves,
+    read_config,
+    scope_path,
+)
 from diarrhizer.recording_time import job_recording_time
 from diarrhizer_gui.screens.recording_time import RecordingTimeEditor
 
@@ -31,7 +46,7 @@ class MoveJobsDialog(QDialog):
         self._jobs = list(jobs)
         self._template_scope = None
         self.setWindowTitle("Переместить задания")
-        self.resize(680, 480)
+        self.resize(680, 560)
         self._project = QComboBox()
         self._team = QComboBox()
         for combo in (self._project, self._team):
@@ -67,7 +82,8 @@ class MoveJobsDialog(QDialog):
         form.addRow(self._recording_override)
         form.addRow("Дата/время записи:", self._recording)
         form.addRow("Шаблон назначения:", self._template)
-        form.addRow("", QLabel("PROJECT · TEAM · YYYY_MM_DD · HH_MM_SS · CUSTOM · SOURCE"))
+        form.addRow("", QLabel("PROJECT · TEAM · CUSTOM · SOURCE\n"
+                               "YYYY / YY · MM — месяц · DD · HH · mm — минуты · SS"))
         form.addRow("Новое значение CUSTOM:", self._custom)
         form.addRow("Предпросмотр:", self._names_preview)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -77,7 +93,7 @@ class MoveJobsDialog(QDialog):
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         hint = QLabel("Выберите проект и команду или введите новые названия. Пустая команда означает корень проекта. "
-                      "По умолчанию дата записи сохраняется. HH_MM_SS добавляет время в имя. "
+                      "По умолчанию дата записи сохраняется. HH_mm_SS добавляет время в имя. "
                       "При совпадении имён добавится числовой суффикс. Внешний оригинал не переименовывается.")
         hint.setWordWrap(True)
         layout = QVBoxLayout(self)
@@ -158,11 +174,12 @@ class MoveJobsDialog(QDialog):
         self._rename.setChecked(True)
         self._recording_override.setChecked(True)
         template = self._template.text()
-        compact = "".join(template.lower().split())
-        if "yyyy_mm_dd" not in compact and "{{date}}" not in compact:
-            template += "-YYYY_MM_DD"
-        if "hh_mm_ss" not in compact and "{{time}}" not in compact:
-            template += "-HH_MM_SS"
+        tokens = name_time_tokens(template)
+        date = ([] if tokens & {"YYYY", "YY"} else ["YYYY"]) + [v for v in ("MM", "DD") if v not in tokens]
+        time = [v for v in ("HH", "mm", "SS") if v not in tokens]
+        for missing in (date, time):
+            if missing:
+                template += "-" + "_".join(missing)
         self._template.setText(template)
 
     def _accept(self):

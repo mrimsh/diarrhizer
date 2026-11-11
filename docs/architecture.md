@@ -1,6 +1,6 @@
 # Architecture
 
-Current source version: **2.5**, shared by the CLI, desktop GUI and Windows launcher.
+Current source version: **2.6**, shared by the CLI, desktop GUI and Windows launcher.
 The [2.x roadmap](roadmap.md) describes the direction toward autonomous call logging, a separate
 call agent and optional integration skills; those capabilities remain planned.
 
@@ -176,9 +176,19 @@ legacy fallbacks. `reserve_job(recorded_at=...)` uses recording time for date/ti
 runner/CLI forward explicit values only for fresh allocation, and queued GUI jobs capture a per-file value
 before their worker starts. Omitted CLI/API values preserve the current-time naming behavior.
 
+`recording_time.py` defines the case-sensitive atomic `YYYY/YY/MM/DD/HH/mm/SS` tokens shared by
+name rendering and explicit filename parsing: `MM` is month and `mm` is minute. Date/time order and
+literal separators are configurable; separators are escaped when compiling input formats. Explicit
+input formats require a full date, default missing time components to zero and resolve `YY` to
+2000–2099. Invalid calendar/time values, conflicting repeated fields and multiple distinct matches
+produce no suggestion. Name expansion inserts project/team/custom/source values once, without
+interpreting token-like text inside them. Fixed `{{date}}` / `{{time}}` aliases remain supported.
+
 The New Job editor shows per-file proposals and permits explicit edits/Now; proposals have no filesystem
-effects. `plan_job_moves` and `move_jobs` accept optional recording time and per-operation naming template
-overrides for existing jobs. Recording-time edits require renaming and use the existing lock/rollback
+effects. An optional input date/time format changes only the proposal until the user explicitly applies
+it; clearing the field restores automatic detection. `plan_job_moves` and `move_jobs` accept optional
+recording time and per-operation naming template overrides for existing jobs. Recording-time edits
+require renaming and use the existing lock/rollback
 transaction for identity, filenames and manifest paths. Processing timestamps, transcript content, fixed
 pipeline cache names and project defaults are preserved. History uses explicit recording time for display
 and sorting, falling back to existing legacy behavior when none exists.

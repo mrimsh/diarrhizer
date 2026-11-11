@@ -281,7 +281,8 @@ def main() -> int:
     run_parser.add_argument("--project", default=None, help="Existing/new project under --out")
     run_parser.add_argument("--team", default=None, help="Existing/new team in the project; empty = project root")
     run_parser.add_argument("--name-template", default=None,
-                            help="Job/file name template (default for projects: PROJECT-YYYY_MM_DD-TEAM); also CUSTOM/SOURCE")
+                            help="Job/file name template (default: PROJECT-YYYY_MM_DD-TEAM); "
+                                 "PROJECT/TEAM/CUSTOM/SOURCE and YYYY/YY/MM/DD/HH/mm/SS (MM month, mm minute)")
     run_parser.add_argument("--name-value", default=None, help="Text substituted for CUSTOM")
     run_parser.add_argument("--recorded-at", default=None, help="Local recording date/time: YYYY-MM-DDTHH:MM:SS (new jobs)")
     for kind in ("original", "working", "archive"):

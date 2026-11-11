@@ -1,4 +1,4 @@
-# Diarrhizer 2.5
+# Diarrhizer 2.6
 
 By MRIMSH
 
@@ -8,7 +8,7 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
 and a CLI (`python -m diarrhizer run …`).
 
-**2.5** is the shared application version for the CLI, desktop GUI and Windows launcher.
+**2.6** is the shared application version for the CLI, desktop GUI and Windows launcher.
 Check it with `python -m diarrhizer --version`; the GUI shows it in the window title and sidebar.
 The launcher downloads the current GitHub `main` application when setting up or updating an environment;
 the downloaded application's version can differ from the launcher's own build version.
@@ -240,9 +240,10 @@ settings and known participants. A project can select a default team for future 
 
 The default job name is `PROJECT-YYYY_MM_DD-TEAM`, for example
 `out/MySuperProject/Coders/MySuperProject-2026_11_05-Coders/`. Templates support `PROJECT`, `TEAM`,
-`YYYY_MM_DD`, `CUSTOM` (the **Своё значение** field), and `SOURCE` (source filename without extension),
-or `{{project}}`, `{{team}}`, `{{date}}`, `{{custom}}`, `{{source}}`. Empty optional parts omit extra
-separators; repeated names receive `_2`, `_3`, etc. The date is the local date when the job starts.
+the individual date/time tokens listed below, `CUSTOM` (the **Своё значение** field), and `SOURCE`
+(source filename without extension), or `{{project}}`, `{{team}}`, `{{date}}`, `{{time}}`, `{{custom}}`,
+`{{source}}`. Empty optional parts omit extra separators; repeated names receive `_2`, `_3`, etc.
+Date/time tokens use the job's recording time, which can be edited independently of processing time.
 New GUI jobs and CLI jobs using project/naming/storage options export `<job name>.md/.txt/.srt/.json`.
 Older jobs keep their existing `result.*` files and remain readable.
 
@@ -284,6 +285,13 @@ are left for manual entry. A date without time is proposed at `00:00:00`; review
 multi-selection applies that value to its selected files. Other files in the batch retain their own dates.
 Unrecognized filenames default to the time they were added. No job files are created while editing.
 
+For another input layout, enter the date/time portion's format in **Формат даты в имени**, for example
+`DD_MM_YY_HH-mm-SS` for `call 02_10_26_15-04-33.wav`. It uses the same case-sensitive tokens and literal
+separators as job naming and searches within the filename without its extension. A complete date
+(`YYYY` or `YY`, `MM`, `DD`) is required; omitted time components default to zero. `YY` is interpreted as
+2000–2099. Changing this field updates the proposal without replacing the entered date/time; click
+**Из имени файла** to apply it. Clear the format to return to automatic detection.
+
 In **История заданий**, select one job and click **Изменить дату / имя…** to set a different recording
 date/time and rename it in place. The editable per-job template and preview include both date and time
 for this action; saving does not change the project's defaults. The transfer dialog also offers the
@@ -291,12 +299,28 @@ explicit **Изменить дату и время записи для выбр�
 History displays/sorts by recording time. Existing media/export renames keep their rollback and locking
 behavior; original processing time, transcript text and the external source file remain intact.
 
-Templates support `HH_MM_SS` or `{{time}}` as well as `YYYY_MM_DD` / `{{date}}`, for example
-`PROJECT-YYYY_MM_DD-HH_MM_SS-TEAM`. The default template remains `PROJECT-YYYY_MM_DD-TEAM`.
+Date and time tokens can be used separately, reordered and joined with arbitrary filename-safe literal
+separators, including repeated separators. They are **case-sensitive**:
+
+| Token | Meaning | Example |
+| --- | --- | --- |
+| `YYYY` | Four-digit year | `2026` |
+| `YY` | Last two digits of the year | `26` |
+| `MM` | Month | `10` |
+| `DD` | Day | `02` |
+| `HH` | Hour (00–23) | `15` |
+| `mm` | Minute | `04` |
+| `SS` | Second | `33` |
+
+For recording time `2026-10-02 15:04:33`, `DD.MM.YYYY_HH-mm-SS` produces `02.10.2026_15-04-33`.
+`YYYY_MM_DD` is a composition of three tokens. For hours/minutes/seconds use `HH_mm_SS`;
+in the former spelling `HH_MM_SS`, `MM` now means month, like everywhere else.
+The `{{date}}` and `{{time}}` aliases retain their fixed `YYYY_MM_DD` and `HH_mm_SS` layouts.
+The default template remains `PROJECT-YYYY_MM_DD-TEAM`.
 The CLI accepts an explicit local timestamp for a new job:
 
 ```powershell
-python -m diarrhizer run "call.mp4" --project "Project" --recorded-at "2026-10-02T15:04:33" --name-template "PROJECT-YYYY_MM_DD-HH_MM_SS-TEAM"
+python -m diarrhizer run "call.mp4" --project "Project" --recorded-at "2026-10-02T15:04:33" --name-template "PROJECT-DD.MM.YYYY_HH-mm-SS-TEAM"
 ```
 
 Times are local wall-clock values with second precision. Filename proposals do not infer a timezone.
