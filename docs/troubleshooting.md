@@ -33,6 +33,19 @@ ASR and diarization do not need to be repeated for reversed bounds. If the error
 missing, non-finite or negative bounds, it includes the segment index and values. Restart
 **transcribe** from History → **Перезапустить этап** to regenerate unusable ASR timing.
 
+## Opening an old result fails: `invalid segment timestamps`
+
+Older `merged/segments.json` files can contain the same reversed intervals, even when processing
+previously finished. The result reader now recovers them in memory: the full transcript and saved
+speaker names are shown with an alignment warning. Restart the updated GUI and open the result
+again; no ASR or diarization rerun is needed, and opening does not change any job files.
+Explicit re-export (including saving speaker names) uses the same recovery and records warnings
+in the exported JSON. The affected segments have uncertain duration (`end = start`).
+
+Unusable bounds such as `null`, negative values or infinity remain an error; the message now
+identifies the segment index and bounds. Such data requires rebuilding merge from a valid ASR
+artifact, or regenerating ASR if its timing is also unusable.
+
 ## `pip install` fails: `No matching distribution found for whisperx==3.3.1`
 
 **Symptom:**

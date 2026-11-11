@@ -65,6 +65,30 @@ def test_render_failure_preserves_every_previous_export(tmp_path, monkeypatch):
     assert bundle_valid(job.job_dir / "export", "manifest.json")
 
 
+def test_export_recovers_legacy_intervals_and_keeps_source_and_warning_provenance(tmp_path):
+    from diarrhizer.artifacts import digest, bundle_valid
+
+    job = _job(tmp_path, segments=[
+        {"start": 1065.176, "end": 1065.156, "speaker_id": "Speaker_01", "text": "Keep this text"},
+    ])
+    job.config.speakers = {"Speaker_01": "Alice"}
+    source = job.job_dir / "merged" / "segments.json"
+    before = source.read_bytes()
+
+    ExportStage().run(job)
+
+    exported = json.loads((job.job_dir / "export" / "result.json").read_text(encoding="utf-8"))
+    segment = exported["segments"][0]
+    assert segment["start"] == segment["end"] == 1065.176
+    assert segment["text"] == "Keep this text" and segment["speaker_name"] == "Alice"
+    assert any("1065.156" in warning for warning in exported["metadata"]["warnings"])
+    assert exported["metadata"]["source_sha256"] == digest(before.decode("utf-8"))
+    for suffix in ("md", "txt", "srt"):
+        assert "Keep this text" in (job.job_dir / "export" / f"result.{suffix}").read_text(encoding="utf-8")
+    assert source.read_bytes() == before
+    assert bundle_valid(job.job_dir / "export", "manifest.json")
+
+
 # --- get_output_paths/get_artifact_paths derive from EXPORTERS -----------
 
 def test_get_output_paths_matches_registered_exporters(tmp_path):

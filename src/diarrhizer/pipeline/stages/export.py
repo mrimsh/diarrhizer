@@ -14,6 +14,7 @@ from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.export.srt_export import export_to_srt
 from diarrhizer.export.text_export import export_to_text
 from diarrhizer.pipeline.cache import is_stale
+from diarrhizer.pipeline.settings import read_segments
 from diarrhizer.utils import read_json, write_text_atomic
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance, digest, write_bundle, recover_bundles, bundle_valid
 from diarrhizer.projects import export_path
@@ -37,11 +38,13 @@ logger = logging.getLogger(__name__)
 #   is False, and --force-stage export deletes every output, if even one
 #   format is missing or stale, so formats can never drift out of sync with
 #   segments.json or with each other. Export JSON records schema, provenance and upstream warnings.
+#   READ:MERGED_SEGMENTS recovers legacy reversed bounds in memory; exported JSON carries
+#   corrected bounds and alignment warnings while the saved merged source stays unchanged.
 # @inputs: artifacts/merged/segments.json
 # @outputs: one file per Exporter in EXPORTERS (result.md, result.txt, result.srt, result.json)
 # @sideEffects: Reads JSON files, writes export files to disk,
 #   logs progress via logging (INFO, extra={"stage": "export"})
-# @errors: FileNotFoundError if input artifacts missing
+# @errors: FileNotFoundError if input artifacts missing; ValueError for unusable saved segments
 # @see: STAGE:MERGE, EXPORT:MARKDOWN, EXPORT:TEXT, EXPORT:SRT, EXPORT:JSON
 @dataclass(frozen=True)
 class Exporter:
@@ -107,7 +110,7 @@ class ExportStage:
             segments_data = json.load(f)
 
         # Extract segments list
-        segments = segments_data.get("segments", [])
+        segments = read_segments(segments_input)
 
         # Get input path from config
         input_path = config.input_file
@@ -121,6 +124,11 @@ class ExportStage:
         warnings = list((segments_data.get("metadata") or {}).get("warnings") or [])
         if isinstance(asr, dict) and isinstance(asr.get("metadata"), dict):
             warnings = list(asr["metadata"].get("warnings") or []) + warnings
+        for index, seg in enumerate(segments):
+            if seg.get("alignment_warning"):
+                warning = f"Segment {index}: {seg['alignment_warning']}"
+                if warning not in warnings:
+                    warnings.append(warning)
         identity = digest(segments_input.read_text(encoding="utf-8"))
         for exporter in self.EXPORTERS:
             content = exporter.export_fn(segments, config, input_path)

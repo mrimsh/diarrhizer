@@ -1327,6 +1327,30 @@ def test_corrupt_result_shows_readable_error(qapp, tmp_path, payload):
     assert screen._segments == []
 
 
+def test_legacy_reversed_intervals_open_with_text_speaker_names_and_warning(qapp, tmp_path):
+    job = _finished_job(tmp_path)
+    path = job / "merged" / "segments.json"
+    _write(path, {"segments": [
+        {"start": 1059.334, "end": 1065.156, "speaker_id": "Speaker_00", "text": "Before"},
+        {"start": 1065.176, "end": 1065.156, "speaker_id": "Speaker_00", "text": "Original text!"},
+        {"start": 1071.698, "end": 1076.682, "speaker_id": "Speaker_01", "text": "After"},
+    ]})
+    _write(job / "speakers.json", {"Speaker_00": "Alice", "Speaker_01": "Bob"})
+    before = path.read_bytes()
+
+    screen = result_screen.ResultScreen()
+    assert screen.load(job)
+
+    rendered = screen._transcript.toPlainText()
+    assert all(text in rendered for text in ("Before", "Original text!", "After", "Alice", "Bob"))
+    assert "Не удалось прочитать" not in rendered
+    assert "временные метки могут быть неточными" in screen._status_label.text()
+    assert len(screen._segments) == 3
+    assert screen._segments[1]["end"] == 1065.176
+    assert not screen._save_button.isEnabled()
+    assert path.read_bytes() == before
+
+
 def test_history_reports_filesystem_and_plan_errors(qapp, isolated, tmp_path, monkeypatch):
     out = tmp_path / "out"
     job = _complete_job(out)

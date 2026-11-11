@@ -229,6 +229,8 @@ class RediarizeDialog(QDialog):
 #   Team-scoped suggestions are explicit roster entries; typing/saving a speaker alone never enrolls a name.
 #   Moving a job refreshes suggestions from its new team while preserving unsaved job-specific names.
 #   Invalid transcript JSON is shown as a readable error. Failed writes keep edits available to retry.
+#   Legacy reversed intervals are recovered in memory by READ:MERGED_SEGMENTS; alignment warnings
+#   remain visible while all transcript text and speaker names are available without recomputation.
 #   Diarization requests only enqueue work; the runner backs up names when the stage actually starts.
 # @inputs: job artifacts and user edits
 # @outputs: rendered transcript, saved mapping and exports, queued run requests
@@ -459,6 +461,13 @@ class ResultScreen(QWidget):
 
         if read_error:
             self._transcript.setPlainText(f"Не удалось прочитать merged/segments.json: {read_error}")
+        elif not self._status_label.text():
+            warnings = sum(bool(seg.get("alignment_warning")) for seg in self._segments)
+            if warnings:
+                self._set_status(
+                    f"Предупреждения о выравнивании в сегментах: {warnings}. "
+                    "Текст сохранён; временные метки могут быть неточными.", "#a66a00",
+                )
         return True
 
     def _subtitle(self) -> str:

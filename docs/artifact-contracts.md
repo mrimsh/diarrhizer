@@ -6,6 +6,15 @@ chat files have `schema_version: 1`. It identifies this additive envelope, indep
 ASR cache version is `3` (validated loading), merge is `2`. Only stages in the requested range check caches.
 This is not a migration to a new transcript shape.
 
+When opening or re-exporting old merged results, the shared segment reader recovers finite,
+non-negative reversed intervals (`end < start`) in memory by setting `end = start`.
+All text, speaker IDs and extra fields remain available; uncertain word times on that segment
+become `null`. An `alignment_warning` records the original bounds, the GUI displays a warning,
+and regenerated JSON exports include it in `metadata.warnings`. Opening never rewrites the
+merged source or its exports. Explicit re-export writes corrected export bounds while its
+`source_sha256` continues to identify the original merged file. Null, non-numeric, non-finite
+or negative bounds still fail with the segment index and offending values.
+
 `provenance` records Python and installed package versions without importing ML libraries. In exported
 JSON it is under `metadata`; in other artifacts it is top-level. ASR retains model name, requested and
 effective settings, alignment status and warnings. `metadata.alignment_model` records the HF alignment

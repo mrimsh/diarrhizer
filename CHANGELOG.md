@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3 — Unreleased
+
+- Open and re-export old results containing reversed segment intervals without losing transcript
+  text or speaker names. Recover bounds only in memory and show an alignment warning; source
+  job artifacts remain unchanged on opening.
+
 ## 2.2 — Unreleased
 
 - Fix launcher updates after `git pull`: an exe in the checkout uses current local sources;
