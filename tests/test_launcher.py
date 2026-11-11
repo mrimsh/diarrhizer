@@ -335,3 +335,38 @@ def test_saved_ready_flag_does_not_hide_missing_environment(plan):
     ready, reason = setup.check_ready(state)
     assert not ready
     assert "восстановить" in reason
+
+
+def test_frozen_launcher_in_checkout_uses_updated_sources(tmp_path, monkeypatch):
+    from diarrhizer_launcher.config import application_source, source_version
+
+    (tmp_path / '.git').mkdir()
+    (tmp_path / 'src/diarrhizer').mkdir(parents=True)
+    (tmp_path / 'src/diarrhizer/__init__.py').write_text('__version__ = "2.10"')
+    (tmp_path / 'requirements').mkdir()
+    (tmp_path / 'requirements/constraints-stable.txt').touch()
+    (tmp_path / 'pyproject.toml').touch()
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path / 'bundle'), raising=False)
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'dist/Diarrhizer.exe'))
+    assert application_source() == tmp_path
+    assert source_version(application_source()) == '2.10'
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'elsewhere/bin/Diarrhizer.exe'))
+    assert application_source() == tmp_path / 'bundle/application'
+    assert application_source(tmp_path / '.venvcuda') == tmp_path
+
+
+def test_application_only_update_never_reinstalls_dependencies(plan, monkeypatch):
+    state, file, source = plan
+    (source / 'src/diarrhizer').mkdir(parents=True)
+    (source / 'src/diarrhizer/__init__.py').write_text('__version__ = "2.1"')
+    monkeypatch.setattr(system, 'probe_python', lambda *_: {})
+    worker = setup.SetupWorker(state, file, source, lambda _: None)
+    worker.application_only = True
+    calls = []
+    worker.command = lambda args, **kw: calls.append(args)
+    worker._dependencies()
+    assert '--no-deps' in calls[0] and '--force-reinstall' in calls[0]
+    assert not any('-r' in args or 'ensurepip' in args for args in calls)
+    assert calls[-1][-1] == '2.1'
+    assert state.application_version == '2.1'

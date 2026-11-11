@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import system
-from .config import State
+from .config import State, source_version
 
 STEPS = (
     ("python", "Проверка и подготовка Python"),
@@ -104,6 +104,7 @@ def check_ready(state: State) -> tuple[bool, str]:
 #   Install uses the repository's CPU/cu121 requirements and shared constraints, then a regular install
 #   of the bundled application, so a one-file launcher's temporary extraction is never an editable source.
 #   Successful setup also snapshots parameters in the venv for reopening it by directory.
+#   Application-only updates leave dependencies intact; source/installed versions are verified.
 # @inputs: settings state, source payload, event callback, explicit existing-environment approval
 # @outputs: ready state, durable log, GUI start files; queue events for progress/errors
 # @sideEffects: Local filesystem writes, hidden child processes, optional verified downloads and pip network
@@ -117,6 +118,7 @@ class SetupWorker:
         self.cancel = threading.Event()
         self._stream = None
         self.repair = False
+        self.application_only = False
 
     def log(self, text: str) -> None:
         text = re.sub(r"hf_[A-Za-z0-9]+", "[HF_TOKEN]", text)
@@ -171,9 +173,10 @@ class SetupWorker:
             if returncode != 0:
                 raise RuntimeError(f"Команда завершилась с кодом {returncode}. Подробности — в журнале выше.")
 
-    def run(self, *, repair: bool = False) -> None:
+    def run(self, *, repair: bool = False, application_only: bool = False) -> None:
         step = "python"
         self.repair = repair or self.state.repair
+        self.application_only = application_only or (self.state.update_only and not repair)
         try:
             self.state.settings.validate(self.source, self.home)
             self.home.mkdir(parents=True, exist_ok=True)
@@ -188,11 +191,21 @@ class SetupWorker:
                 self._stream = stream
                 self.state.ready = False
                 self.state.repair = self.repair
+                self.state.update_only = self.application_only
+                version = source_version(self.source)
+                if application_only or (version and self.state.application_version != version):
+                    self.state.completed = [s for s in self.state.completed
+                                            if s not in {"dependencies", "diagnostics", "entrypoint"}]
                 if repair:
                     self.state.completed.clear()
                 self.state.save(self.state_path)
                 self.log("\nНастройка Diarrhizer: " + datetime.now().isoformat(timespec="seconds"))
+                self.log(f"Источник приложения: {self.source}; версия: {version or 'не указана'}")
                 for index, (step, title) in enumerate(STEPS):
+                    if self.application_only and step not in {"dependencies", "diagnostics", "entrypoint"}:
+                        continue
+                    if self.application_only and step == "dependencies":
+                        title = "Обновление приложения без переустановки библиотек"
                     if self.cancel.is_set():
                         raise RuntimeError("Настройка остановлена. Её можно продолжить.")
                     self.emit({"kind": "stage", "index": index, "total": len(STEPS), "message": title})
@@ -206,6 +219,7 @@ class SetupWorker:
                     self.state.save(self.state_path)
                 self.state.ready = True
                 self.state.repair = False
+                self.state.update_only = False
                 from .existing import remember_environment
                 remember_environment(self.state_path, self.state)
                 self.state.save(self.state_path)
@@ -304,12 +318,29 @@ class SetupWorker:
         requirements = self.source / "requirements"
         constraints = str(requirements / "constraints-stable.txt")
         variant = "cuda-cu121.txt" if settings.device == "cuda" else "cpu.txt"
+        if self.application_only:
+            self.command([python, "-I", "-m", "pip", "install", "--no-deps", "--force-reinstall",
+                          "--no-cache-dir", str(self.source)], env=env)
+            self._verify_application(python, env)
+            return
         self.command([python, "-I", "-m", "ensurepip", "--upgrade"], env=env)
         self.command([python, "-I", "-m", "pip", "install", "--upgrade", "pip", "setuptools<81", "wheel"], env=env)
         reinstall = ["--force-reinstall"] if self.repair else []
         self.command([python, "-I", "-m", "pip", "install", *reinstall, "-c", constraints,
                       "-r", str(requirements / "base.txt"), "-r", str(requirements / variant)], env=env)
-        self.command([python, "-I", "-m", "pip", "install", "-c", constraints, str(self.source) + "[gui]"], env=env)
+        self.command([python, "-I", "-m", "pip", "install", "--no-cache-dir", "-c", constraints,
+                      str(self.source) + "[gui]"], env=env)
+        self._verify_application(python, env)
+
+    def _verify_application(self, python, env):
+        version = source_version(self.source)
+        if version:
+            code = ("import sys,importlib.metadata as m,diarrhizer; "
+                    "print('Installed Diarrhizer:',diarrhizer.__version__,diarrhizer.__file__); "
+                    "assert diarrhizer.__version__ == sys.argv[1], 'Runtime version differs from source'; "
+                    "assert m.version('diarrhizer') == sys.argv[1], 'Package version differs from source'")
+            self.command([python, "-I", "-c", code, version], env=env, timeout=30)
+            self.state.application_version = version
 
     def _diagnostics(self) -> None:
         settings = self.state.settings

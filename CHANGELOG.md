@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2 — Unreleased
+
+- Fix launcher updates after `git pull`: an exe in the checkout uses current local sources;
+  show the source path/version, verify the installed version, and support application-only updates
+  without reinstalling the CPU/CUDA stack.
+
 ## 2.1 — Unreleased
 
 - Require a minor version increment in every new commit, including documentation, tests and merges,

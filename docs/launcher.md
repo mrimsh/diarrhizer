@@ -79,6 +79,25 @@ run during setup or repair. A missing/damaged environment disables GUI launch un
 
 ## Recovery and storage
 
+### Updating after git pull
+
+`git pull` changes the checkout, not an existing executable or a regular installation in `.venv`.
+An older standalone exe contains the source snapshot from its build and can reinstall that older
+application even while it refreshes dependencies. Close the main GUI before updating.
+
+New launchers located in the checkout root or its `dist` directory use the adjacent Git checkout
+as the application source, including its current requirements. For an exe outside a checkout, opening
+a venv directly inside a checkout (for example `diarrhizer-main/.venvcuda`) also selects that checkout.
+Otherwise the launcher uses its bundled source. The chosen source path and version appear in the launcher and setup log.
+An existing old exe must be rebuilt/replaced once to receive this behavior; alternatively run
+`Diarrhizer.pyw` from the updated checkout with an installed Python/Tk.
+
+Open the existing environment and press **Обновить приложение** to reinstall only Diarrhizer,
+without reinstalling Torch/CUDA or downloading models. Diagnostics still run afterward. Installation
+verifies that both the imported application and its distribution metadata match the source version.
+Changed source versions invalidate completed application-install/diagnostic checkpoints during setup.
+Reopen the main GUI afterward; an already running process continues using its loaded old code.
+
 One configuration is kept in `%LOCALAPPDATA%\Diarrhizer\launcher\settings.json`. A bundled release
 defaults to `%LOCALAPPDATA%\Diarrhizer\.venv`, `models`, and `out`; configuration files such as `.env`
 use `%LOCALAPPDATA%\Diarrhizer`. Source launches default to the checkout's `.venv`, `out` and config

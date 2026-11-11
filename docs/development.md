@@ -2,7 +2,7 @@
 
 ## Release version
 
-The current source version is **2.1** by **MRIMSH**. `src/diarrhizer/__init__.py` defines
+The current source version is **2.2** by **MRIMSH**. `src/diarrhizer/__init__.py` defines
 `__version__` for the CLI (`python -m diarrhizer --version`), GUI window/sidebar and Qt metadata,
 Windows launcher and provider client identity. Setuptools reads that same value when building
 package metadata; no processing libraries are imported to read the version. After changing it,

@@ -7,6 +7,6 @@
 #   MAJOR.MINOR is recorded in source; each new commit increments MINOR under the AGENTS.md version policy.
 # @outputs: __version__, __author__
 # @sideEffects: None; importing the release identity never loads the processing stack
-__version__ = "2.1"
+__version__ = "2.2"
 __author__ = "MRIMSH"
 # [SEMANTIC-END] APP:IDENTITY

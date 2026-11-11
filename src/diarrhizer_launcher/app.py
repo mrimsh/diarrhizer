@@ -4,6 +4,7 @@ import argparse
 import os
 import queue
 import subprocess
+import sys
 import tempfile
 import threading
 import tkinter as tk
@@ -14,7 +15,14 @@ from tkinter.scrolledtext import ScrolledText
 
 from diarrhizer import __author__, __version__
 
-from .config import LauncherLock, Settings, State, application_source, launcher_home
+from .config import (
+    LauncherLock,
+    Settings,
+    State,
+    application_source,
+    launcher_home,
+    source_version,
+)
 from .existing import inspect_environment, remember_environment
 from .launch import (
     create_shortcut,
@@ -105,6 +113,9 @@ class Launcher:
         self._path_row(form, 7, "Кэш моделей", "cache")
         self._path_row(form, 8, "Результаты обработки", "output")
         self._path_row(form, 9, "Настройки приложения", "config_dir")
+        self.source_text = tk.StringVar(value=f"Источник приложения {source_version(source) or ''}: {source}")
+        ttk.Label(form, textvariable=self.source_text,
+                  wraplength=900).grid(row=11, column=0, columnspan=4, sticky="w", pady=(4, 0))
         ttk.Label(form, text="Зависимости: общие ограничения проекта + CPU / CUDA. Установка может занять несколько ГБ.\n"
                   "Модели — отдельно в GUI: tiny ≈80 МБ, base ≈150 МБ, large-v3 ≈3,1 ГБ; выравнивание и диаризация — дополнительно.",
                   wraplength=900).grid(row=10, column=0, columnspan=4, sticky="w", pady=(8, 0))
@@ -129,6 +140,10 @@ class Launcher:
         self.repair_button.pack(side="left", padx=8)
         self.cancel_button = ttk.Button(actions, text="Остановить", command=self.stop)
         self.cancel_button.pack(side="right")
+        update_actions = ttk.Frame(body)
+        update_actions.grid(row=8, column=0, sticky="w", pady=(6, 0))
+        self.update_button = ttk.Button(update_actions, text="Обновить приложение", command=lambda: self.begin(update=True))
+        self.update_button.pack(side="left")
 
         self.log = ScrolledText(body, height=9, wrap="word", font=("Consolas", 9), state="disabled")
         self.log.grid(row=5, column=0, sticky="nsew")
@@ -257,10 +272,11 @@ class Launcher:
         self.setup_button.configure(text=label)
         self.repair_button.configure(state="normal" if idle and self.state else "disabled")
         self.cancel_button.configure(state="normal" if self.busy else "disabled")
+        self.update_button.configure(state="normal" if idle and self.available and not changed else "disabled")
         for button in (self.launch_button, self.shortcut_button, self.folder_button):
             button.configure(state="normal" if idle and self.available and not changed else "disabled")
 
-    def begin(self, *, repair=False):
+    def begin(self, *, repair=False, update=False):
         if self.busy or self.scanning:
             return
         try:
@@ -273,7 +289,7 @@ class Launcher:
             existing = nonempty and not managed
             if existing and not (folder / "pyvenv.cfg").is_file():
                 raise ValueError("Папка окружения не пуста и не является venv. Выберите пустую папку.")
-            runtime_only = (self.available and self.state and self.state.ready and not repair
+            runtime_only = (self.available and self.state and self.state.ready and not repair and not update
                             and all(getattr(settings, key) == getattr(self.state.settings, key)
                                     for key in ("venv", "python", "device")))
             if runtime_only:
@@ -292,17 +308,22 @@ class Launcher:
                 text += "\n\nОкружение уже существует. Разрешить установку / обновление его пакетов?"
             if repair:
                 text += "\n\nВосстановление переустановит зависимости; возможна повторная загрузка пакетов."
+            text += f"\n\nИсточник приложения: {self.source}\nВерсия: {source_version(self.source) or 'не указана'}"
+            if update:
+                text = (f"Обновить только Diarrhizer из {self.source}?\n"
+                        f"Версия: {source_version(self.source) or 'не указана'}\n"
+                        "Библиотеки CPU/CUDA переустанавливаться не будут. Закройте основной GUI перед обновлением.")
             if not messagebox.askyesno("Подтвердить настройку", text, parent=self.root, default="no"):
                 return
             if self.state is None or settings != self.state.settings:
                 self.state = State(settings, managed=managed)
-            repair = repair or self.state.ready
+            repair = (repair or self.state.ready) and not update
             self.available = False
             self.busy = True
             self.worker = SetupWorker(self.state, self.state_path, self.source, self.events.put,
                                       approve_existing=existing)
             self.refresh()
-            threading.Thread(target=lambda: self.worker.run(repair=repair), daemon=True).start()
+            threading.Thread(target=lambda: self.worker.run(repair=repair, application_only=update), daemon=True).start()
         except (ValueError, OSError) as exc:
             messagebox.showerror("Настройка не началась", str(exc), parent=self.root)
 
@@ -324,6 +345,9 @@ class Launcher:
                     self.available = event["ready"]
                     if event["state"]:
                         self.state = event["state"]
+                        if getattr(sys, "frozen", False):
+                            self.source = application_source(Path(self.state.settings.venv))
+                            self.source_text.set(f"Источник приложения {source_version(self.source) or ''}: {self.source}")
                         for key, value in asdict(self.state.settings).items():
                             self.variables[key].set(value)
                         self.log_path.set("Журнал: " + (self.state.log or str(self.state_path.parent / "logs")))

@@ -1,5 +1,6 @@
 """One local launcher configuration, independent of Diarrhizer and Qt."""
 
+import ast
 import json
 import os
 import sys
@@ -11,15 +12,36 @@ from pathlib import Path
 # @purpose: Persist one setup plan and restartable checkpoints without credentials
 # @description: Atomic JSON replacement preserves the last complete state on interruption.
 #   A failed/unfinished install is never ready; managed is set only after directory approval.
+#   A frozen launcher inside a checkout installs that checkout; a standalone copy uses its payload.
 # @inputs: absolute environment, interpreter, cache, results and FFmpeg paths
 # @outputs: settings.json with progress and the durable log location
 # @sideEffects: Local filesystem reads/writes; never reads or copies .env
 # @errors: ValueError for unsupported/corrupt state; OSError for inaccessible storage
 # @see: LAUNCHER:SETUP, LAUNCHER:START
-def application_source() -> Path:
+def application_source(environment: Path | None = None) -> Path:
     if getattr(sys, "frozen", False):
+        candidates = [Path(sys.executable).parent, Path(sys.executable).parent.parent]
+        if environment:
+            candidates.append(environment.resolve().parent)
+        for folder in candidates:
+            if ((folder / ".git").exists() and (folder / "pyproject.toml").is_file()
+                    and (folder / "src/diarrhizer/__init__.py").is_file()
+                    and (folder / "requirements/constraints-stable.txt").is_file()):
+                return folder
         return Path(sys._MEIPASS) / "application"
     return Path(__file__).resolve().parents[2]
+
+
+def source_version(source: Path) -> str:
+    identity = source / "src/diarrhizer/__init__.py"
+    if not identity.is_file():
+        return ""
+    for node in ast.parse(identity.read_text(encoding="utf-8-sig")).body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__version__" for t in node.targets):
+            value = ast.literal_eval(node.value)
+            if isinstance(value, str):
+                return value
+    raise ValueError("В исходниках приложения не указана версия __version__.")
 
 
 def launcher_home() -> Path:
@@ -73,6 +95,8 @@ class State:
     failed_step: str = ""
     error: str = ""
     log: str = ""
+    application_version: str = ""
+    update_only: bool = False
 
     @classmethod
     def load(cls, path: Path) -> "State | None":
@@ -88,9 +112,9 @@ class State:
             state = cls(**data)
             if (not isinstance(state.completed, list)
                     or not all(isinstance(item, str) for item in state.completed)
-                    or any(type(getattr(state, key)) is not bool for key in ("managed", "ready", "repair"))
+                    or any(type(getattr(state, key)) is not bool for key in ("managed", "ready", "repair", "update_only"))
                     or any(not isinstance(getattr(state, key), str)
-                           for key in ("failed_step", "error", "log"))):
+                           for key in ("failed_step", "error", "log", "application_version"))):
                 raise ValueError("invalid state types")
             if any(not isinstance(value, str) for key, value in asdict(state.settings).items()
                    if key not in {"install_python", "install_ffmpeg"}):
