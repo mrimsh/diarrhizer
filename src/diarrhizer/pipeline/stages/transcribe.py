@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from diarrhizer.adapters.whisperx import WhisperXAdapter
+from diarrhizer.asr_settings import compose_asr_prompt, VAD_ONSET, VAD_OFFSET, CHUNK_SIZE
 from diarrhizer.audio_formats import find_job_audio
 from diarrhizer.export.plain_transcript import format_plain_transcript
 from diarrhizer.pipeline.cache import config_mismatch, is_stale, prompt_digest
 from diarrhizer.utils import read_json, write_json_atomic, write_text_atomic
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance
+from diarrhizer.pipeline.channels import channel_audio, channel_settings, combine_channel_transcripts
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -24,8 +26,11 @@ logger = logging.getLogger(__name__)
 #   Once a keep_wav=false audio format dropped the WAV, decodes the archive copy instead
 #   (find_job_audio); cache staleness stays keyed on the WAV, so dropping it never invalidates the transcript.
 #   Metadata distinguishes requested options from effective backend settings and records alignment warnings.
-#   cache_version=3 requires validated alignment loading and model provenance when transcribe is in range.
+#   cache_version=4 adds composed profile/glossary prompts and actual VAD onset/offset/chunk controls.
+#   The composed prompt digest invalidates caches when preset text or glossary changes.
 #   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
+#   In me-others mode both full-length channels are transcribed independently with one reusable adapter;
+#   transcript.json retains per-channel results and a chronological combined view (including overlap).
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/asr/transcript.json, artifacts/asr/transcript.txt (readable paragraphs, no speakers)
 # @sideEffects: Loads WhisperX model, writes transcript JSON to disk, unloads the
@@ -38,7 +43,7 @@ class TranscribeStage:
 
     # Stage name for identification
     NAME = "transcribe"
-    CACHE_VERSION = 3  # Validated alignment loading and model provenance.
+    CACHE_VERSION = 4  # Reproducible profiles/glossary and actual VAD controls.
 
     # Output paths relative to job directory
     ASR_DIR = "asr"
@@ -67,6 +72,9 @@ class TranscribeStage:
         self._initial_prompt: Optional[str] = None
         self._vad_filter: bool = True
         self._vad_min_silence_ms: int = 1000
+        self._vad_onset = VAD_ONSET
+        self._vad_offset = VAD_OFFSET
+        self._chunk_size = CHUNK_SIZE
 
     def configure(
         self,
@@ -80,6 +88,9 @@ class TranscribeStage:
         initial_prompt: Optional[str] = None,
         vad_filter: Optional[bool] = None,
         vad_min_silence_ms: Optional[int] = None,
+        vad_onset: Optional[float] = None,
+        vad_offset: Optional[float] = None,
+        chunk_size: Optional[int] = None,
     ) -> None:
         """Configure transcription parameters.
 
@@ -94,6 +105,9 @@ class TranscribeStage:
             initial_prompt: Initial prompt string
             vad_filter: Enable VAD filtering
             vad_min_silence_ms: VAD minimum silence in milliseconds
+            vad_onset: Actual VAD speech-start threshold
+            vad_offset: Actual VAD speech-end threshold
+            chunk_size: Maximum VAD/ASR chunk duration, 1..30 seconds
         """
         self._device = device
         self._language = None if language == "auto" else language
@@ -113,6 +127,12 @@ class TranscribeStage:
             self._vad_filter = vad_filter
         if vad_min_silence_ms is not None:
             self._vad_min_silence_ms = vad_min_silence_ms
+        if vad_onset is not None:
+            self._vad_onset = vad_onset
+        if vad_offset is not None:
+            self._vad_offset = vad_offset
+        if chunk_size is not None:
+            self._chunk_size = chunk_size
         self._whisperx_adapter = None
 
     @property
@@ -130,6 +150,9 @@ class TranscribeStage:
                 initial_prompt=self._initial_prompt,
                 vad_filter=self._vad_filter,
                 vad_min_silence_ms=self._vad_min_silence_ms,
+                vad_onset=self._vad_onset,
+                vad_offset=self._vad_offset,
+                chunk_size=self._chunk_size,
             )
         return self._whisperx_adapter
 
@@ -150,6 +173,8 @@ class TranscribeStage:
         # The working WAV while it exists, else the archive copy a keep_wav=false
         # format left behind (ARTIFACTS:JOB_AUDIO).
         audio_input = find_job_audio(job_dir) or job_dir / self.INPUT_WAV
+        channel_inputs = ({channel: channel_audio(job_dir, channel) for channel in ("left", "right")}
+                          if config.channel_mode == "me-others" else {})
 
         # Build output paths
         transcript_output = job_dir / self.TRANSCRIPT_JSON
@@ -179,9 +204,12 @@ class TranscribeStage:
             beam_size=config.asr_beam_size,
             temperature=config.asr_temperature,
             condition_on_previous_text=config.asr_condition_on_previous_text,
-            initial_prompt=config.asr_initial_prompt,
+            initial_prompt=compose_asr_prompt(config.asr_profile, config.asr_initial_prompt, config.asr_glossary),
             vad_filter=config.asr_vad_filter,
             vad_min_silence_ms=config.asr_vad_min_silence_ms,
+            vad_onset=config.asr_vad_onset,
+            vad_offset=config.asr_vad_offset,
+            chunk_size=config.asr_chunk_size,
         )
 
         # Run transcription
@@ -190,10 +218,18 @@ class TranscribeStage:
         try:
             # Handle "auto" language detection
             lang_param = None if language == "auto" else language
-            result = self.whisperx_adapter.transcribe(
-                audio_path=str(audio_input),
-                language=lang_param,
-            )
+            if config.channel_mode == "me-others":
+                channels = {}
+                for channel, source in channel_inputs.items():
+                    logger.info("[%s] Transcribing %s channel: %s", self.NAME, channel, source,
+                                extra={"stage": self.NAME})
+                    channels[channel] = {**self.whisperx_adapter.transcribe(str(source), language=lang_param),
+                                         "input_audio": str(source)}
+                result = combine_channel_transcripts(channels)
+            else:
+                result = self.whisperx_adapter.transcribe(
+                    audio_path=str(audio_input), language=lang_param,
+                )
         except RuntimeError as e:
             raise RuntimeError(
                 f"Transcription failed: {e}"
@@ -218,6 +254,7 @@ class TranscribeStage:
             "segments": result.get("segments", []),
             "words": result.get("words", []),
             "metadata": {
+                **channel_settings(config),
                 "cache_version": self.CACHE_VERSION,
                 "input_audio": str(audio_input),
                 "output_path": str(transcript_output),
@@ -228,6 +265,11 @@ class TranscribeStage:
                 "condition_on_previous_text": self._condition_on_previous_text,
                 "vad_filter": self._vad_filter,
                 "vad_min_silence_ms": self._vad_min_silence_ms,
+                "vad_onset": self._vad_onset,
+                "vad_offset": self._vad_offset,
+                "chunk_size": self._chunk_size,
+                "asr_profile": config.asr_profile,
+                "glossary_sha256": prompt_digest(config.asr_glossary),
                 "initial_prompt": self._initial_prompt[:100] + "..." if self._initial_prompt and len(self._initial_prompt) > 100 else self._initial_prompt,
                 "initial_prompt_sha256": prompt_digest(self._initial_prompt),
                 "start_time": start_time.isoformat(),
@@ -239,6 +281,9 @@ class TranscribeStage:
                 "warnings": result.get("warnings", []),
             },
         }
+
+        if "channels" in result:
+            transcript_data["channels"] = result["channels"]
 
         # Write transcript to JSON
         write_json_atomic(transcript_output, transcript_data)
@@ -307,6 +352,17 @@ class TranscribeStage:
         meta = data.get("metadata") or {}
         if not isinstance(meta, dict) or meta.get("cache_version") != self.CACHE_VERSION:
             return False
+        if meta.get("channel_mode", "mixed") != job.config.channel_mode:
+            return False
+        if job.config.channel_mode == "me-others":
+            if set(data.get("channels", {})) != {"left", "right"}:
+                return False
+            inputs = [find_job_audio(job_dir, suffix=f"_{channel}") for channel in ("left", "right")]
+            if is_stale(outputs=[artifacts["transcript"]], inputs=[p for p in inputs if p is not None]):
+                return False
+        if not {"initial_prompt_sha256", "asr_profile", "glossary_sha256", "vad_onset",
+                "vad_offset", "chunk_size"}.issubset(meta):
+            return False
         stored = {
             "asr_model": data.get("model"),
             "asr_compute_type": data.get("compute_type"),
@@ -316,6 +372,11 @@ class TranscribeStage:
             "asr_condition_on_previous_text": meta.get("condition_on_previous_text"),
             "asr_vad_filter": meta.get("vad_filter"),
             "asr_vad_min_silence_ms": meta.get("vad_min_silence_ms"),
+            "asr_profile": meta["asr_profile"],
+            "asr_vad_onset": meta["vad_onset"],
+            "asr_vad_offset": meta["vad_offset"],
+            "asr_chunk_size": meta["chunk_size"],
+            "glossary_sha256": meta["glossary_sha256"],
         }
         if "initial_prompt_sha256" in meta:
             stored["initial_prompt_sha256"] = meta["initial_prompt_sha256"]
@@ -328,7 +389,13 @@ class TranscribeStage:
             "asr_condition_on_previous_text": job.config.asr_condition_on_previous_text,
             "asr_vad_filter": job.config.asr_vad_filter,
             "asr_vad_min_silence_ms": job.config.asr_vad_min_silence_ms,
-            "initial_prompt_sha256": prompt_digest(job.config.asr_initial_prompt),
+            "asr_profile": job.config.asr_profile,
+            "asr_vad_onset": job.config.asr_vad_onset,
+            "asr_vad_offset": job.config.asr_vad_offset,
+            "asr_chunk_size": job.config.asr_chunk_size,
+            "glossary_sha256": prompt_digest(job.config.asr_glossary),
+            "initial_prompt_sha256": prompt_digest(compose_asr_prompt(
+                job.config.asr_profile, job.config.asr_initial_prompt, job.config.asr_glossary)),
         }
         return not config_mismatch(stored, expected)
 

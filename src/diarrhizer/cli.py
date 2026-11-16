@@ -9,6 +9,7 @@ from pathlib import Path
 
 from diarrhizer import __author__, __version__
 from diarrhizer.audio_formats import BUILTIN_FORMATS, store_path
+from diarrhizer.asr_settings import ASR_PROFILES, VAD_ONSET, VAD_OFFSET, CHUNK_SIZE
 from diarrhizer.diagnostics.doctor import run_doctor_checks
 from diarrhizer.env_file import load_project_env
 
@@ -419,6 +420,16 @@ def main() -> int:
         default=None,
         help="Path to hotwords file (not yet implemented)"
     )
+    run_parser.add_argument("--asr-profile", choices=ASR_PROFILES, default="default",
+                            help="ASR prompt profile: default or Russian calls (ru-call); language/model are selected separately")
+    run_parser.add_argument("--asr-glossary-file", default=None,
+                            help="UTF-8 file with relevant names/terms; appended to profile and custom prompt. Empty file clears glossary on resume")
+    run_parser.add_argument("--asr-vad-onset", type=float, default=VAD_ONSET,
+                            help="VAD speech-start threshold, 0 < value < 1 (default: 0.5)")
+    run_parser.add_argument("--asr-vad-offset", type=float, default=VAD_OFFSET,
+                            help="VAD speech-end threshold, 0 < value <= onset (default: 0.363)")
+    run_parser.add_argument("--asr-chunk-size", type=int, default=CHUNK_SIZE,
+                            help="Maximum VAD/ASR chunk duration, 1..30 seconds (default: 30)")
     run_parser.add_argument(
         "--asr-vad-filter",
         type=str,
@@ -439,6 +450,12 @@ def main() -> int:
         choices=["raw", "voice-call", "denoise-light", "split-stereo"],
         help="Audio preprocessing profile (default: raw)"
     )
+    run_parser.add_argument("--channel-mode", choices=["mixed", "me-others"], default="mixed",
+                            help="Use separate stereo channels for me/others; speaker limits then count only others")
+    run_parser.add_argument("--my-channel", choices=["left", "right"], default="left",
+                            help="Channel containing only your voice in me-others mode")
+    run_parser.add_argument("--one-on-one", action=argparse.BooleanOptionalAction, default=False,
+                            help="Exactly one other participant: assign both speakers by channel without diarization")
     # Not a PipelineConfig literal like the flags above: the default is
     # whatever profile the user marked as default in audio_formats.json
     # (resolved in run_pipeline from None), so it is shared with the GUI.
@@ -557,9 +574,11 @@ def main() -> int:
 
     not_given = object()
     run_option_names = (
+        "channel_mode", "my_channel", "one_on_one",
         "min_speakers", "max_speakers", "min_turn_duration", "lang", "device", "asr_model",
         "asr_compute_type", "asr_beam_size", "asr_temperature", "asr_condition_on_previous_text",
         "asr_vad_filter", "asr_vad_min_silence_ms", "audio_profile", "audio_format", "keep_wav",
+        "asr_profile", "asr_vad_onset", "asr_vad_offset", "asr_chunk_size",
     )
     run_parser.set_defaults(**{key: not_given for key in run_option_names})
     args = parser.parse_args()
@@ -588,9 +607,11 @@ def main() -> int:
         #   recomputing ASR/diarization. Several inputs (or a folder, see INPUT:EXPAND_MEDIA) run as a
         #   batch: one job per file, each in its own new_job_dir(), a failed file is reported and the
         #   batch moves on, and a summary is printed at the end.
+        #   Me-others mode transcribes stereo channels separately; --one-on-one bypasses model diarization.
         #   Resume restores saved settings/stages/names; only explicitly supplied flags override them.
         #   Optional projects/teams share portable directory-local defaults, naming and independent media retention with GUI.
         #   --recorded-at supplies recording wall time for date/time naming tokens without changing run timestamps.
+        #   ASR profile/glossary contents and supported VAD thresholds/chunk duration are shared with GUI/resume.
         # @inputs: args.input, args.out, args.job_dir, args.min_speakers, args.max_speakers, args.lang, args.device, args.force, args.force_stage, args.from_stage, args.to_stage, args.speakers, args.min_turn_duration, ASR params, audio_profile, audio_format, keep_wav
         # @outputs: Artifacts in out/ directory
         # @sideEffects: Creates job directories, writes artifacts to disk
@@ -671,6 +692,22 @@ def main() -> int:
             print(f"[CLI] Loaded initial prompt: {len(initial_prompt)} chars")
         # [SEMANTIC-END] CONFIG:INITIAL_PROMPT
 
+        # [SEMANTIC-BEGIN] CONFIG:ASR_GLOSSARY_FILE
+        # @purpose: Read glossary contents once so a queued/resumed job never depends on an external file
+        # @inputs: optional UTF-8 glossary path
+        # @outputs: glossary text or None (empty file explicitly clears on resume)
+        # @sideEffects: Reads the requested file only
+        # @errors: CLI error for missing, unreadable or non-UTF-8 files
+        # @see: CONFIG:ASR_PROFILE, CLI:RUN, CONFIG:RESUME
+        glossary = None
+        if args.asr_glossary_file:
+            try:
+                glossary = Path(args.asr_glossary_file).read_text(encoding="utf-8-sig").strip() or None
+            except (OSError, UnicodeError) as exc:
+                print(f"Error: Cannot read ASR glossary: {exc}", file=sys.stderr)
+                return 1
+        # [SEMANTIC-END] CONFIG:ASR_GLOSSARY_FILE
+
         library_options = {key: value for key, value in {
             "project": args.project, "team": args.team, "naming_template": args.name_template,
             "custom": args.name_value, "recorded_at": args.recorded_at,
@@ -698,6 +735,8 @@ def main() -> int:
                 options["speakers"] = speakers
             if args.asr_initial_prompt_file:
                 options["asr_initial_prompt"] = initial_prompt or None
+            if args.asr_glossary_file:
+                options["asr_glossary"] = glossary
             if args.asr_hotwords_file:
                 raise ValueError("--asr-hotwords-file is not supported by this backend; use --asr-initial-prompt-file")
             if not args.job_dir:

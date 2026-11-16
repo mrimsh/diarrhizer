@@ -1,6 +1,9 @@
 """Config-aware cache checks on convert/transcribe/diarize stages."""
 
 import json
+import dataclasses
+
+import pytest
 
 from diarrhizer.pipeline.runner import JobContext, PipelineConfig
 from diarrhizer.pipeline.cache import source_fingerprint
@@ -53,6 +56,8 @@ def test_transcribe_cache_invalid_when_model_changes(tmp_path):
         "compute_type": None,
         "metadata": {
             "cache_version": TranscribeStage.CACHE_VERSION,
+            "asr_profile": "default", "glossary_sha256": None, "initial_prompt_sha256": None,
+            "vad_onset": .5, "vad_offset": .363, "chunk_size": 30,
             "language_setting": "auto",
             "beam_size": 5,
             "temperature": 0.0,
@@ -73,6 +78,8 @@ def test_transcribe_cache_valid_when_asr_config_matches(tmp_path):
         "compute_type": None,
         "metadata": {
             "cache_version": TranscribeStage.CACHE_VERSION,
+            "asr_profile": "default", "glossary_sha256": None, "initial_prompt_sha256": None,
+            "vad_onset": .5, "vad_offset": .363, "chunk_size": 30,
             "language_setting": "auto",
             "beam_size": 5,
             "temperature": 0.0,
@@ -119,4 +126,40 @@ def test_transcribe_persists_alignment_model_provenance(tmp_path, monkeypatch):
     TranscribeStage().run(_job(tmp_path, job_dir))
     data = json.loads((job_dir / "asr/transcript.json").read_text(encoding="utf-8"))
     assert data["metadata"]["alignment_model"] == info
-    assert data["metadata"]["cache_version"] == 3 and unloaded == [True]
+    assert data["metadata"]["cache_version"] == 4 and unloaded == [True]
+
+
+@pytest.mark.parametrize("changed", [
+    {"asr_profile": "default"}, {"asr_glossary": "Другое имя"},
+    {"asr_initial_prompt": "Другой prompt"}, {"asr_vad_onset": .6},
+    {"asr_vad_offset": .2}, {"asr_chunk_size": 12},
+])
+def test_profile_glossary_and_real_vad_invalidate_asr_cache(tmp_path, monkeypatch, changed):
+    from types import SimpleNamespace
+    from diarrhizer.asr_settings import compose_asr_prompt
+
+    job_dir = tmp_path / "job"
+    _write(job_dir / "audio/normalized.wav", b"synthetic")
+    calls = []
+    def make_adapter(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(transcribe=lambda **kw: {"text": "Да.", "segments": [], "words": []},
+                               unload=lambda: None)
+    monkeypatch.setattr("diarrhizer.pipeline.stages.transcribe.WhisperXAdapter", make_adapter)
+    job = _job(tmp_path, job_dir, asr_profile="ru-call", asr_glossary="Анна\nAPI",
+               asr_initial_prompt="Рабочая встреча.", asr_vad_onset=.4, asr_vad_offset=.3, asr_chunk_size=18)
+    stage = TranscribeStage()
+    stage.run(job)
+    assert stage.is_cache_valid(job)
+    assert calls[0]["initial_prompt"] == compose_asr_prompt("ru-call", "Рабочая встреча.", "Анна\nAPI")
+    assert (calls[0]["vad_onset"], calls[0]["vad_offset"], calls[0]["chunk_size"]) == (.4, .3, 18)
+    if changed == {"asr_profile": "default"}:
+        data_path = job_dir / "asr/transcript.json"
+        original = json.loads(data_path.read_text(encoding="utf-8"))
+        for key in ("initial_prompt_sha256", "asr_profile", "glossary_sha256", "vad_onset", "vad_offset", "chunk_size"):
+            incomplete = {**original, "metadata": {k: v for k, v in original["metadata"].items() if k != key}}
+            _write(data_path, incomplete)
+            assert not stage.is_cache_valid(job), key
+        _write(data_path, original)
+    job.config = dataclasses.replace(job.config, **changed)
+    assert not stage.is_cache_valid(job)

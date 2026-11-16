@@ -88,11 +88,12 @@ def list_audio_encoders(ffmpeg_path: str) -> set[str]:
 #   to the per-channel _left/_right files, so every profile leaves the same primary file behind (see
 #   _convert_split_stereo). encode() writes an extra file with caller-supplied encoder args (the archive
 #   copy, see CONFIG:AUDIO_FORMATS), reading the original input and applying the same profile filter
-#   chain (_profile_filter) as the working WAV.
+#   chain (_profile_filter) as the working WAV. validate_split_input checks one stereo stream without
+#   decoding the recording. encode(channel=...) extracts the channel before applying profile filters.
 # @inputs: input_path (str or Path), output_path (str or Path), audio_profile, encoder_args, ffmpeg_path (optional override)
 # @outputs: Path to converted audio file, or [output_path, left_path, right_path] for split-stereo
 # @sideEffects: Executes FFmpeg subprocess, creates output file(s) on disk, reads DIARRHIZER_FFMPEG_PATH env var
-# @errors: RuntimeError if FFmpeg is not found or conversion/encoding fails
+# @errors: RuntimeError if FFmpeg is missing or conversion fails; ValueError for unsupported channel input
 # @see: STAGE:CONVERT, CONFIG:AUDIO_FORMATS, DIAGNOSTICS:DOCTOR
 class FFmpegAdapter:
     """Adapter for FFmpeg audio conversion operations."""
@@ -158,7 +159,7 @@ class FFmpegAdapter:
             `[output_path, left_path, right_path]` - output_path is the same
             standard mono downmix every other profile produces, so downstream
             stages don't need to know which profile ran; left/right are
-            extra per-channel artifacts, not consumed by the rest of the pipeline.
+            per-channel artifacts consumed independently in me-others mode.
 
         Raises:
             RuntimeError: If FFmpeg conversion fails
@@ -262,8 +263,7 @@ class FFmpegAdapter:
             encoder_args: Output options, e.g. AudioFormat.encoder_args()
                 (["-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-q:a", "5"])
             audio_profile: Audio profile whose filter chain to apply
-            channel: Keep only this input channel (0 = left, 1 = right) instead
-                of the profile's filters - used for split-stereo's per-channel extras
+            channel: Keep only this input channel (0 = left, 1 = right), then apply profile filters
 
         Returns:
             output_path
@@ -278,9 +278,10 @@ class FFmpegAdapter:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         cmd = [self._ffmpeg_path, "-y", "-i", str(input_path)]
-        audio_filter = (
-            f"pan=mono|c0=c{channel}" if channel is not None else self._profile_filter(audio_profile)
-        )
+        filters = [f"pan=mono|c0=c{channel}"] if channel is not None else []
+        if profile_filter := self._profile_filter(audio_profile):
+            filters.append(profile_filter)
+        audio_filter = ",".join(filters)
         if audio_filter:
             cmd.extend(["-af", audio_filter])
         cmd.extend(encoder_args)
@@ -296,14 +297,8 @@ class FFmpegAdapter:
         """Split stereo audio into separate left/right channel files, and also
         write the standard mono downmix to output_path itself.
 
-        Every other profile leaves a single mono WAV at output_path that the
-        rest of the pipeline (transcribe/diarize) reads unconditionally via a
-        hardcoded "audio/normalized.wav" path. split-stereo used to skip that
-        file entirely and only write the per-channel extras, which made those
-        later stages fail with FileNotFoundError. Writing the same downmix
-        here too means split-stereo behaves like every other profile for the
-        rest of the pipeline; the per-channel files are additional artifacts,
-        not (yet) consumed by transcribe/diarize/merge.
+        The mix remains available for mixed-mode processing and playback.
+        Explicit me-others processing reads the two full-length channel files.
 
         Args:
             input_path: Path to input media file
@@ -368,6 +363,15 @@ class FFmpegAdapter:
             raise RuntimeError(
                 f"FFmpeg split-stereo conversion failed: {e.stderr}"
             ) from e
+
+    def validate_split_input(self, input_path: str | Path) -> None:
+        """Require one actual stereo stream; identical L/R contents cannot be detected here."""
+        result = subprocess.run([self._ffmpeg_path, "-hide_banner", "-i", str(input_path)],
+                                capture_output=True, text=True, check=False, timeout=30)
+        streams = re.findall(r"Stream[^\r\n]*Audio:[^\r\n]*", result.stderr)
+        if len(streams) != 1 or not re.search(r"\bstereo\b|\b2 channels\b", streams[0]):
+            raise ValueError("Me / others requires one stereo audio stream with separate L/R sources; "
+                             "mono and multiple audio streams are unsupported")
 
     def get_audio_info(self, input_path: str | Path) -> dict:
         """Get audio information from a media file.

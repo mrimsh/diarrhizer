@@ -169,8 +169,16 @@ def reexport(job_dir: Path, speakers: dict) -> dict:
 # [SEMANTIC-END] GUI:REEXPORT
 
 
+# [SEMANTIC-BEGIN] GUI:REDIARIZE_DIALOG
+# @purpose: Choose the number of voices for recalculating speaker assignments
+# @description: For channel-separated jobs the range counts only remote voices and the local ID stays reserved.
+# @inputs: recorded separation status, current remote/all speaker count, others_only flag
+# @outputs: accepted minimum and maximum speaker counts
+# @sideEffects: Shows a Qt dialog; no artifact writes
+# @errors: Invalid ranges keep the dialog open
+# @see: GUI:RESULT_SCREEN, GUI:JOB_PLANS, STAGE:DIARIZE
 class RediarizeDialog(QDialog):
-    def __init__(self, parent, has_diarization: bool, current_count: int) -> None:
+    def __init__(self, parent, has_diarization: bool, current_count: int, *, others_only: bool = False) -> None:
         super().__init__(parent)
         self.setWindowTitle("Пересчитать спикеров" if has_diarization else "Разделить по спикерам")
         intro = QLabel(
@@ -185,6 +193,10 @@ class RediarizeDialog(QDialog):
             )
         )
         intro.setWordWrap(True)
+        if others_only:
+            intro.setText("Заново разделить голоса только в канале собеседников. Ваш голос определяется "
+                          "по своему каналу. Распознанный текст сохранится; имена будут сброшены "
+                          "с резервной копией в speakers.before-rediarize.json.")
         self.min_spin = QSpinBox()
         self.min_spin.setRange(1, 20)
         self.max_spin = QSpinBox()
@@ -208,7 +220,7 @@ class RediarizeDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         form = QFormLayout()
-        form.addRow("Спикеры (мин–макс):", row)
+        form.addRow("Остальные (мин–макс):" if others_only else "Спикеры (мин–макс):", row)
         layout = QVBoxLayout(self)
         layout.addWidget(intro)
         layout.addLayout(form)
@@ -220,6 +232,7 @@ class RediarizeDialog(QDialog):
             QMessageBox.warning(self, self.windowTitle(), "Минимум не может быть больше максимума.")
             return
         self.accept()
+# [SEMANTIC-END] GUI:REDIARIZE_DIALOG
 
 
 # [SEMANTIC-BEGIN] GUI:RESULT_SCREEN
@@ -228,6 +241,7 @@ class RediarizeDialog(QDialog):
 #   An unopened result has no dirty state; saves hold the per-job OS write lock through re-export.
 #   Team-scoped suggestions are explicit roster entries; typing/saving a speaker alone never enrolls a name.
 #   Moving a job refreshes suggestions from its new team while preserving unsaved job-specific names.
+#   Me-others results label model-free separation and offer recalculation only for the remote channel.
 #   Invalid transcript JSON is shown as a readable error. Failed writes keep edits available to retry.
 #   Legacy reversed intervals are recovered in memory by READ:MERGED_SEGMENTS; alignment warnings
 #   remain visible while all transcript text and speaker names are available without recomputation.
@@ -483,6 +497,11 @@ class ResultScreen(QWidget):
             parts.append(f"язык {config['language']}")
         if config.get("asr_model"):
             parts.append(f"модель {config['asr_model']}")
+        if config.get("channel_mode") == "me-others":
+            channel = "L" if config.get("my_channel", "left") == "left" else "R"
+            parts.append(f"Я / остальные · мой канал {channel}")
+            if config.get("one_on_one"):
+                parts.append("один на один, без диаризации")
         if self._has_diarization:
             parts.append(f"спикеров {len(unique_speakers(self._segments))}")
         else:
@@ -735,7 +754,10 @@ class ResultScreen(QWidget):
                 "Для диаризации нужен HF-токен — задайте его на экране «Настройки».",
             )
             return
-        dialog = RediarizeDialog(self, self._has_diarization, len(unique_speakers(self._segments)))
+        others_only = (self._meta.get("pipeline_config") or {}).get("channel_mode") == "me-others"
+        count = len([sid for sid in unique_speakers(self._segments) if not others_only or sid != "Speaker_00"])
+        dialog = (RediarizeDialog(self, self._has_diarization, count, others_only=True) if others_only else
+                  RediarizeDialog(self, self._has_diarization, count))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:

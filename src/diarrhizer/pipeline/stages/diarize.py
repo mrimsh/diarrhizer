@@ -11,6 +11,7 @@ from diarrhizer.audio_formats import find_job_audio
 from diarrhizer.pipeline.cache import config_mismatch, is_stale
 from diarrhizer.utils import read_json, write_json_atomic
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance
+from diarrhizer.pipeline.channels import channel_audio, channel_settings
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -26,6 +27,8 @@ logger = logging.getLogger(__name__)
 #   preflight() (called by the runner before any stage runs) fails fast when diarization will have to
 #   run - not cached, or forced - and no HF token is set, instead of failing after the transcription.
 #   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
+#   Me-others mode diarizes only the opposite channel; speaker limits count only the other participants.
+#   One-on-one writes an explicit model-free result and never checks HF credentials or loads pyannote.
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/diar/diarization.json
 # @sideEffects: Loads pyannote model, writes diarization JSON to disk, unloads the
@@ -69,6 +72,8 @@ class DiarizeStage:
         but cannot: the token check otherwise only happens once transcription
         (often the longest stage) has already finished.
         """
+        if job.config.channel_mode == "me-others" and job.config.one_on_one:
+            return
         forced = job.config.force or job.config.force_stage == self.NAME
         if not forced and self.is_cache_valid(job):
             return
@@ -120,6 +125,10 @@ class DiarizeStage:
         # The working WAV while it exists, else the archive copy a keep_wav=false
         # format left behind (ARTIFACTS:JOB_AUDIO).
         audio_input = find_job_audio(job_dir) or job_dir / self.INPUT_WAV
+        model_free = config.channel_mode == "me-others" and config.one_on_one
+        if config.channel_mode == "me-others" and not model_free:
+            other_channel = "right" if config.my_channel == "left" else "left"
+            audio_input = channel_audio(job_dir, other_channel)
 
         # Build output paths
         diar_output = job_dir / self.DIARIZATION_JSON
@@ -127,7 +136,7 @@ class DiarizeStage:
         logger.info(f"[{self.NAME}] Diarizing: {audio_input}", extra={"stage": self.NAME})
 
         # Check if input exists
-        if not audio_input.exists():
+        if not model_free and not audio_input.exists():
             raise FileNotFoundError(
                 f"Audio file not found: {audio_input}. "
                 "Please run the convert stage first."
@@ -152,9 +161,12 @@ class DiarizeStage:
         start_time = datetime.now()
 
         try:
-            result = self.diarize_adapter.diarize(
-                audio_path=str(audio_input),
-            )
+            if model_free:
+                logger.info("[%s] One-on-one: speakers are defined by channels; no diarization model",
+                            self.NAME, extra={"stage": self.NAME})
+                result = {"segments": [], "num_speakers": 1, "speakers": ["Speaker_00"]}
+            else:
+                result = self.diarize_adapter.diarize(audio_path=str(audio_input))
         except RuntimeError as e:
             raise RuntimeError(
                 f"Diarization failed: {e}"
@@ -176,6 +188,8 @@ class DiarizeStage:
             "num_speakers": result.get("num_speakers", 0),
             "speakers": result.get("speakers", []),
             "metadata": {
+                **channel_settings(config),
+                "model_free": model_free,
                 "input_audio": str(audio_input),
                 "output_path": str(diar_output),
                 "device": device,
@@ -243,6 +257,17 @@ class DiarizeStage:
         if not isinstance(data, dict):
             return False
         meta = data.get("metadata") or {}
+        if not isinstance(meta, dict):
+            return False
+        for key, expected_value in channel_settings(job.config).items():
+            default = {"channel_mode": "mixed", "my_channel": "left", "one_on_one": False}[key]
+            if meta.get(key, default) != expected_value:
+                return False
+        if job.config.channel_mode == "me-others" and not job.config.one_on_one:
+            other = "right" if job.config.my_channel == "left" else "left"
+            source = find_job_audio(job_dir, suffix=f"_{other}")
+            if source is not None and is_stale(outputs=[artifacts["diarization"]], inputs=[source]):
+                return False
         stored = {
             "min_speakers": meta.get("min_speakers"),
             "max_speakers": meta.get("max_speakers"),

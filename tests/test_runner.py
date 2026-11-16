@@ -489,7 +489,7 @@ def test_each_stage_records_only_its_own_settings(tmp_path):
 
     _record_stage_settings(job_dir, "diarize", config)
     assert _recorded_meta(job_dir)["pipeline_config"] == {
-        **original, "device": "cpu", "min_speakers": 2, "max_speakers": 2,
+        **original, "device": "cpu", "min_speakers": 2, "max_speakers": 2, "one_on_one": False,
     }
 
     _record_stage_settings(job_dir, "transcribe", config)

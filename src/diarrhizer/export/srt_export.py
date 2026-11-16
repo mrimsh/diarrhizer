@@ -72,6 +72,7 @@ def _split_segment(seg: dict[str, Any]) -> list[tuple[float, float, str]]:
 #   using its word timings (preferring sentence ends); without word timings it stays one cue.
 #   Segments with empty text are skipped - an empty cue is invalid SRT.
 #   Incomplete word text is never used to rebuild a cue: retain the full segment instead.
+#   Cues are stably sorted by start after splitting, retaining chronological order for overlapping channels.
 # @inputs: segments data from merge stage, config metadata (including optional speakers mapping)
 # @outputs: SRT-formatted string
 # @sideEffects: None (pure function)
@@ -84,14 +85,15 @@ def export_to_srt(
 ) -> str:
     """Export segments to SRT subtitles."""
     lines: list[str] = []
-    index = 0
+    cues = []
     for seg in segments:
         name = resolve_speaker_name(seg.get("speaker_id") or "Speaker_00", config.speakers)
         for start, end, text in _split_segment(seg):
-            index += 1
-            lines.append(str(index))
-            lines.append(f"{_srt_time(start)} --> {_srt_time(max(start, end))}")
-            lines.append(f"{name}: {text}")
-            lines.append("")
+            cues.append((start, end, name, text))
+    for index, (start, end, name, text) in enumerate(sorted(cues, key=lambda cue: cue[0]), 1):
+        lines.append(str(index))
+        lines.append(f"{_srt_time(start)} --> {_srt_time(max(start, end))}")
+        lines.append(f"{name}: {text}")
+        lines.append("")
     return "\n".join(lines)
 # [SEMANTIC-END] EXPORT:SRT

@@ -23,7 +23,7 @@ def backend(monkeypatch, tmp_path):
                    asr_options=None, language=None, vad_model=None, vad_options=None,
                    model=None, task="transcribe", download_root=None, local_files_only=False, threads=4):
         calls.append({"model": whisper_arch, "device": device, "compute_type": compute_type,
-                      "language": language, "asr_options": asr_options})
+                      "language": language, "asr_options": asr_options, "vad_options": vad_options})
         return Model()
 
     module = SimpleNamespace(load_model=load_model, load_audio=lambda _: "synthetic waveform",
@@ -65,6 +65,46 @@ def test_unsupported_controls_are_disclosed_as_effective_values(backend, caplog)
     assert all(any(name in warning for warning in result["warnings"])
                for name in ("temperature", "previous text", "vad_filter", "vad_min_silence_ms"))
     assert "unsupported" in caplog.text
+
+
+def test_real_vad_thresholds_reload_model_and_chunk_duration_reaches_transcribe(backend):
+    _, calls, _, audio = backend
+    adapter = WhisperXAdapter(device="cpu", vad_onset=.4, vad_offset=.25, chunk_size=18)
+    result = adapter.transcribe(audio)
+    assert calls[-1]["vad_options"] == {"vad_onset": .4, "vad_offset": .25}
+    assert {key: result["effective_settings"][key] for key in ("vad_onset", "vad_offset", "chunk_size")} == {
+        "vad_onset": .4, "vad_offset": .25, "chunk_size": 18}
+    chunks = []
+    original = adapter._whisper_model.transcribe
+    def capture(audio, **kwargs):
+        chunks.append(kwargs["chunk_size"])
+        return original(audio, **kwargs)
+    adapter._whisper_model.transcribe = capture
+    adapter.transcribe(audio, chunk_size=12)
+    assert chunks == [12] and len(calls) == 1
+    adapter.transcribe(audio, vad_onset=.6, vad_offset=.3)
+    assert len(calls) == 2 and calls[-1]["vad_options"] == {"vad_onset": .6, "vad_offset": .3}
+    adapter.transcribe(audio)
+    assert len(calls) == 3 and calls[-1]["vad_options"] == {"vad_onset": .4, "vad_offset": .25}
+
+
+def test_prompt_overflow_is_measured_and_reported_without_rewriting_hints(backend):
+    _, calls, _, audio = backend
+    prompt = "Анна, API"
+    adapter = WhisperXAdapter(device="cpu", initial_prompt=prompt)
+    adapter._load_whisperx(None, None, 5, prompt)
+    encoded = []
+    def encode(text):
+        encoded.append(text)
+        return SimpleNamespace(ids=list(range(224)))
+    adapter._whisper_model.model = SimpleNamespace(
+        hf_tokenizer=SimpleNamespace(encode=encode), max_length=448)
+    result = adapter.transcribe(audio)
+    assert encoded == [" " + prompt]
+    assert result["effective_settings"]["initial_prompt_tokens"] == 224
+    assert result["effective_settings"]["initial_prompt_token_limit"] == 223
+    assert any("keeps only the last 223" in warning for warning in result["warnings"])
+    assert calls[0]["asr_options"]["initial_prompt"] == prompt
 
 
 def test_alignment_failure_preserves_raw_text_and_reports_quality(backend):

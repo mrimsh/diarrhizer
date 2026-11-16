@@ -19,6 +19,14 @@ import os
 import sys
 
 
+# [SEMANTIC-BEGIN] GUI:STAGE_LIST
+# @purpose: Build the shared stage sequence for each GUI processing mode
+# @description: Me-others keeps the diarize stage; one-on-one records model-free channel assignment there.
+# @inputs: full, asr_only or me_others GUI mode
+# @outputs: lazily imported stage instances
+# @sideEffects: Imports pipeline stages without loading models
+# @errors: ValueError for unknown mode
+# @see: GUI:CHILD_TASKS, STAGE:DIARIZE, GUI:NEW_JOB
 def build_stages(mode: str) -> list:
     """Build the stage list for a pipeline mode. Imports stage classes lazily."""
     from diarrhizer.pipeline.stages.convert import ConvertStage
@@ -29,7 +37,7 @@ def build_stages(mode: str) -> list:
     if mode == "asr_only":
         return [ConvertStage(), TranscribeStage(), MergeStage(), ExportStage()]
 
-    if mode == "full":
+    if mode in ("full", "me_others"):
         from diarrhizer.pipeline.stages.diarize import DiarizeStage
 
         return [
@@ -41,6 +49,7 @@ def build_stages(mode: str) -> list:
         ]
 
     raise ValueError(f"Unknown pipeline mode: {mode!r}")
+# [SEMANTIC-END] GUI:STAGE_LIST
 
 
 def _ensure_std_streams() -> None:

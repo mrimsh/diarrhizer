@@ -134,11 +134,13 @@ def stage_done(job_dir: Path) -> dict:
 
 
 def job_mode(meta: dict) -> str:
-    """"asr_only" if the job was run without the diarize stage, else "full".
+    """Recorded GUI mode, including explicit channel separation.
 
     Jobs from before the stage list was recorded count as "full".
     """
     config = meta.get("pipeline_config")
+    if isinstance(config, dict) and config.get("channel_mode") == "me-others":
+        return "me_others"
     stages = config.get("stages") if isinstance(config, dict) else None
     if isinstance(stages, list) and stages and "diarize" not in stages:
         return "asr_only"
@@ -146,8 +148,8 @@ def job_mode(meta: dict) -> str:
 
 
 def stages_for_mode(mode: str) -> list:
-    """The stage names a job of this mode ("full" or "asr_only") runs, in order."""
-    return FULL_STAGES if mode == "full" else ASR_ONLY_STAGES
+    """Channel mode retains the diarize step as a model-free marker for one-on-one calls."""
+    return ASR_ONLY_STAGES if mode == "asr_only" else FULL_STAGES
 
 
 def restart_stages(mode: str, stage: str) -> list:
@@ -170,8 +172,12 @@ def restart_settings(mode: str, stage: str) -> list:
     names = []
     for name in restart_stages(mode, stage):
         for key in STAGE_SETTINGS[name]:
+            if key == "one_on_one" and mode != "me_others" and stage != "convert":
+                continue
             if key not in names:
                 names.append(key)
+    if stage == "convert" and "one_on_one" not in names:
+        names.append("one_on_one")
     return names
 
 
@@ -266,6 +272,8 @@ def scan_jobs(out_dir: Path) -> list:
             if min_speakers is not None and max_speakers is not None
             else "—"
         )
+        if pipeline_config.get("channel_mode") == "me-others":
+            speakers = "Я + 1" if pipeline_config.get("one_on_one") else f"Я + {speakers}"
 
         result_path = export_path(job_dir, "md")
         complete = result_path.exists() and bundle_valid(job_dir / "export", "manifest.json")
@@ -326,6 +334,7 @@ def _recorded_run_kwargs(job_dir: Path, meta: dict) -> dict:
 #   dropped (speakers=None; the runner backs up speakers.json only when diarization actually starts) when
 #   it is. All plans reuse the recorded settings (RECORDED_RUN_KEYS, the full audio format) so the job
 #   behaves like the original run.
+#   Channel mode is preserved; explicitly recalculating speakers enables diarization of others.
 # @inputs: job_dir (meta/run.json, artifacts present on disk, speakers.json), stage and overrides for restart_plan
 # @outputs: (mode, kwargs) for PipelineWorker, or None when there is nothing to do
 # @sideEffects: Reads job files only; pending/cancelled plans never mutate names or artifacts
@@ -338,7 +347,7 @@ def resume_plan(job_dir: Path) -> Optional[tuple]:
     if not meta.get("input_path"):
         return None
     mode = job_mode(meta)
-    order = FULL_STAGES if mode == "full" else ASR_ONLY_STAGES
+    order = stages_for_mode(mode)
     done = stage_done(job_dir)
     missing = [name for name in order if not done[name]]
     if not missing:
@@ -365,6 +374,9 @@ def rediarize_plan(job_dir: Path, min_speakers: int, max_speakers: int) -> Optio
         # Old names belong to the old speaker ids; new diarization renumbers.
         speakers=None,
     )
+    if kwargs.get("channel_mode") == "me-others":
+        kwargs["one_on_one"] = False
+        return "me_others", kwargs
     return "full", kwargs
 
 
@@ -389,6 +401,11 @@ def restart_plan(job_dir: Path, stage: str, overrides: Optional[dict] = None) ->
         raise ValueError(f"Restarting {stage!r} cannot change: {', '.join(not_allowed)}")
     kwargs = _recorded_run_kwargs(job_dir, meta)
     kwargs.update(overrides)
+    if kwargs.get("channel_mode") == "me-others":
+        mode = "me_others"
+    elif mode == "me_others":
+        mode = "full"
+        kwargs["one_on_one"] = False
     kwargs.update(from_stage=stage, force_stage=stage)
     if restart_drops_speaker_names(mode, stage):
         kwargs["speakers"] = None

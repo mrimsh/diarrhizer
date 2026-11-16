@@ -86,6 +86,23 @@ def test_blank_language_means_auto(make_dialog):
     assert dialog.overrides() == {"language": "auto"}
 
 
+def test_restart_restores_and_updates_asr_profile_glossary_and_vad(make_dialog):
+    recorded = {**RECORDED, "asr_profile": "ru-call", "asr_glossary": "Анна\n.NET",
+                "asr_vad_onset": .45, "asr_vad_offset": .25, "asr_chunk_size": 18}
+    dialog = make_dialog("transcribe", recorded=recorded)
+    assert dialog.field("asr_profile").currentData() == "ru-call"
+    assert dialog.field("asr_glossary").toPlainText() == "Анна\n.NET"
+    assert dialog.field("asr_vad_offset").value() == .25
+    assert dialog.field("asr_chunk_size").value() == 18
+    assert dialog.overrides() == {}
+    dialog.field("asr_profile").setCurrentIndex(0)
+    dialog.field("asr_glossary").setPlainText("")
+    dialog.field("asr_chunk_size").setValue(12)
+    assert dialog.overrides() == {"asr_profile": "default", "asr_glossary": None, "asr_chunk_size": 12}
+    dialog.field("asr_vad_offset").setValue(.6)
+    assert "VAD" in dialog._problem()
+
+
 @pytest.mark.parametrize(
     "stage, mode, offered, not_offered",
     [

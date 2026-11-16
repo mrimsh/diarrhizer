@@ -21,6 +21,13 @@ See [artifact contracts and recovery](artifact-contracts.md) for pending journal
 
 ## JSON Schema (`result.json`)
 
+In `me-others` mode each segment and word additionally carries `channel: "left" | "right"`.
+`Speaker_00` always identifies the local voice; remote voices start at `Speaker_01`.
+With `one_on_one: true` remote speech has a single fixed ID and no diarization model is used.
+Speaker limits count remote voices only in this mode. Turns are sorted by start and their intervals
+may overlap; simultaneous speech is retained on both channels. The input channels share the original
+recording timeline. Legacy jobs without these config fields use `mixed`, `left`, `false` defaults.
+
 ### Top-Level Structure
 
 ```json
@@ -33,7 +40,10 @@ See [artifact contracts and recovery](artifact-contracts.md) for pending journal
       "language": "string",
       "device": "string",
       "min_speakers": "integer",
-      "max_speakers": "integer"
+      "max_speakers": "integer",
+      "channel_mode": "mixed or me-others",
+      "my_channel": "left or right",
+      "one_on_one": "boolean"
     },
     "speakers": {"Speaker_00": "display name"},
     "provenance": {"python": "version", "packages": {"whisperx": "version"}},

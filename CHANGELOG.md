@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.7 — 2026-11-16
+
+- Add explicit me/others stereo processing in CLI and GUI: select the local channel, transcribe
+  full-length channels independently, diarize only other participants, and merge overlapping turns
+  by original timestamps. One-on-one calls use channel identity without a diarization model or HF token.
+- Preserve channel settings and channel-specific archives on resume/restart; reject mono/multiple
+  streams and incompatible partial mode changes, and keep split overlapping SRT cues chronological.
+- Add an opt-in `ru-call` ASR prompt profile and separate glossary contents in CLI, New Job and stage
+  restart. Preserve the custom prompt; record composed-prompt hashes and warn on tokenizer-budget overflow.
+- Apply real WhisperX VAD onset/offset and maximum chunk duration, validate ranges/hysteresis, and
+  preserve the settings through GUI queue, CLI/GUI resume and ASR cache version 4.
+
 ## 2.6 — 2026-11-11
 
 - Use independent, case-sensitive date/time wildcards `YYYY`, `YY`, `MM`, `DD`, `HH`, `mm`, `SS`

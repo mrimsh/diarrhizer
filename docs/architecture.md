@@ -1,6 +1,6 @@
 # Architecture
 
-Current source version: **2.6**, shared by the CLI, desktop GUI and Windows launcher.
+Current source version: **2.7**, shared by the CLI, desktop GUI and Windows launcher.
 The [2.x roadmap](roadmap.md) describes the direction toward autonomous call logging, a separate
 call agent and optional integration skills; those capabilities remain planned.
 
@@ -238,8 +238,8 @@ out/
     audio/
       normalized.wav      # always written, regardless of audio_profile; deleted after the job
                           # completes when the storage format has keep_wav=false
-      normalized_left.wav  # split-stereo only: extra left-channel artifact (not consumed downstream)
-      normalized_right.wav # split-stereo only: extra right-channel artifact (not consumed downstream)
+      normalized_left.wav  # split-stereo or me-others: left channel, independent ASR in me-others
+      normalized_right.wav # split-stereo or me-others: right channel, independent ASR in me-others
       archive.<ext>       # non-wav storage formats only: archive copy (+ archive_left/right.<ext>)
     asr/
       transcript.json     # includes ASR config in metadata
@@ -282,12 +282,23 @@ from `effective_settings`, and includes `alignment_status` (`aligned`, `partial`
 `unavailable`, `not_needed` for empty ASR) and `warnings`. The pinned batched WhisperX backend takes beam size and initial
 prompt at model loading; unsupported controls are reported rather than silently discarded.
 
+`asr_settings.py` is an ML-free shared source for the opt-in `ru-call` profile, prompt composition
+and VAD validation. `PipelineConfig` and `meta/run.json.pipeline_config` keep the profile name,
+original custom prompt, glossary contents, VAD onset/offset and maximum chunk duration. CLI and GUI
+queue/resume use those same values. The transcribe stage composes the effective prompt; metadata
+stores its full SHA-256 (plus a short preview), glossary SHA-256 and requested VAD values.
+`effective_settings` records the actual prompt/thresholds/chunk duration and, when a prompt is set,
+the loaded tokenizer's prompt token count/budget. Overflow is warned, not silently rewritten by us.
+VAD thresholds are model-loading options, so changing them reloads the adapter's model; chunk size
+is a per-transcription option. ASR cache version 4 adds these controls and retains the alignment audit.
+See [profiles, validation and defaults](asr-profiles.md).
+
 `adapters/alignment.py` validates Hugging Face CTC loading using a local subclass of the pinned
 Transformers 4.39.3 loader. Complete legacy weight-norm pairs are renamed before its key inventory;
 converted tensors must match exactly, and missing/unexpected/mismatched weights reject alignment.
 There is no warning filter, global monkeypatch or model-cache rewrite. The torchaudio registry uses
 its existing strict bundle loader. `metadata.alignment_model` records backend/name, HF commit revision
-and load audit; torchaudio has no HF revision. ASR cache version 3 requests this contract on recalculation.
+and load audit; torchaudio has no HF revision. ASR cache version 4 requests this contract on recalculation.
 See [checkpoint validation and measured limits](quality-baseline.md).
 
 ### Diarization output
@@ -334,7 +345,7 @@ Malformed critical metadata is an error; broken optional derived artifacts can s
 `meta/run.json.source_fingerprint` contains the resolved path, size, `mtime_ns` and SHA-256 of the
 original bytes. Conversion checks path/size/hash, then freshness/profile/format; a relocated source
 is deliberately treated as new. Legacy conversion without this identity is invalidated once.
-ASR uses `metadata.cache_version = 3`, merge uses `2` to invalidate pre-fix artifacts. These checks run
+ASR uses `metadata.cache_version = 4`, merge uses `2` to invalidate pre-fix artifacts. These checks run
 only for stages within the requested range, so opening a result or export-only runs remain cheap.
 
 Plans in `GUI:JOB_PLANS` only read files. The runner backs up `speakers.json` immediately before
@@ -393,15 +404,43 @@ Name mapping is a separate layer on top.
 ## 5. Audio Profiles
 
 Audio profiles apply FFmpeg filters during conversion. Every profile writes the
-standard mono `audio/normalized.wav` that transcribe/diarize/merge read
-unconditionally, so the pipeline shape never depends on `audio_profile`.
+standard mono `audio/normalized.wav` used in the default `mixed` mode.
+The explicit `me-others` mode consumes separate channel files instead; the stage sequence stays the same.
 
 | Profile | Filters Applied | Use Case |
 |---------|-----------------|----------|
 | `raw` | None | Default behavior, no preprocessing |
 | `voice-call` | Bandpass filter (300Hz-7kHz) + mild EQ boost at 3kHz | Phone call recordings, VoIP |
 | `denoise-light` | afftdn noise reduction | Noisy recordings with background noise |
-| `split-stereo` | Writes the standard mono downmix to `normalized.wav` (used by the rest of the pipeline) **and** additionally splits L/R channels into `normalized_left.wav`/`normalized_right.wav` | Keeping raw per-channel audio available for manual inspection; the channels themselves are not currently fed into transcribe/diarize/merge - diarization still runs as usual on the mono mix |
+| `split-stereo` | Writes the standard mono downmix and `normalized_left.wav`/`normalized_right.wav` | Extra channel artifacts in default `mixed` mode; independent inputs when `channel_mode=me-others` |
+
+### Me / others channel mode
+
+`channel_mode=me-others` requires one stereo audio stream, with the local microphone isolated in
+`my_channel=left|right`. Convert probes the input without full decoding before any model work,
+rejects mono/multiple streams, and creates full-length L/R WAVs with the selected profile filters
+(channel extraction first). The mono mix remains available for playback. No silence is trimmed.
+
+Transcribe reuses one ASR adapter across two independent calls, then writes `asr/transcript.json` with
+`channels.left`/`channels.right` (each original ASR result, including language, words, warnings and
+input path), plus chronological combined segments carrying `channel`. Word `segment_index` values
+in the combined view point at combined segments; per-channel results retain their original ownership.
+
+Diarize receives only the opposite channel; speaker limits count other participants, excluding the
+local voice. With `one_on_one=true`, the same stage writes an explicit `metadata.model_free=true`
+marker and never checks HF credentials or creates a diarization adapter. The `asr` doctor profile
+therefore covers one-on-one requirements; group mode needs the `full` profile.
+
+Merge applies the existing text-preserving speaker assignment separately to each channel, reserves
+`Speaker_00` for the local voice, maps remote speakers to `Speaker_01` and above, and stably sorts turns
+by start. One-on-one uses `Speaker_01` for all remote speech. Overlapping intervals are retained;
+split SRT cues are sorted by start as well. Defaults name the local voice `Я`, and the single remote
+voice `Собеседник`; user mappings can override both. Ordinary stereo and microphone echo are not separated.
+
+All channel choices are recorded for CLI/GUI resume. Mode/channel changes require restarting from
+convert, which can reuse unchanged WAVs and ASR while recording the new layout. Cache checks
+distinguish mixed, channel diarization and model-free results. Archive lookup uses the selected
+channel suffix and never falls back to the mono mix, including portable named jobs after WAV cleanup.
 
 ### Audio storage formats
 
@@ -409,7 +448,7 @@ Profiles decide *what the pipeline processes*; storage formats
 (`src/diarrhizer/audio_formats.py`, `--audio-format`) decide *what the job keeps*.
 Processing always uses the lossless working WAV. A format other than `wav` makes
 convert also write an archive copy, `audio/archive.<ext>` (plus
-`archive_left/right.<ext>` for `split-stereo`). Each copy is encoded from the
+`archive_left/right.<ext>` for `split-stereo` or `me-others`). Each copy is encoded from the
 original input with the format's codec, `-q:a` or `-b:a`, sample rate, channel
 count and extra args, with `-vn`, and gets the same profile filters as the WAV.
 Formats with `keep_wav: false` drop the working WAV(s) once the job completes.

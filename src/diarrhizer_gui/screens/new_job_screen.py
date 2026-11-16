@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from diarrhizer.audio_formats import AudioFormat, AudioFormatStore, store_path
+from diarrhizer.asr_settings import VAD_ONSET, VAD_OFFSET, CHUNK_SIZE, RU_CALL_PROMPT
 from diarrhizer.diagnostics import models as model_cache
 from diarrhizer.media import MEDIA_EXTENSIONS, expand_media_paths, is_media_file
 from diarrhizer_gui import custom_models, settings_keys
@@ -59,6 +60,7 @@ ASR_MODELS = ["tiny", "base", "small", "medium", "large-v2", "large-v3"]
 MODES = [
     ("Полный цикл (распознавание + спикеры)", "full"),
     ("Только распознавание (без диаризации)", "asr_only"),
+    ("Я / остальные (раздельные L/R-каналы)", "me_others"),
 ]
 
 # Codes Whisper understands; the field stays editable for any other code.
@@ -73,6 +75,8 @@ AUDIO_PROFILES = [
     ("denoise-light", "Лёгкое шумоподавление"),
     ("split-stereo", "Доп. L/R-файлы (диаризация всё равно по моно-миксу)"),
 ]
+
+ASR_PROFILE_CHOICES = [("Без встроенного prompt", "default"), ("Русский созвон", "ru-call")]
 
 # Russian labels for the built-in storage formats (diarrhizer.audio_formats);
 # user profiles show their own name and description.
@@ -98,6 +102,9 @@ ADVANCED_DEFAULTS = {
     "condition": True,
     "vad": True,
     "vad_silence_ms": 1000,
+    "vad_onset": VAD_ONSET,
+    "vad_offset": VAD_OFFSET,
+    "chunk_size": CHUNK_SIZE,
     "min_turn": 0.4,
 }
 
@@ -200,6 +207,8 @@ class FileList(QListWidget):
 # @purpose: Plan queued media jobs with independent user-editable recording timestamps and shared settings
 # @description: Filename timestamps are proposals shown in an editor; manual edits/Now win. Each batch
 #   file keeps its own recording time; editing a multi-selection applies the chosen value to those files.
+#   ASR profile/glossary and real VAD controls are remembered and copied as values into each queued run.
+#   Me-others offers the local channel and one-on-one switch; only group mode requires an HF token.
 #   The queue captures timestamps before processing, and planning never creates or renames job artifacts.
 # @inputs: media files, recording-time editor, project/team and processing settings
 # @outputs: QueuedRun items with explicit recorded_at wall time
@@ -292,6 +301,22 @@ class NewJobScreen(QWidget):
             self._mode_combo.addItem(label, key)
         self._mode_combo.currentIndexChanged.connect(self._validate)
 
+        self._my_channel_combo = QComboBox()
+        self._my_channel_combo.addItem("Левый (L)", "left")
+        self._my_channel_combo.addItem("Правый (R)", "right")
+        self._one_on_one_checkbox = QCheckBox("Один собеседник — без диаризации")
+        self._one_on_one_checkbox.setChecked(True)
+        self._one_on_one_checkbox.toggled.connect(self._validate)
+        self._channel_options = QWidget()
+        channel_row = QHBoxLayout(self._channel_options)
+        channel_row.setContentsMargins(0, 0, 0, 0)
+        channel_row.addWidget(QLabel("Мой канал:"))
+        channel_row.addWidget(self._my_channel_combo)
+        channel_row.addWidget(self._one_on_one_checkbox)
+        self._channel_hint = QLabel("Нужна стереозапись: ваш голос только в одном канале, "
+                                   "собеседники — в другом. Число спикеров ниже — без вас.")
+        self._channel_hint.setWordWrap(True)
+
         self._language_combo = QComboBox()
         self._language_combo.setEditable(True)
         self._language_combo.addItems(LANGUAGES)
@@ -348,8 +373,11 @@ class NewJobScreen(QWidget):
         form.addRow("Папка результатов:", out_row)
         form.addRow("Организация задания:", self._project_panel)
         form.addRow("Режим:", self._mode_combo)
+        form.addRow("", self._channel_options)
+        form.addRow("", self._channel_hint)
         form.addRow("Язык:", self._language_combo)
-        form.addRow("Спикеры (мин–макс):", speakers_row)
+        self._speakers_label = QLabel("Спикеры (мин–макс):")
+        form.addRow(self._speakers_label, speakers_row)
         form.addRow("Модель ASR:", self._model_combo)
         form.addRow("Устройство:", self._device_combo)
         form.addRow("Предобработка звука:", self._audio_profile_combo)
@@ -383,6 +411,28 @@ class NewJobScreen(QWidget):
         self._vad_silence_spin.setSingleStep(100)
         self._vad_silence_spin.setSuffix(" мс")
 
+        self._vad_onset_spin = QDoubleSpinBox()
+        self._vad_offset_spin = QDoubleSpinBox()
+        for spin, default in ((self._vad_onset_spin, VAD_ONSET), (self._vad_offset_spin, VAD_OFFSET)):
+            spin.setDecimals(3)
+            spin.setRange(0.001, 0.999)
+            spin.setSingleStep(0.01)
+            spin.setValue(default)
+            spin.setToolTip("Меньше порог — чувствительнее к тихой речи и шуму. Offset должен быть ≤ onset.")
+        self._chunk_size_spin = QSpinBox()
+        self._chunk_size_spin.setRange(1, 30)
+        self._chunk_size_spin.setSuffix(" с")
+        self._chunk_size_spin.setValue(CHUNK_SIZE)
+        self._chunk_size_spin.setToolTip("Максимальная длительность фрагмента VAD/ASR; стандартно 30 секунд.")
+
+        self._asr_profile_combo = QComboBox()
+        for label, profile in ASR_PROFILE_CHOICES:
+            self._asr_profile_combo.addItem(label, profile)
+        self._asr_profile_combo.setToolTip("Язык и модель выбираются отдельно. Prompt профиля «Русский созвон»:\n" + RU_CALL_PROMPT)
+        self._glossary_edit = QPlainTextEdit()
+        self._glossary_edit.setPlaceholderText("Имена, проекты, продукты и сокращения этого созвона — по строкам или через запятую.")
+        self._glossary_edit.setFixedHeight(70)
+
         self._min_turn_spin = QDoubleSpinBox()
         self._min_turn_spin.setRange(0.0, 5.0)
         self._min_turn_spin.setSingleStep(0.1)
@@ -397,8 +447,8 @@ class NewJobScreen(QWidget):
 
         self._prompt_edit = QPlainTextEdit()
         self._prompt_edit.setPlaceholderText(
-            "Глоссарий/начальный промпт (необязательно) — термины, имена, "
-            "аббревиатуры для более точного распознавания. Запоминается между запусками."
+            "Свой текст-подсказка (необязательно), добавляется к встроенному prompt профиля. "
+            "Запоминается между запусками."
         )
         self._prompt_edit.setFixedHeight(70)
 
@@ -413,7 +463,12 @@ class NewJobScreen(QWidget):
         advanced_form.addRow(self._condition_checkbox)
         advanced_form.addRow(self._vad_checkbox)
         advanced_form.addRow("Тишина VAD (не применяется):", self._vad_silence_spin)
-        advanced_form.addRow("Промпт/глоссарий:", self._prompt_edit)
+        advanced_form.addRow("Начало речи VAD (onset):", self._vad_onset_spin)
+        advanced_form.addRow("Конец речи VAD (offset):", self._vad_offset_spin)
+        advanced_form.addRow("Макс. фрагмент ASR:", self._chunk_size_spin)
+        advanced_form.addRow("Профиль ASR:", self._asr_profile_combo)
+        advanced_form.addRow("Дополнительный prompt:", self._prompt_edit)
+        advanced_form.addRow("Глоссарий созвона:", self._glossary_edit)
         # Everything above is ASR; this one belongs to the merge stage, so it
         # gets its own heading rather than reading as another Whisper knob.
         diarization_header = QLabel("Диаризация")
@@ -550,12 +605,18 @@ class NewJobScreen(QWidget):
         value = self._settings.value
         mode = value(self._key("mode"), "full", type=str)
         self._mode_combo.setCurrentIndex(max(0, self._mode_combo.findData(mode)))
+        channel = value(self._key("my_channel"), "left", type=str)
+        self._my_channel_combo.setCurrentIndex(max(0, self._my_channel_combo.findData(channel)))
+        self._one_on_one_checkbox.setChecked(value(self._key("one_on_one"), True, type=bool))
         self._language_combo.setCurrentText(value(self._key("language"), "auto", type=str) or "auto")
         self._min_speakers.setValue(value(self._key("min_speakers"), 1, type=int))
         self._max_speakers.setValue(value(self._key("max_speakers"), 10, type=int))
         profile = value(self._key("audio_profile"), "raw", type=str)
         self._audio_profile_combo.setCurrentIndex(max(0, self._audio_profile_combo.findData(profile)))
         self._prompt_edit.setPlainText(value(self._key("prompt"), "", type=str))
+        self._asr_profile_combo.setCurrentIndex(max(0, self._asr_profile_combo.findData(
+            value(self._key("asr_profile"), "default", type=str))))
+        self._glossary_edit.setPlainText(value(self._key("glossary"), "", type=str))
 
         defaults = ADVANCED_DEFAULTS
         self._set_compute_type(value(self._key("compute_type"), defaults["compute_type"], type=str))
@@ -567,6 +628,11 @@ class NewJobScreen(QWidget):
             value(self._key("vad_silence_ms"), defaults["vad_silence_ms"], type=int)
         )
         self._min_turn_spin.setValue(value(self._key("min_turn"), defaults["min_turn"], type=float))
+        self._vad_onset_spin.setValue(value(self._key("vad_onset"), defaults["vad_onset"], type=float))
+        self._vad_offset_spin.setValue(value(self._key("vad_offset"), defaults["vad_offset"], type=float))
+        self._chunk_size_spin.setValue(value(self._key("chunk_size"), defaults["chunk_size"], type=int))
+        self._vad_onset_spin.valueChanged.connect(self._validate)
+        self._vad_offset_spin.valueChanged.connect(self._validate)
         self._project_panel.project.setCurrentText(value(self._key("project"), "", type=str))
         self._project_panel.team.setCurrentText(value(self._key("team"), "", type=str))
         self._project_panel.custom.setText(value(self._key("custom"), "", type=str))
@@ -574,11 +640,18 @@ class NewJobScreen(QWidget):
     def _remember(self) -> None:
         set_value = self._settings.setValue
         set_value(self._key("mode"), self._mode_combo.currentData())
+        set_value(self._key("my_channel"), self._my_channel_combo.currentData())
+        set_value(self._key("one_on_one"), self._one_on_one_checkbox.isChecked())
         set_value(self._key("language"), self._language_combo.currentText().strip())
         set_value(self._key("min_speakers"), self._min_speakers.value())
         set_value(self._key("max_speakers"), self._max_speakers.value())
         set_value(self._key("audio_profile"), self._audio_profile_combo.currentData())
         set_value(self._key("prompt"), self._prompt_edit.toPlainText())
+        set_value(self._key("asr_profile"), self._asr_profile_combo.currentData())
+        set_value(self._key("glossary"), self._glossary_edit.toPlainText())
+        set_value(self._key("vad_onset"), self._vad_onset_spin.value())
+        set_value(self._key("vad_offset"), self._vad_offset_spin.value())
+        set_value(self._key("chunk_size"), self._chunk_size_spin.value())
         set_value(self._key("compute_type"), self._compute_type_combo.currentData() or "")
         set_value(self._key("beam_size"), self._beam_size_spin.value())
         set_value(self._key("temperature"), self._temperature_spin.value())
@@ -599,6 +672,10 @@ class NewJobScreen(QWidget):
         self._vad_checkbox.setChecked(defaults["vad"])
         self._vad_silence_spin.setValue(defaults["vad_silence_ms"])
         self._min_turn_spin.setValue(defaults["min_turn"])
+        self._vad_onset_spin.setValue(defaults["vad_onset"])
+        self._vad_offset_spin.setValue(defaults["vad_offset"])
+        self._chunk_size_spin.setValue(defaults["chunk_size"])
+        self._asr_profile_combo.setCurrentIndex(0)
 
     def _set_compute_type(self, stored: str) -> None:
         for index in range(self._compute_type_combo.count()):
@@ -737,6 +814,15 @@ class NewJobScreen(QWidget):
 
     def _validate(self, *_args) -> bool:
         problems = []
+        separated = self._mode_combo.currentData() == "me_others"
+        model_free = separated and self._one_on_one_checkbox.isChecked()
+        self._channel_options.setVisible(separated)
+        self._channel_hint.setVisible(separated)
+        self._min_speakers.setEnabled(not model_free)
+        self._max_speakers.setEnabled(not model_free)
+        self._speakers_label.setText("Остальные (мин–макс):" if separated else "Спикеры (мин–макс):")
+        if self._vad_offset_spin.value() > self._vad_onset_spin.value():
+            problems.append("порог конца речи VAD (offset) не должен превышать порог начала (onset)")
         self._audio_format_combo.setEnabled(self._project_panel.storage["archive"].currentData() != "discard")
         try:
             self._project_panel.options()
@@ -744,12 +830,12 @@ class NewJobScreen(QWidget):
             problems.append(str(exc))
         if not self._files.count():
             problems.append("добавьте хотя бы один медиафайл")
-        if self._min_speakers.value() > self._max_speakers.value():
+        if not model_free and self._min_speakers.value() > self._max_speakers.value():
             problems.append("минимум спикеров не может быть больше максимума")
-        if self._mode_combo.currentData() == "full" and not hf_token_present():
+        if (self._mode_combo.currentData() == "full" or (separated and not model_free)) and not hf_token_present():
             problems.append(
-                "для полного цикла нужен HF-токен (экран «Настройки») — "
-                "или выберите режим «Только распознавание»"
+                "для диаризации нужен HF-токен (экран «Настройки»); без него доступны "
+                "«Только распознавание» и «Я / остальные» с одним собеседником"
             )
         self._show_problems(problems)
         self._update_run_button()
@@ -780,10 +866,13 @@ class NewJobScreen(QWidget):
 
         mode = self._mode_combo.currentData()
         common = {
+            "channel_mode": "me-others" if mode == "me_others" else "mixed",
+            "my_channel": self._my_channel_combo.currentData(),
+            "one_on_one": mode == "me_others" and self._one_on_one_checkbox.isChecked(),
             **self._project_panel.options(),
             "out_dir": self._out_field.text(),
-            "min_speakers": self._min_speakers.value(),
-            "max_speakers": self._max_speakers.value(),
+            "min_speakers": 1 if mode == "me_others" and self._one_on_one_checkbox.isChecked() else self._min_speakers.value(),
+            "max_speakers": 1 if mode == "me_others" and self._one_on_one_checkbox.isChecked() else self._max_speakers.value(),
             "language": self._language_combo.currentText().strip() or "auto",
             "device": self._device_combo.currentText(),
             "asr_model": self._model_combo.currentText().strip(),
@@ -797,6 +886,11 @@ class NewJobScreen(QWidget):
             "asr_condition_on_previous_text": self._condition_checkbox.isChecked(),
             "asr_vad_filter": self._vad_checkbox.isChecked(),
             "asr_vad_min_silence_ms": self._vad_silence_spin.value(),
+            "asr_profile": self._asr_profile_combo.currentData(),
+            "asr_glossary": self._glossary_edit.toPlainText().strip() or None,
+            "asr_vad_onset": self._vad_onset_spin.value(),
+            "asr_vad_offset": self._vad_offset_spin.value(),
+            "asr_chunk_size": self._chunk_size_spin.value(),
             "min_turn_duration": self._min_turn_spin.value(),
         }
         prompt = self._prompt_edit.toPlainText().strip()

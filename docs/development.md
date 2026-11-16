@@ -2,7 +2,7 @@
 
 ## Release version
 
-The current source version is **2.6** by **MRIMSH**. `src/diarrhizer/__init__.py` defines
+The current source version is **2.7** by **MRIMSH**. `src/diarrhizer/__init__.py` defines
 `__version__` for the CLI (`python -m diarrhizer --version`), GUI window/sidebar and Qt metadata,
 Windows launcher and provider client identity. Setuptools reads that same value when building
 package metadata; no processing libraries are imported to read the version. After changing it,
@@ -60,6 +60,12 @@ Doctor profiles:
 | `asr` | FFmpeg and ML imports, without HF token or summary setup |
 | `export` | Supported Python; no model, FFmpeg or credentials needed |
 | `summary` | Supported Python and configured provider tools/key references; never calls a model |
+
+The `asr` profile also covers `--channel-mode me-others --one-on-one`; those calls identify both
+speakers by channel and never load a diarization model or require an HF token. Channel-separated
+group calls still require the `full` profile. `tests/test_channel_mode.py` checks these expectations,
+overlapping turns, archive-only resume and a synthetic stereo smoke through real FFmpeg when available;
+ASR/diarization models are replaced with deterministic adapters in that test.
 
 CPU-only PyTorch is valid: doctor reports it and processing must use `--device cpu`.
 Without a usable GPU, CUDA is a warning and the GUI keeps CUDA unavailable; CPU processing still works.

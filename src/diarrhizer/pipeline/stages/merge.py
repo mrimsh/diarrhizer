@@ -12,6 +12,7 @@ from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.pipeline.cache import config_mismatch, is_stale
 from diarrhizer.utils import read_json, write_json_atomic
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance
+from diarrhizer.pipeline.channels import channel_settings, require_channel_transcript
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -33,6 +34,8 @@ logger = logging.getLogger(__name__)
 #   the source transcript is never rewritten. Missing/non-finite/negative bounds remain errors.
 #   cache_version=2 invalidates results predating text-preserving merge, only when merge is in range.
 #   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
+#   Me-others merges each channel independently, reserves Speaker_00 for the local voice and offsets
+#   other speaker IDs; stable chronological sorting retains overlapping turns on the original timeline.
 # @inputs: artifacts/asr/transcript.json (required), artifacts/diar/diarization.json (optional)
 # @outputs: artifacts/merged/segments.json
 # @sideEffects: Reads JSON files, writes merged segments to disk,
@@ -91,10 +94,16 @@ class MergeStage:
         # Diarization is optional: if it hasn't been run, treat it as no
         # diarization data (assign_speakers already defaults every segment to
         # Speaker_00 in that case) instead of failing the whole pipeline.
-        if diar_input.exists():
+        model_free = job.config.channel_mode == "me-others" and job.config.one_on_one
+        diar_data = {}
+        if model_free:
+            diar_segments = []
+        elif diar_input.exists():
             with open(diar_input, "r", encoding="utf-8") as f:
                 diar_data = json.load(f)
             diar_segments = diar_data.get("segments", [])
+        elif job.config.channel_mode == "me-others":
+            raise FileNotFoundError("Remote-channel diarization is missing; run the diarize stage first")
         else:
             logger.info(
                 f"[{self.NAME}] No diarization found at {diar_input}; defaulting to Speaker_00",
@@ -111,12 +120,18 @@ class MergeStage:
         start_time = datetime.now()
 
         # Perform merge
-        merged_segments = assign_speakers(
-            transcript_segments=transcript_segments,
-            transcript_words=transcript_words,
-            diar_segments=diar_segments,
-            min_turn_duration=min_turn_duration,
-        )
+        if job.config.channel_mode == "me-others":
+            if not model_free and any((diar_data.get("metadata") or {}).get(key) != value
+                                      for key, value in channel_settings(job.config).items()):
+                raise ValueError("Diarization channel settings differ; rerun the diarize stage")
+            merged_segments = merge_channels(transcript_data, diar_segments, job.config)
+        else:
+            if transcript_data.get("channels"):
+                raise ValueError("Channel transcript cannot be merged as mixed audio; rerun transcribe")
+            merged_segments = assign_speakers(
+                transcript_segments=transcript_segments, transcript_words=transcript_words,
+                diar_segments=diar_segments, min_turn_duration=min_turn_duration,
+            )
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
@@ -129,6 +144,7 @@ class MergeStage:
             "segments": merged_segments,
             "num_segments": len(merged_segments),
             "metadata": {
+                **channel_settings(job.config),
                 "cache_version": self.CACHE_VERSION,
                 "input_transcript": str(transcript_input),
                 "input_diarization": str(diar_input),
@@ -210,6 +226,10 @@ class MergeStage:
         meta = data.get("metadata") or {}
         if not isinstance(meta, dict) or meta.get("cache_version") != self.CACHE_VERSION:
             return False
+        for key, expected in channel_settings(job.config).items():
+            default = {"channel_mode": "mixed", "my_channel": "left", "one_on_one": False}[key]
+            if meta.get(key, default) != expected:
+                return False
         return not config_mismatch(
             meta,
             {"min_turn_duration": job.config.min_turn_duration},
@@ -217,6 +237,42 @@ class MergeStage:
 
 
 # [SEMANTIC-END] STAGE:MERGE
+
+
+# [SEMANTIC-BEGIN] MERGE:CHANNEL_TURNS
+# @purpose: Join independent local/remote transcripts without losing simultaneous speech
+# @description: Existing text-preserving alignment runs separately for each channel. Local speech is
+#   Speaker_00; remote diarization labels are mapped to Speaker_01 and above. One-on-one assigns a
+#   single remote speaker without consuming diarization. No pauses are removed and no times shifted.
+# @inputs: per-channel transcript, remote diarization, pipeline settings
+# @outputs: stable chronological list of speaker turns with source channel on turns and words
+# @sideEffects: None
+# @errors: ValueError for missing channel transcripts or invalid ASR timestamps
+# @see: AUDIO:CHANNEL_MODE, STAGE:MERGE, MERGE:ASSIGN_SPEAKERS
+def merge_channels(transcript: dict, diar_segments: list[dict], config) -> list[dict]:
+    channels = require_channel_transcript(transcript)
+    remote_labels = sorted({normalize_speaker_id(seg.get("speaker", "Speaker_00"))
+                            for seg in diar_segments})
+    mapping = {label: f"Speaker_{i + 1:02d}" for i, label in enumerate(remote_labels)}
+    merged = []
+    for channel, result in channels.items():
+        local = channel == config.my_channel
+        turns = assign_speakers(
+            result.get("segments", []), result.get("words", []),
+            [] if local or config.one_on_one else diar_segments,
+            min_turn_duration=config.min_turn_duration,
+        )
+        for turn in turns:
+            turn["channel"] = channel
+            turn["speaker_id"] = ("Speaker_00" if local else
+                                  mapping.get(turn["speaker_id"], "Speaker_01"))
+            for word in turn.get("words", []):
+                word["channel"] = channel
+                word["speaker_id"] = ("Speaker_00" if local else
+                                      mapping.get(word["speaker_id"], "Speaker_01"))
+            merged.append(turn)
+    return sorted(merged, key=lambda seg: seg["start"])
+# [SEMANTIC-END] MERGE:CHANNEL_TURNS
 
 
 # Default for PipelineConfig.min_turn_duration (--min-turn-duration): word runs

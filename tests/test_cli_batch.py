@@ -45,6 +45,18 @@ def _touch(path: Path) -> Path:
     return path
 
 
+def test_channel_mode_flags_reach_runner_and_support_explicit_reset(tmp_path, monkeypatch, calls):
+    source = _touch(tmp_path / "call.wav")
+    assert _main(monkeypatch, source, "--out", tmp_path / "out", "--channel-mode", "me-others",
+                 "--my-channel", "right", "--one-on-one") == 0
+    assert calls[-1]["channel_mode"] == "me-others"
+    assert calls[-1]["my_channel"] == "right"
+    assert calls[-1]["one_on_one"] is True
+    assert _main(monkeypatch, source, "--out", tmp_path / "out", "--channel-mode", "me-others",
+                 "--no-one-on-one") == 0
+    assert calls[-1]["one_on_one"] is False
+
+
 def test_folder_runs_every_media_file_as_its_own_job(tmp_path, monkeypatch, calls, capsys):
     folder = tmp_path / "calls"
     _touch(folder / "b.m4a")
@@ -81,6 +93,39 @@ def test_single_input_keeps_the_plain_behaviour(tmp_path, monkeypatch, calls, ca
     assert len(calls) == 1
     assert calls[0]["job_dir"] is None  # run_pipeline names the job itself
     assert "Pipeline completed successfully!" in capsys.readouterr().out
+
+
+def test_cli_passes_profile_glossary_contents_and_supported_vad_controls(tmp_path, monkeypatch, calls):
+    media = _touch(tmp_path / "call.wav")
+    glossary = tmp_path / "glossary.txt"
+    glossary.write_text("Анна\n.NET", encoding="utf-8-sig")
+    assert _main(monkeypatch, media, "--asr-profile", "ru-call", "--asr-glossary-file", glossary,
+                 "--asr-vad-onset", ".4", "--asr-vad-offset", ".25", "--asr-chunk-size", "18") == 0
+    assert {key: calls[0][key] for key in ("asr_profile", "asr_glossary", "asr_vad_onset",
+                                         "asr_vad_offset", "asr_chunk_size")} == {
+        "asr_profile": "ru-call", "asr_glossary": "Анна\n.NET", "asr_vad_onset": .4,
+        "asr_vad_offset": .25, "asr_chunk_size": 18}
+
+
+def test_cli_omits_new_settings_on_resume_unless_explicitly_overridden(tmp_path, monkeypatch, calls):
+    job = tmp_path / "job"
+    job.mkdir()
+    assert _main(monkeypatch, "--job-dir", job) == 0
+    assert not {"asr_profile", "asr_glossary", "asr_vad_onset", "asr_vad_offset", "asr_chunk_size"} & calls[0].keys()
+    empty = tmp_path / "empty.txt"
+    empty.write_text("", encoding="utf-8")
+    assert _main(monkeypatch, "--job-dir", job, "--asr-profile", "default", "--asr-glossary-file", empty) == 0
+    assert calls[-1]["asr_profile"] == "default" and calls[-1]["asr_glossary"] is None
+
+
+@pytest.mark.parametrize("contents", [None, b"\xff\xfeinvalid"])
+def test_unreadable_glossary_does_not_start_any_jobs(tmp_path, monkeypatch, calls, capsys, contents):
+    media = _touch(tmp_path / "call.wav")
+    glossary = tmp_path / "glossary.txt"
+    if contents is not None:
+        glossary.write_bytes(contents)
+    assert _main(monkeypatch, media, "--asr-glossary-file", glossary) == 1
+    assert not calls and "Cannot read ASR glossary" in capsys.readouterr().err
 
 
 def test_project_batch_uses_hierarchy_and_template(tmp_path, monkeypatch, calls):

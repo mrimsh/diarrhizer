@@ -276,7 +276,7 @@ class MonitorScreen(QWidget):
 
     def begin_item(self, item: QueuedRun, position: int, total: int) -> None:
         """Prepare the stepper for the run that is starting."""
-        stages_in_run = set(FULL_STAGES if item.mode == "full" else ASR_ONLY_STAGES)
+        stages_in_run = set(ASR_ONLY_STAGES if item.mode == "asr_only" else FULL_STAGES)
         for name, step in self._steps.items():
             in_run = name in stages_in_run
             step.set_state("pending" if in_run else "skipped")

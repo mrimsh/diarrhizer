@@ -32,8 +32,10 @@ from PySide6.QtWidgets import (
 
 from diarrhizer.audio_formats import AudioFormat, resolve_audio_format
 from diarrhizer.pipeline.runner import PipelineConfig
+from diarrhizer.pipeline.channels import validate_channel_settings
 from diarrhizer_gui.screens.new_job_screen import (
     AUDIO_PROFILES,
+    ASR_PROFILE_CHOICES,
     COMPUTE_TYPES,
     LANGUAGES,
     audio_format_hint,
@@ -45,7 +47,7 @@ from diarrhizer_gui.screens.new_job_screen import (
 # (heading, settings under it) in pipeline order; device has no heading - it
 # belongs to two stages and sits at the top.
 SECTIONS = [
-    ("Конвертация", ("audio_profile", "audio_format")),
+    ("Конвертация", ("audio_profile", "audio_format", "channel_mode", "my_channel")),
     (
         "Распознавание",
         (
@@ -58,9 +60,10 @@ SECTIONS = [
             "asr_vad_filter",
             "asr_vad_min_silence_ms",
             "asr_initial_prompt",
+            "asr_profile", "asr_glossary", "asr_vad_onset", "asr_vad_offset", "asr_chunk_size",
         ),
     ),
-    ("Диаризация", ("min_speakers", "max_speakers")),
+    ("Диаризация", ("one_on_one", "min_speakers", "max_speakers")),
     ("Объединение", ("min_turn_duration",)),
 ]
 
@@ -85,6 +88,8 @@ MIN_TURN_TOOLTIP = (
 #   disabled when the environment probe says it is unavailable. accept() refuses an empty model and a
 #   speaker minimum above the maximum.
 #   Compatibility ASR controls explicitly label the pinned backend's unsupported/effective behavior.
+#   ASR profile/glossary and actual VAD controls can be changed independently; invalid VAD hysteresis is rejected.
+#   Channel mode/local channel can change from conversion; one-on-one can change from diarization.
 # @inputs: intro text, settings keys, recorded kwargs, QSettings (custom model list), optional EnvironmentProbe
 # @outputs: overrides() -> {run_pipeline setting: new value}, accepted/rejected dialog result
 # @sideEffects: Reads audio_formats.json and the HF cache listing to fill the choices; writes nothing
@@ -205,7 +210,21 @@ class RestartDialog(QDialog):
 
     def _add_field(self, form: QFormLayout, key: str) -> None:
         value = self._recorded_value(key)
-        if key == "audio_profile":
+        if key in ("channel_mode", "my_channel"):
+            combo = QComboBox()
+            choices = ([("Общий микс", "mixed"), ("Я / остальные", "me-others")]
+                       if key == "channel_mode" else [("Левый (L)", "left"), ("Правый (R)", "right")])
+            for label, data in choices:
+                combo.addItem(label, data)
+            self._select_data(combo, value)
+            self._register(key, combo, combo.currentData)
+            form.addRow("Каналы:" if key == "channel_mode" else "Мой канал:", combo)
+        elif key == "one_on_one":
+            checkbox = QCheckBox("Один собеседник — без диаризации (режим «Я / остальные»)")
+            checkbox.setChecked(bool(value))
+            self._register(key, checkbox, checkbox.isChecked)
+            form.addRow("", checkbox)
+        elif key == "audio_profile":
             combo = QComboBox()
             for data, label in AUDIO_PROFILES:
                 combo.addItem(label, data)
@@ -267,13 +286,37 @@ class RestartDialog(QDialog):
             spin.setValue(int(value))
             self._register(key, spin, spin.value)
             form.addRow("Тишина VAD (не применяется):", spin)
-        elif key == "asr_initial_prompt":
+        elif key == "asr_profile":
+            combo = QComboBox()
+            for label, profile in ASR_PROFILE_CHOICES:
+                combo.addItem(label, profile)
+            self._select_data(combo, value)
+            combo.setToolTip("Встроенный prompt; язык и модель выбираются отдельно.")
+            self._register(key, combo, combo.currentData)
+            form.addRow("Профиль ASR:", combo)
+        elif key in ("asr_vad_onset", "asr_vad_offset"):
+            spin = QDoubleSpinBox()
+            spin.setDecimals(3)
+            spin.setRange(0.001, 0.999)
+            spin.setSingleStep(0.01)
+            spin.setValue(float(value))
+            self._register(key, spin, spin.value)
+            form.addRow("Начало речи VAD (onset):" if key == "asr_vad_onset" else "Конец речи VAD (offset):", spin)
+        elif key == "asr_chunk_size":
+            spin = QSpinBox()
+            spin.setRange(1, 30)
+            spin.setSuffix(" с")
+            spin.setValue(int(value))
+            self._register(key, spin, spin.value)
+            form.addRow("Макс. фрагмент ASR:", spin)
+        elif key in ("asr_initial_prompt", "asr_glossary"):
             edit = QPlainTextEdit()
-            edit.setPlaceholderText("Глоссарий/начальный промпт (необязательно)")
+            edit.setPlaceholderText("Имена, проекты и термины этого созвона" if key == "asr_glossary"
+                                    else "Свой текст-подсказка, добавляется к prompt профиля")
             edit.setFixedHeight(70)
             edit.setPlainText(value or "")
             self._register(key, edit, lambda: edit.toPlainText().strip() or None)
-            form.addRow("Промпт/глоссарий:", edit)
+            form.addRow("Дополнительный prompt:" if key == "asr_initial_prompt" else "Глоссарий созвона:", edit)
         elif key == "min_speakers":
             self._add_speakers(form)
         elif key == "min_turn_duration":
@@ -316,7 +359,8 @@ class RestartDialog(QDialog):
         hint = QLabel("Если число участников известно, укажите его в обоих полях.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #7d8394;")
-        form.addRow("Спикеры (мин–макс):", row)
+        separated = self._recorded.get("channel_mode") == "me-others"
+        form.addRow("Остальные (мин–макс):" if separated else "Спикеры (мин–макс):", row)
         form.addRow("", hint)
 
     def _add_audio_format(self, form: QFormLayout, recorded: AudioFormat) -> None:
@@ -387,9 +431,17 @@ class RestartDialog(QDialog):
 
     def _problem(self) -> Optional[str]:
         values = self._values()
+        options = {key: values.get(key, self._recorded_value(key))
+                   for key in ("channel_mode", "my_channel", "one_on_one")}
+        try:
+            validate_channel_settings(**options)
+        except ValueError:
+            return "Флажок «Один собеседник» доступен только в режиме «Я / остальные»."
         if "asr_model" in values and not values["asr_model"]:
             return "Укажите модель распознавания."
         if "min_speakers" in values and values["min_speakers"] > values["max_speakers"]:
             return "Минимум спикеров не может быть больше максимума."
+        if "asr_vad_onset" in values and values["asr_vad_offset"] > values["asr_vad_onset"]:
+            return "Порог конца речи VAD (offset) не должен превышать порог начала (onset)."
         return None
 # [SEMANTIC-END] GUI:RESTART_DIALOG

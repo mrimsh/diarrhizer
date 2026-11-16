@@ -142,6 +142,50 @@ def test_full_mode_needs_an_hf_token(qapp, isolated, tmp_path, monkeypatch):
     assert screen._run_button.isEnabled()
 
 
+def test_asr_profile_glossary_and_real_vad_reach_queue_and_survive_reopening(qapp, isolated, tmp_path):
+    screen = new_job_screen.NewJobScreen()
+    screen._mode_combo.setCurrentIndex(screen._mode_combo.findData("asr_only"))
+    screen.add_paths([_touch(tmp_path / "call.wav")])
+    screen._asr_profile_combo.setCurrentIndex(screen._asr_profile_combo.findData("ru-call"))
+    screen._glossary_edit.setPlainText("Анна\n.NET")
+    screen._prompt_edit.setPlainText("Рабочая встреча.")
+    screen._vad_onset_spin.setValue(.45)
+    screen._vad_offset_spin.setValue(.25)
+    screen._chunk_size_spin.setValue(18)
+    queued = []
+    screen.runs_requested.connect(queued.extend)
+    screen._emit_run_requested()
+    assert len(queued) == 1
+    kwargs = queued[0].kwargs
+    assert kwargs["asr_profile"] == "ru-call" and kwargs["asr_glossary"] == "Анна\n.NET"
+    assert kwargs["asr_initial_prompt"] == "Рабочая встреча."
+    assert (kwargs["asr_vad_onset"], kwargs["asr_vad_offset"], kwargs["asr_chunk_size"]) == (.45, .25, 18)
+    again = new_job_screen.NewJobScreen()
+    assert again._asr_profile_combo.currentData() == "ru-call"
+    assert again._glossary_edit.toPlainText() == "Анна\n.NET"
+    assert (again._vad_onset_spin.value(), again._vad_offset_spin.value(), again._chunk_size_spin.value()) == (.45, .25, 18)
+    again._reset_advanced()
+    assert again._asr_profile_combo.currentData() == "default"
+    assert again._glossary_edit.toPlainText() == "Анна\n.NET"
+    assert again._prompt_edit.toPlainText() == "Рабочая встреча."
+
+
+def test_invalid_vad_hysteresis_prevents_queueing(qapp, isolated, tmp_path):
+    screen = new_job_screen.NewJobScreen()
+    screen._mode_combo.setCurrentIndex(screen._mode_combo.findData("asr_only"))
+    screen.add_paths([_touch(tmp_path / "call.wav")])
+    queued = []
+    screen.runs_requested.connect(queued.extend)
+    screen._vad_onset_spin.setValue(.2)
+    screen._vad_offset_spin.setValue(.3)
+    assert not screen._run_button.isEnabled()
+    assert "VAD" in screen._warning_label.text()
+    screen._emit_run_requested()
+    assert not queued
+    screen._vad_offset_spin.setValue(.1)
+    assert screen._run_button.isEnabled()
+
+
 def test_busy_screen_queues_instead_of_starting(qapp, isolated, tmp_path, monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "hf_test")
     screen = new_job_screen.NewJobScreen()

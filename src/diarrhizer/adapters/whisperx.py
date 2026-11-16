@@ -11,6 +11,7 @@ import torch
 
 from diarrhizer.adapters.transcript_result import extract_transcript_fields
 from diarrhizer.adapters.alignment import load_alignment_model
+from diarrhizer.asr_settings import validate_vad_options, VAD_ONSET, VAD_OFFSET, CHUNK_SIZE
 from diarrhizer.export.speakers import normalize_speaker_id
 
 
@@ -27,6 +28,8 @@ def _release_cuda() -> None:
 #   Beam size and initial prompt go to load_model(asr_options). Unsupported batched-backend
 #   temperature/previous-text/VAD controls produce warnings and explicit effective settings.
 #   Alignment failure and partial timing are returned as quality metadata, never silently hidden.
+#   Real VAD onset/offset go to load_model(vad_options); chunk_size goes to transcribe.
+#   Prompt token budget is measured with the loaded tokenizer; overflow is disclosed without changing text.
 #   ADAPTER:ALIGNMENT_LOAD validates checkpoint keys and records the alignment model/load provenance.
 #   Empty ASR skips alignment (not_needed); failed loading remains failed even when raw words lack times.
 # @inputs: audio_path, language, device, compute_type, beam_size, temperature, initial_prompt, vad_params
@@ -52,6 +55,9 @@ class WhisperXAdapter:
         initial_prompt: Optional[str] = None,
         vad_filter: bool = True,
         vad_min_silence_ms: int = 1000,
+        vad_onset: float = VAD_ONSET,
+        vad_offset: float = VAD_OFFSET,
+        chunk_size: int = CHUNK_SIZE,
     ) -> None:
         """Initialize the WhisperX adapter.
 
@@ -66,6 +72,9 @@ class WhisperXAdapter:
             initial_prompt: Initial prompt string for terminology guidance
             vad_filter: Enable VAD filtering
             vad_min_silence_ms: VAD minimum silence in milliseconds
+            vad_onset: Actual VAD speech-start threshold
+            vad_offset: Actual VAD speech-end threshold (no greater than onset)
+            chunk_size: Maximum VAD/ASR chunk duration, 1..30 seconds
 
         Raises:
             RuntimeError: If required dependencies are missing or CUDA requested but unavailable
@@ -80,6 +89,10 @@ class WhisperXAdapter:
         self._initial_prompt = initial_prompt
         self._vad_filter = vad_filter
         self._vad_min_silence_ms = vad_min_silence_ms
+        validate_vad_options(vad_onset, vad_offset, chunk_size)
+        self._vad_onset = vad_onset
+        self._vad_offset = vad_offset
+        self._chunk_size = chunk_size
         self._whisperx: Any = None
         self._model_loaded = False
 
@@ -102,10 +115,11 @@ class WhisperXAdapter:
             )
         return device
 
-    def _load_whisperx(self, language, compute_type, beam_size, initial_prompt) -> None:
+    def _load_whisperx(self, language, compute_type, beam_size, initial_prompt,
+                       vad_onset=VAD_ONSET, vad_offset=VAD_OFFSET) -> None:
         """Load WhisperX and download model if needed."""
         compute_type = compute_type or ("float16" if self._device == "cuda" else "int8")
-        settings = (language, compute_type, beam_size, initial_prompt)
+        settings = (language, compute_type, beam_size, initial_prompt, vad_onset, vad_offset)
         if self._model_loaded and self._loaded_settings == settings:
             return
         if self._model_loaded:
@@ -129,6 +143,7 @@ class WhisperXAdapter:
                 compute_type=compute_type,
                 language=language,
                 asr_options={"beam_size": beam_size, "initial_prompt": initial_prompt},
+                vad_options={"vad_onset": vad_onset, "vad_offset": vad_offset},
             )
             self._loaded_settings = settings
             self._model_loaded = True
@@ -168,6 +183,9 @@ class WhisperXAdapter:
         initial_prompt: Optional[str] = None,
         vad_filter: Optional[bool] = None,
         vad_min_silence_ms: Optional[int] = None,
+        vad_onset: Optional[float] = None,
+        vad_offset: Optional[float] = None,
+        chunk_size: Optional[int] = None,
     ) -> dict:
         """Transcribe audio file with word-level alignment.
 
@@ -181,6 +199,9 @@ class WhisperXAdapter:
             initial_prompt: Override initial prompt for this transcription
             vad_filter: Override VAD filter flag for this transcription
             vad_min_silence_ms: Override VAD min silence for this transcription
+            vad_onset: Override speech-start threshold
+            vad_offset: Override speech-end threshold
+            chunk_size: Override maximum VAD/ASR chunk duration, 1..30 seconds
 
         Returns:
             Dictionary containing:
@@ -205,6 +226,10 @@ class WhisperXAdapter:
         current_condition = condition_on_previous_text if condition_on_previous_text is not None else self._condition_on_previous_text
         current_initial_prompt = self._initial_prompt if initial_prompt is None else initial_prompt
         current_vad_filter = vad_filter if vad_filter is not None else self._vad_filter
+        current_onset = self._vad_onset if vad_onset is None else vad_onset
+        current_offset = self._vad_offset if vad_offset is None else vad_offset
+        current_chunk = self._chunk_size if chunk_size is None else chunk_size
+        validate_vad_options(current_onset, current_offset, current_chunk)
 
         warnings = []
         if current_temperature != 0:
@@ -213,22 +238,33 @@ class WhisperXAdapter:
             warnings.append("WhisperX batched ASR does not condition on previous text; effective value is false.")
         if not current_vad_filter:
             warnings.append("WhisperX requires VAD; vad_filter=false is unsupported, VAD remains enabled.")
-        warnings.append("WhisperX does not support vad_min_silence_ms; its own VAD thresholds are used.")
+        warnings.append("WhisperX does not support vad_min_silence_ms; vad_onset/vad_offset and chunk_size are used instead.")
         effective = {
             "compute_type": current_compute_type or ("float16" if self._device == "cuda" else "int8"),
             "beam_size": current_beam_size, "initial_prompt": current_initial_prompt,
             "temperature": 0.0, "condition_on_previous_text": False,
             "vad_filter": True, "vad_min_silence_ms": None,
+            "vad_onset": current_onset, "vad_offset": current_offset, "chunk_size": current_chunk,
         }
+        self._load_whisperx(lang, current_compute_type, current_beam_size, current_initial_prompt,
+                            current_onset, current_offset)
+        model = getattr(self._whisper_model, "model", None)
+        tokenizer = getattr(model, "hf_tokenizer", None)
+        if current_initial_prompt and tokenizer is not None:
+            token_count = len(tokenizer.encode(" " + current_initial_prompt.strip()).ids)
+            token_limit = model.max_length // 2 - 1
+            effective.update(initial_prompt_tokens=token_count, initial_prompt_token_limit=token_limit)
+            if token_count > token_limit:
+                warnings.append(f"ASR prompt has {token_count} tokens; Whisper keeps only the last "
+                                f"{token_limit}. Shorten the prompt/glossary to avoid losing hints.")
         for warning in warnings:
             logging.getLogger(__name__).warning(warning)
-        self._load_whisperx(lang, current_compute_type, current_beam_size, current_initial_prompt)
 
         try:
             audio = self._whisperx.load_audio(str(audio_path))
 
             # WhisperX 3.3.1 consumes decoding options at load_model, not here.
-            result = self._whisper_model.transcribe(audio, language=lang)
+            result = self._whisper_model.transcribe(audio, language=lang, chunk_size=current_chunk)
 
             # Get detected language if auto-detected
             detected_language = result.get("language", lang or "unknown")
@@ -313,7 +349,13 @@ class WhisperXAdapter:
 # [SEMANTIC-END] ADAPTER:WHISPERX_ASR
 
 
-# Module-level convenience function
+# [SEMANTIC-BEGIN] ADAPTER:TRANSCRIBE_AUDIO
+# @purpose: Offer a one-call ASR/alignment API with the same supported VAD controls as the adapter
+# @inputs: audio path, language/model/device, decoder hints, VAD onset/offset and chunk duration
+# @outputs: Transcript dictionary with effective settings, alignment status and warnings
+# @sideEffects: Loads models, may download missing models, reads audio and uses GPU/CPU memory
+# @errors: FileNotFoundError, RuntimeError, ValueError for invalid VAD controls
+# @see: ADAPTER:WHISPERX_ASR, CONFIG:ASR_PROFILE, STAGE:TRANSCRIBE
 def transcribe_audio(
     audio_path: str | Path,
     language: Optional[str] = None,
@@ -326,6 +368,9 @@ def transcribe_audio(
     initial_prompt: Optional[str] = None,
     vad_filter: bool = True,
     vad_min_silence_ms: int = 1000,
+    vad_onset: float = VAD_ONSET,
+    vad_offset: float = VAD_OFFSET,
+    chunk_size: int = CHUNK_SIZE,
 ) -> dict:
     """Convenience function to transcribe audio using WhisperX.
 
@@ -341,6 +386,9 @@ def transcribe_audio(
         initial_prompt: Initial prompt string for terminology guidance
         vad_filter: Enable VAD filtering
         vad_min_silence_ms: VAD minimum silence in milliseconds
+        vad_onset: Actual VAD speech-start threshold
+        vad_offset: Actual VAD speech-end threshold
+        chunk_size: Maximum VAD/ASR chunk duration, 1..30 seconds
 
     Returns:
         Transcript dictionary with text, segments, and words
@@ -356,8 +404,12 @@ def transcribe_audio(
         initial_prompt=initial_prompt,
         vad_filter=vad_filter,
         vad_min_silence_ms=vad_min_silence_ms,
+        vad_onset=vad_onset,
+        vad_offset=vad_offset,
+        chunk_size=chunk_size,
     )
     return adapter.transcribe(audio_path, language=language)
+# [SEMANTIC-END] ADAPTER:TRANSCRIBE_AUDIO
 
 
 # [SEMANTIC-BEGIN] ADAPTER:WHISPERX_DIARIZE

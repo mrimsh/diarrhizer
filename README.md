@@ -1,4 +1,4 @@
-# Diarrhizer 2.6
+# Diarrhizer 2.7
 
 By MRIMSH
 
@@ -8,7 +8,7 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
 and a CLI (`python -m diarrhizer run …`).
 
-**2.6** is the shared application version for the CLI, desktop GUI and Windows launcher.
+**2.7** is the shared application version for the CLI, desktop GUI and Windows launcher.
 Check it with `python -m diarrhizer --version`; the GUI shows it in the window title and sidebar.
 The launcher downloads the current GitHub `main` application when setting up or updating an environment;
 the downloaded application's version can differ from the launcher's own build version.
@@ -414,12 +414,21 @@ All options:
 | `--lang` | Language code or `auto` | `auto` |
 | `--device` | Device to use (`cuda` or `cpu`) | `cuda` |
 | `--asr-model` | WhisperX/Whisper model size or HF repo (e.g. `base`, `small`, `medium`, `large-v3`) — bigger models are more accurate but slower and need more VRAM | `large-v3` |
+| `--asr-profile` | Built-in prompt: `default` (none) or `ru-call` (Russian calls); language/model are selected separately | `default` |
+| `--asr-glossary-file` | UTF-8 names/terms appended to the built-in and custom prompt; contents are saved with the job | none |
+| `--asr-initial-prompt-file` | UTF-8 custom prompt, used after the built-in profile and before the glossary | none |
+| `--asr-vad-onset` | Speech-start threshold, strictly between 0 and 1 | `0.5` |
+| `--asr-vad-offset` | Speech-end threshold, strictly between 0 and 1 and no greater than onset | `0.363` |
+| `--asr-chunk-size` | Maximum VAD/ASR fragment duration in whole seconds, 1–30 | `30` |
 | `--force` | Force recompute all stages | false |
 | `--force-stage` | Force recompute specific stage | none |
 | `--from-stage` | Start the pipeline at this stage, skipping earlier ones (their outputs must already exist on disk) | none (starts at `convert`) |
 | `--to-stage` | Stop the pipeline after this stage, skipping later ones | none (runs through `export`) |
 | `--speakers` | Path to JSON speaker mapping file | none |
 | `--audio-profile` | Audio preprocessing profile: `raw`, `voice-call`, `denoise-light`, `split-stereo` | `raw` |
+| `--channel-mode` | `mixed` or `me-others` (independent stereo sources) | `mixed` |
+| `--my-channel` | Your voice in `left` or `right`, for `me-others` | `left` |
+| `--one-on-one` / `--no-one-on-one` | One other participant: assign speakers by channel without model diarization | false |
 | `--audio-format` | How the job keeps its audio on disk: `wav`, `flac`, `mp3-q5`, `opus-24k` or a profile from `audio_formats.json` | the default profile in `audio_formats.json`, else `wav` |
 | `--keep-wav` | Keep the working `audio/normalized.wav` after the job completes (overrides the format's setting) | as the format says |
 
@@ -435,11 +444,40 @@ reads, so switching profiles never changes which stages run:
 * `voice-call` — bandpass filter (300Hz-7kHz) + mild EQ boost, for phone/VoIP recordings.
 * `denoise-light` — light noise reduction (`afftdn`) for noisy recordings.
 * `split-stereo` — in addition to the usual mono `normalized.wav`, also writes
-  `normalized_left.wav`/`normalized_right.wav` (separated L/R channels) as
-  extra artifacts. These per-channel files are not currently consumed by
-  transcribe/diarize/merge - diarization still runs on the mono mix as usual.
+  `normalized_left.wav`/`normalized_right.wav`. With the default `mixed` channel mode these
+  are extra artifacts; processing still uses the mono mix. Select `me-others` to process them independently.
 
 See [`docs/architecture.md`](docs/architecture.md#5-audio-profiles) for details.
+
+### Separate channels: me / others
+
+Use this mode only when a recording has **one stereo audio stream**, your microphone in one
+channel and everyone else in the other. Ordinary stereo with both voices in both channels is unsuitable.
+Mono and multiple separate audio streams are rejected; export those tracks as synchronized L/R first.
+
+In the GUI, choose **Я / остальные**, select **Мой канал: Левый / Правый**, and enable
+**Один собеседник — без диаризации** for a one-on-one call. This needs no HF token; the matching
+environment check is `python -m diarrhizer doctor --profile asr`.
+
+```powershell
+# One-on-one: your microphone is on the left; no diarization model or HF token needed.
+python -m diarrhizer run "call.wav" --channel-mode me-others --my-channel left --one-on-one --lang ru
+
+# Group: your microphone is on the right; 2-4 OTHER participants on the left.
+python -m diarrhizer run "meeting.wav" --channel-mode me-others --my-channel right --min-speakers 2 --max-speakers 4 --lang ru
+```
+
+Both full-length channels are transcribed independently. In group mode only the others' channel
+is diarized (HF token required); `--min-speakers`/`--max-speakers` count **others, excluding you**.
+Speaker_00 is always you (default name **Я**); other IDs start at Speaker_01 (default name
+**Собеседник** for one-on-one). Turns are combined by their original start times; interruptions
+and overlapping speech remain in the output. Do not independently trim silence from the source channels.
+Use headphones to limit remote speech leaking into the microphone; echo suppression is not added by this mode.
+
+Channel options survive CLI/GUI resume and archive-only storage. To change the mode or your channel
+on an existing job, restart from conversion; unchanged channel audio/transcripts can be reused.
+To switch a resumed job from one-on-one to a group, pass `--no-one-on-one` and the desired other-speaker
+range, or use **Пересчитать спикеров**. The mode does not capture audio itself.
 
 ---
 
@@ -519,7 +557,7 @@ Conversion checks the source's resolved path, size and full SHA-256 as well as a
 Changing bytes with an older/preserved modification time is detected; moving an identical source
 to another path deliberately counts as a new input. Legacy jobs without a source fingerprint are
 converted once when `convert` is in range. ASR and merge likewise invalidate results predating
-their corrected contracts (`metadata.cache_version`: ASR `3`, merge `2`). Opening results or running only `export`
+their corrected contracts (`metadata.cache_version`: ASR `4`, merge `2`). Opening results or running only `export`
 does not launch recognition. To repair an old transcript, start at `transcribe`; to repair only
 speaker merging from an existing transcript, start at `merge`.
 
@@ -532,6 +570,30 @@ old labels from a stale export; retrying preserves the original nonempty backup.
 overrides are saved to the job when export is reached, including an explicit empty mapping.
 
 ### ASR settings and incomplete alignment
+
+For Russian meetings, select **Русский созвон** under New Job → advanced ASR settings, add relevant
+names/terms in **Глоссарий созвона**, and choose the language separately (`ru` for predominantly
+Russian speech, or `auto` to compare). The existing custom prompt remains available as
+**Дополнительный prompt**. Both fields and the profile are remembered; the restart-stage dialog
+offers the same settings. The built-in profile is opt-in, with no change to existing job defaults.
+
+```powershell
+python -m diarrhizer run "call.mp4" --out "./out" --lang ru --asr-profile ru-call --asr-glossary-file "terms.txt" --asr-vad-onset 0.5 --asr-vad-offset 0.363 --asr-chunk-size 30
+```
+
+`terms.txt` contains relevant names and terms, one per line or comma-separated (UTF-8, optional BOM).
+The prompt is assembled as **profile sample → custom prompt → glossary**, with no transcript rewriting.
+The model's tokenizer measures its budget; oversized prompts produce a warning that Whisper keeps
+only the tail (normally 223 tokens). Keep hints short. These are recognition hints, not guaranteed
+spellings or instructions to an LLM. See [ASR profiles and VAD](docs/asr-profiles.md) for the exact
+profile text, validation, metadata and a comparison procedure.
+
+VAD onset/offset are passed to `load_model(vad_options=...)`; chunk duration is passed to
+`transcribe(chunk_size=...)`. Lower thresholds can retain quiet speech but also admit more noise.
+The defaults match the existing backend. Profile, glossary contents and VAD controls survive resume;
+explicit flags override them. An empty glossary file clears a recorded glossary, and
+`--asr-profile default` disables only the built-in sample. Changes invalidate the ASR cache when
+transcription is in range; ASR artifacts predating cache version 4 are recalculated once.
 
 The supported WhisperX 3.3.1 batched backend receives `--asr-beam-size` and the initial prompt
 through `load_model(asr_options=...)`; compute type is applied at model loading too. Its batched

@@ -22,9 +22,10 @@ logger = logging.getLogger(__name__)
 # [SEMANTIC-BEGIN] STAGE:CONVERT
 # @purpose: Normalize input media to WAV mono 16kHz with optional audio profiles, plus an archive copy
 # @description: Uses FFmpeg adapter to convert input audio/video to a standardized format with preprocessing.
-#   Every profile, including split-stereo, produces audio/normalized.wav - the working file transcribe/diarize
-#   decode - so pipeline shape never depends on audio_profile. split-stereo additionally produces
-#   audio/normalized_left.wav / normalized_right.wav as extra artifacts (not consumed downstream).
+#   Every profile produces a mono mix for playback and mixed-mode ASR. split-stereo additionally produces
+#   audio/normalized_left.wav / normalized_right.wav as extras in mixed mode.
+#   Explicit me-others mode also creates these channels (with the chosen filters), validates stereo
+#   before any stage runs, and feeds each channel downstream without trimming silence or shifting time.
 #   config.audio_format (CONFIG:AUDIO_FORMATS) may add an archive copy of each of those files
 #   (audio/archive[_left|_right].<ext>), encoded from the original input with the same filters; with
 #   keep_wav=false, finalize() drops the working WAVs once the whole job completed, leaving only archives.
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 #   Stale audio files from an earlier format/profile are deleted only after the new ones were written.
 #   meta/run.json's pipeline_config records the whole job config (ASR params incl. the initial prompt,
 #   min_turn_duration, the stage list), so the GUI can list the job and resume it with the same settings
+#   including ASR profile/glossary and VAD onset/offset/chunk duration.
 #   (the runner refreshes the keys of later stages that ran with other settings - PIPELINE:RUNNER).
 #   Cache compares a full source SHA-256, resolved path and size; legacy jobs without identity
 #   are reconverted once when conversion is requested. A relocated source is a new input.
@@ -93,7 +95,7 @@ class ConvertStage:
 
         audio_profile = config.audio_profile
         audio_format = config.audio_format
-        split = audio_profile == FFmpegAdapter.PROFILE_SPLIT_STEREO
+        split = audio_profile == FFmpegAdapter.PROFILE_SPLIT_STEREO or config.channel_mode == "me-others"
 
         # Build output paths
         audio_output = self._wav_paths(job_dir, split)["audio"]
@@ -119,6 +121,7 @@ class ConvertStage:
             not forced
             and self._source_matches(job, fingerprint)
             and recorded.get("audio_profile") == audio_profile
+            and recorded.get("channel_mode", "mixed") == config.channel_mode
             and not is_stale(outputs=[meta_output], inputs=[input_path])
         )
         if signal_unchanged and all(p.exists() for p in wav_paths.values()):
@@ -148,6 +151,13 @@ class ConvertStage:
                 output_path=str(audio_output),
                 audio_profile=audio_profile,
             )
+            if split and audio_profile != FFmpegAdapter.PROFILE_SPLIT_STEREO:
+                for key_suffix, _, channel in self._SPLIT_CHANNELS:
+                    self.ffmpeg_adapter.encode(
+                        input_path, wav_paths[f"audio{key_suffix}"],
+                        ["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"],
+                        audio_profile=audio_profile, channel=channel,
+                    )
         else:
             logger.info(
                 f"[{self.NAME}] Working WAV "
@@ -189,6 +199,7 @@ class ConvertStage:
                 "channels": FFmpegAdapter.TARGET_CHANNELS,
                 "format": "wav",
                 "audio_profile": audio_profile,
+                "channel_mode": config.channel_mode,
                 "audio_format": audio_format.to_dict(),
             },
             "start_time": start_time.isoformat(),
@@ -196,6 +207,9 @@ class ConvertStage:
             "duration_seconds": duration,
             "pipeline_config": {
                 "min_speakers": config.min_speakers,
+                "channel_mode": config.channel_mode,
+                "my_channel": config.my_channel,
+                "one_on_one": config.one_on_one,
                 "max_speakers": config.max_speakers,
                 "language": config.language,
                 "device": config.device,
@@ -205,6 +219,11 @@ class ConvertStage:
                 "asr_temperature": config.asr_temperature,
                 "asr_condition_on_previous_text": config.asr_condition_on_previous_text,
                 "asr_initial_prompt": config.asr_initial_prompt,
+                "asr_profile": config.asr_profile,
+                "asr_glossary": config.asr_glossary,
+                "asr_vad_onset": config.asr_vad_onset,
+                "asr_vad_offset": config.asr_vad_offset,
+                "asr_chunk_size": config.asr_chunk_size,
                 "asr_vad_filter": config.asr_vad_filter,
                 "asr_vad_min_silence_ms": config.asr_vad_min_silence_ms,
                 "min_turn_duration": config.min_turn_duration,
@@ -252,7 +271,8 @@ class ConvertStage:
         identity = read_config(job_dir / JOB_FILE)
         if identity:
             modes = validate_storage(identity.get("storage"))
-            split = recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
+            split = (recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
+                     or recorded.get("channel_mode") == "me-others")
             if modes["working"] == "discard":
                 for wav in self._wav_paths(job_dir, split).values():
                     wav.unlink(missing_ok=True)
@@ -260,7 +280,8 @@ class ConvertStage:
             return
         if audio_format.keeps_wav:
             return
-        split = recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
+        split = (recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
+                 or recorded.get("channel_mode") == "me-others")
         wav_paths = self._wav_paths(job_dir, split)
         archives = self._archive_targets(job_dir, audio_format, split)
         for key, wav in wav_paths.items():
@@ -363,7 +384,8 @@ class ConvertStage:
         """
         recorded = self._read_recorded_config(job_dir)
         audio_format = self._recorded_format(recorded)
-        split = recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
+        split = (recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
+                 or recorded.get("channel_mode") == "me-others")
 
         paths = self._wav_paths(job_dir, split) if self._keeps_wav(job_dir, audio_format) else {}
         for key, (path, _) in self._archive_targets(job_dir, audio_format, split).items():
@@ -392,6 +414,11 @@ class ConvertStage:
         if not self._source_matches(job):
             return False
         recorded = self._read_recorded_config(job_dir)
+        if recorded.get("channel_mode", "mixed") != job.config.channel_mode:
+            return False
+        meta = read_json(job_dir / self.META_RUN_JSON) or {}
+        if (meta.get("pipeline_config") or {}).get("my_channel", "left") != job.config.my_channel:
+            return False
         recorded_profile = recorded.get("audio_profile")
         if recorded_profile is not None and recorded_profile != job.config.audio_profile:
             return False
@@ -402,6 +429,11 @@ class ConvertStage:
         outputs = list(self.get_output_paths(job_dir).values())
         inputs = [job.input_path] if job.input_path.exists() else []
         return not is_stale(outputs=outputs, inputs=inputs)
+
+    def preflight(self, job: "JobContext") -> None:
+        if job.config.channel_mode == "me-others" and (job.config.force
+                or job.config.force_stage == self.NAME or not self.is_cache_valid(job)):
+            self.ffmpeg_adapter.validate_split_input(job.input_path)
 
     def _source_matches(self, job: "JobContext", current: dict | None = None) -> bool:
         meta = read_json(job.job_dir / self.META_RUN_JSON)

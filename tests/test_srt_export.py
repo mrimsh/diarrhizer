@@ -39,6 +39,21 @@ def test_empty_segments_are_skipped():
     assert [cue[0] for cue in cues] == ["1"]
 
 
+def test_split_overlapping_channel_cues_remain_chronological():
+    words = [{"start": float(i), "end": i + .9, "word": f"w{i}"} for i in range(20)]
+    segments = [
+        {"start": 0., "end": 20., "speaker_id": "Speaker_01", "channel": "right",
+         "text": " ".join(w["word"] for w in words), "words": words},
+        {"start": 2., "end": 3., "speaker_id": "Speaker_00", "channel": "left", "text": "Да"},
+    ]
+    cues = _cues(export_to_srt(segments, _config(channel_mode="me-others", one_on_one=True), "in.wav"))
+    starts = [cue[1].split(" --> ")[0] for cue in cues]
+    assert starts == sorted(starts)
+    assert any(cue[2] == "Я: Да" for cue in cues)
+    remote_text = " ".join(cue[2].removeprefix("Собеседник: ") for cue in cues if cue[2].startswith("Собеседник:"))
+    assert remote_text == segments[0]["text"]
+
+
 def test_long_segment_is_split_at_word_boundaries():
     words = [
         {"start": float(i), "end": float(i) + 0.9, "word": f"w{i}", "speaker_id": "Speaker_00"}

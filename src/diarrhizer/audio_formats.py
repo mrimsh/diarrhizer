@@ -358,6 +358,7 @@ def resolve_audio_format(
 #   audio/archive.<ext> once retention (keep_wav=false) removed it, so transcribe/diarize re-runs
 #   decode whichever copy the job kept. Used by the GUI job scanner too, so it only stats files.
 #   Portable jobs resolve their independent retention paths from job.json; legacy paths remain supported.
+#   A channel suffix resolves only that channel, including archive fallback; never returns the mix.
 # @inputs: job_dir
 # @outputs: Path to the audio to decode, or None when the job has no audio yet
 # @sideEffects: Filesystem stat/glob only
@@ -369,16 +370,17 @@ def archive_path(job_dir: str | Path, extension: str, suffix: str = "") -> Path:
     return media_path(Path(job_dir), "archive", extension, suffix)
 
 
-def find_job_audio(job_dir: str | Path) -> Path | None:
+def find_job_audio(job_dir: str | Path, suffix: str = "") -> Path | None:
     """The audio downstream stages should decode, or None if the job has none yet."""
     from diarrhizer.projects import JOB_FILE, read_config, media_path
     job_dir = Path(job_dir)
     identity = read_config(job_dir / JOB_FILE)
-    wav = media_path(job_dir, "working", "wav") if identity else job_dir / WORKING_WAV
+    wav = (media_path(job_dir, "working", "wav", suffix) if identity
+           else job_dir / f"audio/normalized{suffix}.wav")
     if wav.exists():
         return wav
-    candidates = job_dir.glob("audio/archive/*.*") if identity else job_dir.glob(f"audio/{ARCHIVE_STEM}.*")
-    main_stem = media_path(job_dir, "archive", "wav").stem if identity else ARCHIVE_STEM
+    candidates = job_dir.glob("audio/archive/*.*") if identity else job_dir.glob(f"audio/{ARCHIVE_STEM}{suffix}.*")
+    main_stem = media_path(job_dir, "archive", "wav", suffix).stem if identity else ARCHIVE_STEM + suffix
     archives = sorted(
         (p for p in candidates if p.is_file() and p.stem == main_stem),
         key=lambda p: p.stat().st_mtime,
@@ -387,6 +389,6 @@ def find_job_audio(job_dir: str | Path) -> Path | None:
     if archives:
         return archives[0]
     # An interrupted portable job can still have its temporary WAV.
-    temporary = job_dir / WORKING_WAV
+    temporary = job_dir / f"audio/normalized{suffix}.wav"
     return temporary if temporary.is_file() else None
 # [SEMANTIC-END] ARTIFACTS:JOB_AUDIO
