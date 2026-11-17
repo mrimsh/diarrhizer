@@ -286,6 +286,7 @@ class JobTree(QTreeWidget):
 #   Batch moves recheck queued/busy jobs, preserve artifacts and notify live views of changed paths.
 #   Internal drops and the toolbar open the same optional destination-template renaming preview.
 #   The separate date/name action edits one job in place, including its recording wall time.
+#   A restart checks HF credentials after the final settings are chosen, only for model diarization.
 # @inputs: job folders under the results folder; header clicks; header drags
 # @outputs: view_result_requested, runs_requested, jobs_moved(old-to-new paths)
 # @sideEffects: reads/writes QSettings; deletes or moves job folders on explicit request
@@ -858,15 +859,7 @@ class HistoryScreen(QWidget):
                 f"Нужно заново сконвертировать исходный файл, но его нет на месте:\n{kwargs['input_path']}",
             )
             return
-        # Diarization is part of the restart (or of what it invalidates): same
-        # check the Result screen makes before "Пересчитать спикеров".
-        if "diarize" in rebuilt and not hf_token_present():
-            QMessageBox.warning(
-                self, title, "Для диаризации нужен HF-токен — задайте его на экране «Настройки»."
-            )
-            return
-
-        drops_names = restart_drops_speaker_names(mode, stage)
+        drops_names = restart_drops_speaker_names(mode, stage) and not kwargs.get("one_on_one")
         intro = (
             f"Перезапустить этап «{STAGE_TITLES[stage]}» задания «{job.input_name}» ({job.date_label})?\n\n"
             f"Заново выполнятся: {', '.join(STAGE_TITLES[name] for name in rebuilt)}. "
@@ -893,6 +886,11 @@ class HistoryScreen(QWidget):
             self.refresh()
             return
         mode, kwargs = plan
+        if "diarize" in restart_stages(mode, stage) and not kwargs.get("one_on_one") and not hf_token_present():
+            QMessageBox.warning(
+                self, title, "Для диаризации нужен HF-токен — задайте его на экране «Настройки»."
+            )
+            return
         label = f"{job.input_name} (перезапуск этапа «{STAGE_TITLES[stage]}»)"
         self.runs_requested.emit([QueuedRun(mode=mode, kwargs=kwargs, label=label)])
 

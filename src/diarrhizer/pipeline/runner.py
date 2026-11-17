@@ -17,7 +17,9 @@ from diarrhizer.utils import read_json, write_json_atomic
 from diarrhizer.artifacts import locked_job, job_write_lock, recover_bundles
 from diarrhizer.pipeline.settings import FULL_STAGES, read_job_settings, recorded_stage_names, build_stages, set_aside_speaker_names
 from diarrhizer.projects import JOB_FILE, reserve_job, resolve_input
-from diarrhizer.pipeline.channels import validate_channel_settings, default_channel_speakers, TRACK_DEFAULTS
+from diarrhizer.pipeline.channels import (
+    CHANNEL_DEFAULTS, TRACK_DEFAULTS, channel_settings, default_channel_speakers, validate_channel_settings,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -348,6 +350,7 @@ _RESUMABLE_SETTINGS = (
 #   New project/team jobs use portable naming/storage identity; resume keeps that identity unchanged.
 #   A supplied recorded_at is for new-job allocation only; metadata edits use the locked rename API.
 #   Channel mode/local-channel changes require restarting from conversion; mixed and separated caches differ.
+#   Rewriting a model-free marker for the same channel layout leaves saved speaker names intact.
 # @inputs: input/out paths, optional job/stages, explicit configuration overrides
 # @outputs: per-stage results and artifacts
 # @sideEffects: Reads saved settings, then executes pipeline stages with disk/GPU effects
@@ -558,6 +561,7 @@ def _run_pipeline(
             f"pipeline order ({', '.join(stage_names)})"
         )
     convert_in_range = "convert" in stage_names[from_index:to_index + 1]
+    recorded_config = {}
     if job_dir is not None:
         recorded = read_json(Path(job_dir) / "meta" / "run.json") or {}
         recorded_config = recorded.get("pipeline_config", {})
@@ -652,6 +656,10 @@ def _run_pipeline(
         audio_format=audio_format,
         min_turn_duration=min_turn_duration,
         stages=tuple(name for name in stage_names if name),
+    )
+    keep_channel_speakers = config.one_on_one and all(
+        recorded_config.get(key, CHANNEL_DEFAULTS[key]) == value
+        for key, value in channel_settings(config).items()
     )
 
     # Create job context
@@ -767,7 +775,7 @@ def _run_pipeline(
 
             # Only a stage that actually runs changes the saved name mapping.
             # Pending/cancelled jobs and cached diarization leave it untouched.
-            if stage_name == "diarize":
+            if stage_name == "diarize" and not keep_channel_speakers:
                 set_aside_speaker_names(job_dir)
                 if not preserve_speakers:
                     config.speakers = default_channel_speakers(config) or None

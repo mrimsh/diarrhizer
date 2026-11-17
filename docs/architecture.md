@@ -1,6 +1,6 @@
 # Architecture
 
-Current source version: **2.8**, shared by the CLI, desktop GUI and Windows launcher.
+Current source version: **2.10**, shared by the CLI, desktop GUI and Windows launcher.
 The [2.x roadmap](roadmap.md) describes the direction toward autonomous call logging, a separate
 call agent and optional integration skills; those capabilities remain planned.
 
@@ -439,10 +439,14 @@ marker and never checks HF credentials or creates a diarization adapter. The `as
 therefore covers one-on-one requirements; group mode needs the `full` profile.
 
 Merge applies the existing text-preserving speaker assignment separately to each channel, reserves
-`Speaker_00` for the local voice, maps remote speakers to `Speaker_01` and above, and stably sorts turns
-by start. One-on-one uses `Speaker_01` for all remote speech. Overlapping intervals are retained;
+`Speaker_00` for the local voice, and maps remote speakers to `Speaker_01` and above. It uses aligned
+word timestamps to split recognition chunks across long pauses or replies starting in a gap on the
+other source, then stably sorts the resulting turns by start. Chunks without reliable alignment keep
+their text and bounds. One-on-one uses `Speaker_01` for all remote speech. Overlapping intervals are retained;
 split SRT cues are sorted by start as well. Defaults name the local voice `Я`, and the single remote
-voice `Собеседник`; user mappings can override both. Ordinary stereo and microphone echo are not separated.
+voice `Собеседник`; user mappings can override both. A restart of a one-on-one job with unchanged
+channel settings needs no HF token and retains its names. Restart from conversion to change the sources;
+restart from merge to rebuild turns from existing ASR. Ordinary stereo and microphone echo are not separated.
 
 All channel/track choices are recorded for CLI/GUI resume. Mode/channel/track changes require restarting from
 convert, which can reuse unchanged WAVs and ASR while recording the new layout. Cache checks

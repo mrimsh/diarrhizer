@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 #   In me-others mode both full-length channels are transcribed independently with one reusable adapter;
 #   transcript.json retains per-channel results and a chronological combined view (including overlap).
 #   Track-mode results also record the selected source_track; caches distinguish source layouts.
+#   Reusing a track transcript requires matching source_track for each internal slot.
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/asr/transcript.json, artifacts/asr/transcript.txt (readable paragraphs, no speakers)
 # @sideEffects: Loads WhisperX model, writes transcript JSON to disk, unloads the
@@ -362,7 +363,13 @@ class TranscribeStage:
         if any(meta.get(key, TRACK_DEFAULTS[key]) != value for key, value in track_settings(job.config).items()):
             return False
         if job.config.channel_mode == "me-others":
-            if set(data.get("channels", {})) != {"left", "right"}:
+            channels = data.get("channels")
+            if (not isinstance(channels, dict) or set(channels) != {"left", "right"}
+                    or not all(isinstance(result, dict) for result in channels.values())):
+                return False
+            if job.config.channel_source == "tracks" and any(
+                channels[channel].get("source_track") != track for channel, track in channel_tracks(job.config).items()
+            ):
                 return False
             inputs = [find_job_audio(job_dir, suffix=f"_{channel}") for channel in ("left", "right")]
             if is_stale(outputs=[artifacts["transcript"]], inputs=[p for p in inputs if p is not None]):

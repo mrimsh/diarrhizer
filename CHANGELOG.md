@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.10 — 2026-11-18
+
+- In me/others mode, split long recognition chunks at timed pauses and replies from the other
+  source while retaining simultaneous speech. Keep replies from separate sources distinct even
+  when both speakers have the same display name.
+- Fix stage restarts: one-on-one runs need no HF token and retain names when channel settings
+  are unchanged. Rebuild extracted audio when track-to-channel mapping changes.
+
 ## 2.9 — 2026-11-17
 
 - Update the standalone launcher from its interface using stable GitHub Release assets. Verify

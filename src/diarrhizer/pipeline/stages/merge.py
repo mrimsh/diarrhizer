@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from diarrhizer.export.speakers import normalize_speaker_id
+from diarrhizer.export.turns import TURN_GAP_SECONDS
 from diarrhizer.pipeline.cache import config_mismatch, is_stale
 from diarrhizer.utils import read_json, write_json_atomic
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 #   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
 #   Me-others merges each channel independently, reserves Speaker_00 for the local voice and offsets
 #   other speaker IDs; stable chronological sorting retains overlapping turns on the original timeline.
+#   Channel cache_version=3 rebuilds phrases that used to span replies from the other source.
 # @inputs: artifacts/asr/transcript.json (required), artifacts/diar/diarization.json (optional)
 # @outputs: artifacts/merged/segments.json
 # @sideEffects: Reads JSON files, writes merged segments to disk,
@@ -48,6 +50,7 @@ class MergeStage:
     # Stage name for identification
     NAME = "merge"
     CACHE_VERSION = 2  # Never reuse results that may have dropped untimed words.
+    CHANNEL_CACHE_VERSION = 3
 
     # Output paths relative to job directory
     MERGE_DIR = "merged"
@@ -145,7 +148,7 @@ class MergeStage:
             "num_segments": len(merged_segments),
             "metadata": {
                 **channel_settings(job.config),
-                "cache_version": self.CACHE_VERSION,
+                "cache_version": self._cache_version(job),
                 "input_transcript": str(transcript_input),
                 "input_diarization": str(diar_input),
                 "output_path": str(segments_output),
@@ -224,7 +227,7 @@ class MergeStage:
         if not isinstance(data, dict):
             return False
         meta = data.get("metadata") or {}
-        if not isinstance(meta, dict) or meta.get("cache_version") != self.CACHE_VERSION:
+        if not isinstance(meta, dict) or meta.get("cache_version") != self._cache_version(job):
             return False
         for key, expected in channel_settings(job.config).items():
             default = CHANNEL_DEFAULTS[key]
@@ -235,6 +238,9 @@ class MergeStage:
             {"min_turn_duration": job.config.min_turn_duration},
         )
 
+    def _cache_version(self, job: "JobContext") -> int:
+        return self.CHANNEL_CACHE_VERSION if job.config.channel_mode == "me-others" else self.CACHE_VERSION
+
 
 # [SEMANTIC-END] STAGE:MERGE
 
@@ -243,7 +249,9 @@ class MergeStage:
 # @purpose: Join independent local/remote transcripts without losing simultaneous speech
 # @description: Existing text-preserving alignment runs separately for each channel. Local speech is
 #   Speaker_00; remote diarization labels are mapped to Speaker_01 and above. One-on-one assigns a
-#   single remote speaker without consuming diarization. No pauses are removed and no times shifted.
+#   single remote speaker without consuming diarization. Split aligned phrases at a long pause or
+#   when the other source begins speech between their words. Genuine overlap is retained. Without
+#   reliable word alignment, preserve the original phrase and its timing.
 #   In track mode turns/words carry source_track alongside the legacy internal channel slot.
 # @inputs: per-channel transcript, remote diarization, pipeline settings
 # @outputs: stable chronological list of speaker turns with source channel on turns and words
@@ -252,10 +260,14 @@ class MergeStage:
 # @see: AUDIO:CHANNEL_MODE, STAGE:MERGE, MERGE:ASSIGN_SPEAKERS
 def merge_channels(transcript: dict, diar_segments: list[dict], config) -> list[dict]:
     channels = require_channel_transcript(transcript)
+    tracks = channel_tracks(config) if config.channel_source == "tracks" else {}
+    if (transcript["metadata"].get("channel_source", "stereo") != config.channel_source
+            or any(channels[channel].get("source_track") != track for channel, track in tracks.items())):
+        raise ValueError("Transcript sources differ from this run; rerun the transcribe stage")
     remote_labels = sorted({normalize_speaker_id(seg.get("speaker", "Speaker_00"))
                             for seg in diar_segments})
     mapping = {label: f"Speaker_{i + 1:02d}" for i, label in enumerate(remote_labels)}
-    merged = []
+    channel_turns = {}
     for channel, result in channels.items():
         local = channel == config.my_channel
         turns = assign_speakers(
@@ -265,18 +277,50 @@ def merge_channels(transcript: dict, diar_segments: list[dict], config) -> list[
         )
         for turn in turns:
             turn["channel"] = channel
-            if config.channel_source == "tracks":
-                turn["source_track"] = channel_tracks(config)[channel]
+            if tracks:
+                turn["source_track"] = tracks[channel]
             turn["speaker_id"] = ("Speaker_00" if local else
                                   mapping.get(turn["speaker_id"], "Speaker_01"))
             for word in turn.get("words", []):
                 word["channel"] = channel
-                if config.channel_source == "tracks":
-                    word["source_track"] = channel_tracks(config)[channel]
+                if tracks:
+                    word["source_track"] = tracks[channel]
                 word["speaker_id"] = ("Speaker_00" if local else
                                       mapping.get(word["speaker_id"], "Speaker_01"))
-            merged.append(turn)
+        channel_turns[channel] = turns
+    onsets = {channel: sorted(start for turn in turns for start in _speech_starts(turn))
+              for channel, turns in channel_turns.items()}
+    merged = [piece for channel, turns in channel_turns.items() for turn in turns
+              for piece in _split_channel_turn(turn, onsets["right" if channel == "left" else "left"])]
     return sorted(merged, key=lambda seg: seg["start"])
+
+
+def _speech_starts(turn: dict) -> list[float]:
+    words = turn.get("words")
+    if words and not turn.get("alignment_warning"):
+        return [word["start"] for word in words]
+    return [turn["start"]]
+
+
+def _split_channel_turn(turn: dict, other_starts: list[float]) -> list[dict]:
+    words = turn.get("words")
+    if not words or turn.get("alignment_warning"):
+        return [turn]
+    runs = [[words[0]]]
+    end = words[0]["end"]
+    for word in words[1:]:
+        start = word["start"]
+        position = bisect.bisect_left(other_starts, end)
+        other_in_pause = position < len(other_starts) and other_starts[position] < start
+        if start - end >= TURN_GAP_SECONDS or other_in_pause:
+            runs.append([])
+            end = word["end"]
+        runs[-1].append(word)
+        end = max(end, word["end"])
+    return [{**turn, "start": run[0]["start"], "end": max(word["end"] for word in run),
+             "text": (turn["text"] if len(runs) == 1 else
+                      " ".join(word["word"].strip() for word in run if word["word"].strip())),
+             "words": run} for run in runs]
 # [SEMANTIC-END] MERGE:CHANNEL_TURNS
 
 

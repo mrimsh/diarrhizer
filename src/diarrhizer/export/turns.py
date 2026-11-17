@@ -28,7 +28,7 @@ def format_timestamp(seconds: float | None) -> str:
 # @description: The merge stage emits one segment per Whisper phrase (split further at speaker
 #   changes), so one reply is often spread over several lines with the same name. group_turns()
 #   joins consecutive segments whose speakers resolve to the same display name - which also merges
-#   two diarization ids mapped to one person - and starts a new turn after a pause of
+#   two diarization ids mapped to one person within the same channel - and starts a new turn after a pause of
 #   TURN_GAP_SECONDS or, past TURN_SOFT_LIMIT characters, at the next sentence end.
 #   speaking_time() sums segment durations per display name for speaker summaries.
 #   result.json keeps the fine-grained segments; only md/txt and the GUI view use turns.
@@ -43,17 +43,20 @@ def group_turns(
     """Join consecutive same-speaker segments into turns, in input order."""
     turns: list[dict[str, Any]] = []
     length = 0
+    last_channel = None
     for seg in segments:
         speaker_id = normalize_speaker_id(seg.get("speaker_id") or "Speaker_00")
         name = resolve_speaker_name(speaker_id, speakers)
         start = float(seg.get("start") or 0.0)
         end = float(seg.get("end") or start)
         text = (seg.get("text") or "").strip()
+        channel = seg.get("channel")
 
         last = turns[-1] if turns else None
         continues = (
             last is not None
             and last["speaker_name"] == name
+            and last_channel == channel
             and start - last["end"] < TURN_GAP_SECONDS
             and not (length >= TURN_SOFT_LIMIT and last["text"].endswith(SENTENCE_END))
         )
@@ -77,6 +80,7 @@ def group_turns(
             }
         )
         length = len(text)
+        last_channel = channel
     return turns
 
 

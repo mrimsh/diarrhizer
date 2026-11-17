@@ -23,6 +23,7 @@ from diarrhizer.audio_formats import find_job_audio
 from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.artifacts import LOCK_DIR, job_write_lock, bundle_valid
 from diarrhizer.pipeline.runner import STAGE_SETTINGS
+from diarrhizer.pipeline.channels import CHANNEL_DEFAULTS
 from diarrhizer.pipeline.settings import RECORDED_RUN_KEYS, read_job_settings, set_aside_speaker_names
 from diarrhizer.projects import JOB_FILE, iter_job_dirs, job_context, read_config, export_path, resolve_input
 
@@ -334,7 +335,8 @@ def _recorded_run_kwargs(job_dir: Path, meta: dict) -> dict:
 #   dropped (speakers=None; the runner backs up speakers.json only when diarization actually starts) when
 #   it is. All plans reuse the recorded settings (RECORDED_RUN_KEYS, the full audio format) so the job
 #   behaves like the original run.
-#   Channel mode is preserved; explicitly recalculating speakers enables diarization of others.
+#   Channel mode is preserved; a model-free restart with unchanged sources keeps speaker names.
+#   Explicitly recalculating speakers enables diarization of others.
 # @inputs: job_dir (meta/run.json, artifacts present on disk, speakers.json), stage and overrides for restart_plan
 # @outputs: (mode, kwargs) for PipelineWorker, or None when there is nothing to do
 # @sideEffects: Reads job files only; pending/cancelled plans never mutate names or artifacts
@@ -400,6 +402,7 @@ def restart_plan(job_dir: Path, stage: str, overrides: Optional[dict] = None) ->
     if not_allowed:
         raise ValueError(f"Restarting {stage!r} cannot change: {', '.join(not_allowed)}")
     kwargs = _recorded_run_kwargs(job_dir, meta)
+    recorded_channels = {key: kwargs.get(key, default) for key, default in CHANNEL_DEFAULTS.items()}
     kwargs.update(overrides)
     if kwargs.get("channel_mode") == "me-others":
         mode = "me_others"
@@ -407,7 +410,10 @@ def restart_plan(job_dir: Path, stage: str, overrides: Optional[dict] = None) ->
         mode = "full"
         kwargs["one_on_one"] = False
     kwargs.update(from_stage=stage, force_stage=stage)
-    if restart_drops_speaker_names(mode, stage):
+    same_model_free_call = kwargs.get("one_on_one") and all(
+        kwargs.get(key, default) == recorded_channels[key] for key, default in CHANNEL_DEFAULTS.items()
+    )
+    if restart_drops_speaker_names(mode, stage) and not same_model_free_call:
         kwargs["speakers"] = None
     return mode, kwargs
 # [SEMANTIC-END] GUI:JOB_PLANS

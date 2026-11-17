@@ -92,6 +92,7 @@ MIN_TURN_TOOLTIP = (
 #   ASR profile/glossary and actual VAD controls can be changed independently; invalid VAD hysteresis is rejected.
 #   Channel mode/local channel can change from conversion; one-on-one can change from diarization.
 #   Track source and one-based voice/playback selections are editable when restarting conversion.
+#   The mixed mode disables saved L/R and track processing options for that run.
 # @inputs: intro text, settings keys, recorded kwargs, QSettings (custom model list), optional EnvironmentProbe
 # @outputs: overrides() -> {run_pipeline setting: new value}, accepted/rejected dialog result
 # @sideEffects: Reads audio_formats.json and the HF cache listing to fill the choices; writes nothing
@@ -445,7 +446,12 @@ class RestartDialog(QDialog):
     # --- reading the form back --------------------------------------------------
 
     def _values(self) -> dict:
-        return {key: getter() for key, getter in self._getters.items()}
+        values = {key: getter() for key, getter in self._getters.items()}
+        if values.get("channel_mode") == "mixed":
+            for key in ("channel_source", "one_on_one"):
+                if key in values:
+                    values[key] = getattr(PipelineConfig, key)
+        return values
 
     def _problem(self) -> Optional[str]:
         values = self._values()

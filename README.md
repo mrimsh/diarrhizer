@@ -1,4 +1,4 @@
-# Diarrhizer 2.9
+# Diarrhizer 2.10
 
 By MRIMSH
 
@@ -8,7 +8,7 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
 and a CLI (`python -m diarrhizer run …`).
 
-**2.9** is the shared application version for the CLI, desktop GUI and Windows launcher.
+**2.10** is the shared application version for the CLI, desktop GUI and Windows launcher.
 Check it with `python -m diarrhizer --version`; the GUI shows it in the window title and sidebar.
 The launcher downloads the current GitHub `main` application when setting up or updating an environment;
 the downloaded application's version can differ from the launcher's own build version.
@@ -463,6 +463,10 @@ with both voices in both channels is unsuitable for L/R separation.
 In the GUI, choose **Я / остальные**, select **Мой канал: Левый / Правый**, and enable
 **Один собеседник — без диаризации** for a one-on-one call. This needs no HF token; the matching
 environment check is `python -m diarrhizer doctor --profile asr`.
+Replies are placed on the shared timeline. When aligned words leave room for a reply on the other
+source, a long recognition chunk is split there. Simultaneous speech keeps its original timing.
+To rebuild the order of replies from existing recognition, restart **Объединение** in History.
+To change which sources contain the voices, restart **Конвертация** and select them again.
 
 For a recorder producing tracks **1 = me, 2 = incoming call, 3 = joint mix**, choose
 **Источники голосов → Отдельные аудиодорожки**, **Я — дорожка: 1**, **Остальные — дорожка: 2**,

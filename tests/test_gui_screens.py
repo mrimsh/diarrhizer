@@ -546,6 +546,32 @@ def test_history_restart_that_redoes_diarization_needs_an_hf_token(qapp, isolate
     assert len(received) == 1
 
 
+def test_history_restart_checks_token_after_choosing_one_on_one(qapp, isolated, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    job_dir = _complete_job(out)
+    _record_source(job_dir, _touch(tmp_path / "call.wav"))
+    meta_path = job_dir / "meta/run.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.setdefault("pipeline_config", {}).update(channel_mode="me-others", my_channel="right", one_on_one=True)
+    _write(meta_path, meta)
+    isolated().setValue(settings_keys.OUT_DIR, str(out))
+    monkeypatch.setattr(history_screen, "hf_token_present", lambda: False)
+    warnings = _warnings(monkeypatch)
+    screen = history_screen.HistoryScreen()
+    received = []
+    screen.runs_requested.connect(received.extend)
+
+    _answer(monkeypatch)
+    screen._restart(screen._jobs[0], "convert")
+    assert len(received) == 1 and received[0].kwargs["one_on_one"] is True
+    assert received[0].kwargs["my_channel"] == "right"
+    assert warnings == []
+
+    _answer(monkeypatch, edit=lambda dialog: dialog.field("one_on_one").setChecked(False))
+    screen._restart(screen._jobs[0], "diarize")
+    assert len(received) == 1 and "HF-токен" in warnings[0]
+
+
 def test_history_restart_of_convert_needs_the_source_file(qapp, isolated, tmp_path, monkeypatch):
     out = tmp_path / "out"
     job_dir = _complete_job(out)

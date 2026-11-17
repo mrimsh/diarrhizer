@@ -83,6 +83,15 @@ def test_two_ids_mapped_to_one_name_merge():
     assert turns[0]["speaker_ids"] == ["Speaker_00", "Speaker_02"]
 
 
+def test_equal_names_on_different_channels_do_not_merge_replies():
+    turns = group_turns(
+        [{**_seg(0, 1, "Speaker_00", "Привет"), "channel": "left"},
+         {**_seg(1, 2, "Speaker_01", "Ответ"), "channel": "right"}],
+        {"Speaker_00": "Иван", "Speaker_01": "Иван"},
+    )
+    assert [turn["text"] for turn in turns] == ["Привет", "Ответ"]
+
+
 def test_pyannote_ids_are_normalized():
     turns = group_turns([_seg(0, 1, "SPEAKER_01", "a")])
     assert turns[0]["speaker_id"] == "Speaker_01"

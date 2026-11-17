@@ -141,6 +141,36 @@ def test_group_diarizes_only_others_and_offsets_their_ids(tmp_path, fake_media, 
     assert all(s["status"] == "cached" for s in rerun["stages"])
 
 
+def test_one_on_one_interleaves_replies_inside_long_asr_chunks(tmp_path, fake_media, monkeypatch):
+    def transcribe(self, audio_path, language=None):
+        entries = ([('Привет!', 0.2, 0.5), ('Отлично.', 2.2, 2.6)] if '_left' in Path(audio_path).stem
+                   else [('Как дела?', 1.0, 1.6), ('Пока!', 3.1, 3.4)])
+        words = []
+        for text, start_time, end_time in entries:
+            tokens = text.split()
+            step = (end_time - start_time) / len(tokens)
+            words.extend(dict(word=token, start=start_time + index * step,
+                              end=start_time + (index + 1) * step, segment_index=0)
+                         for index, token in enumerate(tokens))
+        return {"segments": [{"start": 0, "end": 5, "text": " ".join(entry[0] for entry in entries)}],
+                "words": words, "language": "ru"}
+
+    monkeypatch.setattr(ASR, 'transcribe', transcribe)
+    job = Path(start(tmp_path, one_on_one=True)["job_dir"])
+    segments = read(job / 'export/result.json')['segments']
+    assert [(seg['start'], seg['speaker_id'], seg['text']) for seg in segments] == [
+        (0.2, 'Speaker_00', 'Привет!'), (1.0, 'Speaker_01', 'Как дела?'),
+        (2.2, 'Speaker_00', 'Отлично.'), (3.1, 'Speaker_01', 'Пока!'),
+    ]
+    assert not Diar.calls
+    (job / 'speakers.json').write_text(json.dumps({'Speaker_00': 'Мария', 'Speaker_01': 'Иван'}), encoding='utf-8')
+    _, kwargs = restart_plan(job, 'diarize')
+    run_pipeline(**kwargs)
+    assert read(job / 'export/result.json')['metadata']['speakers'] == {'Speaker_00': 'Мария', 'Speaker_01': 'Иван'}
+    assert not (job / 'speakers.before-rediarize.json').exists()
+    assert not Diar.calls
+
+
 @pytest.mark.parametrize("portable", [False, True])
 def test_archives_resume_each_channel_after_working_wav_cleanup(tmp_path, fake_media, portable):
     options = {"project": "Calls", "storage": {"working": "discard", "archive": "template"}} if portable else {}
@@ -310,6 +340,23 @@ def test_track_archives_and_changed_selection(multitrack_media, tmp_path, adapte
     assert read_job_settings(job)['my_track'] == 2
     segments = read(job / 'merged/segments.json')['segments']
     assert {s['source_track'] for s in segments if s['speaker_id'] == 'Speaker_00'} == {2}
+
+
+def test_track_slot_change_rebuilds_wavs_instead_of_relabelling_old_audio(multitrack_media, tmp_path, adapters):
+    result = run_pipeline(input_path=multitrack_media, out_dir=tmp_path / 'out', device='cpu',
+                          channel_mode='me-others', channel_source='tracks', one_on_one=True, keep_wav=True)
+    job = Path(result['job_dir'])
+    left_wav = job / 'audio/normalized_left.wav'
+    right_wav = job / 'audio/normalized_right.wav'
+    original_left, original_right = samples(left_wav), samples(right_wav)
+    assert amplitude(original_left, 300) > 20 * amplitude(original_left, 600)
+    assert amplitude(original_right, 600) > 20 * amplitude(original_right, 300)
+
+    result = run_pipeline(job_dir=job, out_dir=tmp_path / 'out', my_channel='right')
+    assert [stage['status'] for stage in result['stages'][:2]] == ['completed', 'completed']
+    assert samples(left_wav) == original_right
+    assert samples(right_wav) == original_left
+    assert read(job / 'asr/transcript.json')['channels']['right']['source_track'] == 1
 
 
 @pytest.mark.parametrize('options', [dict(my_track=0), dict(others_track=1), dict(my_track=4), dict(mix_track=4)])

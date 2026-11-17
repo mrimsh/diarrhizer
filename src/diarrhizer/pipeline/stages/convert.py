@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 #   before any stage runs, and feeds each channel downstream without trimming silence or shifting time.
 #   channel_source=tracks extracts explicit one-based audio streams into the same internal slots;
 #   the chosen mix track (or a mix of the two voices) is used only for playback, never for ASR.
+#   Reuse requires the recorded slot-to-track mapping; old track artifacts without it are rebuilt.
 #   config.audio_format (CONFIG:AUDIO_FORMATS) may add an archive copy of each of those files
 #   (audio/archive[_left|_right].<ext>), encoded from the original input with the same filters; with
 #   keep_wav=false, finalize() drops the working WAVs once the whole job completed, leaving only archives.
@@ -118,6 +119,7 @@ class ConvertStage:
         # changed since the last conversion, rewriting it would bump its mtime
         # and needlessly invalidate transcribe/diarize.
         recorded = self._read_recorded_config(job_dir)
+        tracks = channel_tracks(config) if config.channel_source == "tracks" else None
         fingerprint = source_fingerprint(input_path)
         forced = config.force or config.force_stage == self.NAME
         signal_unchanged = (
@@ -125,6 +127,7 @@ class ConvertStage:
             and self._source_matches(job, fingerprint)
             and recorded.get("audio_profile") == audio_profile
             and recorded.get("channel_mode", "mixed") == config.channel_mode
+            and recorded.get("track_slots") == tracks
             and all(recorded.get(key, TRACK_DEFAULTS[key]) == value for key, value in track_settings(config).items())
             and not is_stale(outputs=[meta_output], inputs=[input_path])
         )
@@ -215,6 +218,7 @@ class ConvertStage:
                 "audio_profile": audio_profile,
                 "channel_mode": config.channel_mode,
                 **track_settings(config),
+                **({"track_slots": tracks} if tracks is not None else {}),
                 "audio_format": audio_format.to_dict(),
             },
             "start_time": start_time.isoformat(),
@@ -433,6 +437,8 @@ class ConvertStage:
         if any(recorded.get(key, TRACK_DEFAULTS[key]) != value for key, value in track_settings(job.config).items()):
             return False
         if recorded.get("channel_mode", "mixed") != job.config.channel_mode:
+            return False
+        if job.config.channel_source == "tracks" and recorded.get("track_slots") != channel_tracks(job.config):
             return False
         meta = read_json(job_dir / self.META_RUN_JSON) or {}
         if (meta.get("pipeline_config") or {}).get("my_channel", "left") != job.config.my_channel:
