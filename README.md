@@ -1,4 +1,4 @@
-# Diarrhizer 2.8
+# Diarrhizer 2.9
 
 By MRIMSH
 
@@ -8,10 +8,12 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
 and a CLI (`python -m diarrhizer run …`).
 
-**2.8** is the shared application version for the CLI, desktop GUI and Windows launcher.
+**2.9** is the shared application version for the CLI, desktop GUI and Windows launcher.
 Check it with `python -m diarrhizer --version`; the GUI shows it in the window title and sidebar.
 The launcher downloads the current GitHub `main` application when setting up or updating an environment;
 the downloaded application's version can differ from the launcher's own build version.
+The standalone exe can also update itself with **Обновить лаунчер…**, using the latest stable GitHub
+Release asset, verified before restart with a backup and rollback on failed startup.
 Every new commit increments the minor component (`2.0 → 2.1 → 2.2`); see the
 [version policy](AGENTS.md#version-policy-must-follow) and [changelog](CHANGELOG.md).
 The published [2.0 release notes](CHANGELOG.md#20--2026-11-06) remain available.

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.9 — 2026-11-17
+
+- Update the standalone launcher from its interface using stable GitHub Release assets. Verify
+  SHA-256, size, x64 PE and version before confirmation; replace after shutdown with a backup and
+  restore the old executable if the new window fails to acknowledge startup. Preserve the state
+  path, environments and user data; retain a durable update log and support cancellation/retry.
+
 ## 2.8 — 2026-11-17
 
 - Support separate audio tracks for me/others in CLI and GUI, with one-based voice-track selection

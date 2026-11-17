@@ -1,6 +1,7 @@
 """Independent Tk launcher; no Qt, torch or Diarrhizer imports."""
 
 import argparse
+import json
 import os
 import queue
 import subprocess
@@ -20,6 +21,7 @@ from .config import (
     Settings,
     State,
     application_source,
+    atomic_text,
     launcher_home,
 )
 from .existing import inspect_environment, remember_environment
@@ -31,6 +33,12 @@ from .launch import (
     write_start_files,
 )
 from .repository import SOURCE_LABEL
+from .self_update import (
+    discard_update,
+    latest_launcher,
+    prepare_update,
+    start_replacement,
+)
 from .setup import STEPS, SetupWorker, check_ready
 from .system import discover_pythons, gpu_description
 
@@ -43,6 +51,8 @@ from .system import discover_pythons, gpu_description
 #   Selecting a venv reads its parameters asynchronously; adopting it is an explicit action. Runtime
 #   path edits are saved without pip; interpreter/device changes use the confirmed setup flow.
 #   Title/header display the shared application release and sole author without loading the processing stack.
+#   Self-update downloads/verifies a release off-thread, then confirms restart before handing off
+#   replacement to a hidden helper. The single-instance lock is released before the new exe starts.
 # @inputs: one local state file, user paths/device/download choices
 # @outputs: setup progress/log, retry/repair controls, GUI/shortcut/start-folder actions
 # @sideEffects: Native dialogs, background setup/probes and user-requested shortcuts
@@ -59,6 +69,9 @@ class Launcher:
         self.available = False
         self.closing = False
         self.controls = []
+        self.self_updating = False
+        self.self_update_handoff = False
+        self.self_update_cancel = threading.Event()
         settings = self.state.settings if self.state else Settings.defaults(source, state_path.parent)
         self.variables = {key: (tk.BooleanVar(value=value) if isinstance(value, bool) else tk.StringVar(value=value))
                           for key, value in asdict(settings).items()}
@@ -144,6 +157,8 @@ class Launcher:
         update_actions.grid(row=8, column=0, sticky="w", pady=(6, 0))
         self.update_button = ttk.Button(update_actions, text="Обновить приложение", command=lambda: self.begin(update=True))
         self.update_button.pack(side="left")
+        self.self_update_button = ttk.Button(update_actions, text="Обновить лаунчер…", command=self.update_launcher)
+        self.self_update_button.pack(side="left", padx=8)
 
         self.log = ScrolledText(body, height=9, wrap="word", font=("Consolas", 9), state="disabled")
         self.log.grid(row=5, column=0, sticky="nsew")
@@ -169,6 +184,7 @@ class Launcher:
             variable.trace_add("write", lambda *_: self.refresh())
         self.refresh()
         root.after(100, self.poll)
+        root.after(1500, self._report_launcher_update)
         if probe:
             threading.Thread(target=self._discover, daemon=True).start()
 
@@ -261,7 +277,7 @@ class Launcher:
 
     def refresh(self):
         changed = self.state is None or self._settings() != self.state.settings
-        idle = not self.busy and not self.scanning
+        idle = not self.busy and not self.scanning and not self.self_updating
         for control in self.controls:
             control.configure(state="normal" if idle else "disabled")
         self.setup_button.configure(state="normal" if idle else "disabled")
@@ -272,13 +288,15 @@ class Launcher:
             label = "Повторить: " + title
         self.setup_button.configure(text=label)
         self.repair_button.configure(state="normal" if idle and self.state else "disabled")
-        self.cancel_button.configure(state="normal" if self.busy else "disabled")
+        self.cancel_button.configure(state="normal" if (self.busy or self.self_updating)
+                                     and not self.self_update_handoff else "disabled")
         self.update_button.configure(state="normal" if idle and self.available and not changed else "disabled")
+        self.self_update_button.configure(state="normal" if idle else "disabled")
         for button in (self.launch_button, self.shortcut_button, self.folder_button):
             button.configure(state="normal" if idle and self.available and not changed else "disabled")
 
     def begin(self, *, repair=False, update=False):
-        if self.busy or self.scanning:
+        if self.busy or self.scanning or self.self_updating:
             return
         try:
             settings = self._settings()
@@ -328,9 +346,117 @@ class Launcher:
             messagebox.showerror("Настройка не началась", str(exc), parent=self.root)
 
     def stop(self):
+        if self.self_update_handoff:
+            return
+        if self.self_updating:
+            self.self_update_cancel.set()
+            self.status.set("Остановка обновления лаунчера… Текущий exe сохранён.")
+            return
         if self.worker:
             self.worker.cancel.set()
             self.status.set("Остановка текущего шага… Журнал и завершённые этапы будут сохранены.")
+
+    def update_launcher(self):
+        if self.busy or self.scanning or self.self_updating:
+            return
+        if os.name != "nt" or not getattr(sys, "frozen", False):
+            messagebox.showinfo("Обновление лаунчера", "Самообновление доступно в самостоятельном Diarrhizer.exe. "
+                                "Эта копия запущена из Python.", parent=self.root)
+            return
+        self.self_updating = True
+        self.self_update_cancel.clear()
+        self.status.set("Проверка опубликованного релиза лаунчера на GitHub…")
+        self.detail.configure(mode="indeterminate")
+        self.detail.start(12)
+        self.refresh()
+
+        def prepare():
+            try:
+                release = latest_launcher(__version__)
+                if release is None:
+                    self.events.put({"kind": "launcher_current"})
+                    return
+                self.events.put({"kind": "launcher_downloading", "version": release.version, "size": release.size})
+                prepared = prepare_update(release, Path(sys.executable), self.state_path,
+                                          self.events.put, self.self_update_cancel)
+                self.events.put({"kind": "launcher_prepared", "prepared": prepared})
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                self.events.put({"kind": "launcher_error", "message": str(exc)})
+        threading.Thread(target=prepare, daemon=True).start()
+
+    def _report_launcher_update(self):
+        notice = self.state_path.parent / "launcher-updates" / "last-result.json"
+        try:
+            if not notice.exists():
+                return
+            data = json.loads(notice.read_text(encoding="utf-8"))
+            status = data.get("status") if isinstance(data, dict) else None
+            if status not in {"updated", "failed"}:
+                return
+            os.replace(notice, notice.with_name("last-result.seen.json"))
+        except (OSError, ValueError):
+            return
+        message = (f"Лаунчер обновлён до {__version__}." if status == "updated" else
+                   "Обновление лаунчера не выполнено. Подробности: logs/launcher-update.log.")
+        self.status.set(message)
+        self._append(message)
+        if status == "failed":
+            messagebox.showwarning("Обновление лаунчера", message, parent=self.root)
+
+    def _launcher_event(self, event):
+        kind = event["kind"]
+        if kind == "launcher_downloading":
+            self.status.set(f"Загрузка лаунчера {event['version']} ({event['size'] / 1048576:.1f} МБ)…")
+            return
+        self.detail.stop()
+        self.download_status.set("")
+        if kind == "launcher_handoff":
+            self.root.destroy()
+            return
+        self.self_updating = False
+        self.self_update_handoff = False
+        self.refresh()
+        if kind == "launcher_prepared":
+            prepared = event["prepared"]
+            if self.closing or self.self_update_cancel.is_set():
+                discard_update(prepared)
+            elif messagebox.askyesno("Обновить и перезапустить лаунчер?",
+                                    f"Лаунчер {prepared.version} загружен и проверен.\n"
+                                    "Установить его и перезапустить это окно? Предыдущий exe будет сохранён.\n"
+                                    "Окружение, модели, результаты и настройки останутся на месте.",
+                                    parent=self.root, default="no"):
+                self.self_updating = True
+                self.self_update_handoff = True
+                self.refresh()
+                self.status.set("Подготовка замены и перезапуска лаунчера…")
+
+                def handoff():
+                    try:
+                        start_replacement(prepared)
+                        self.events.put({"kind": "launcher_handoff"})
+                    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                        discard_update(prepared)
+                        self.events.put({"kind": "launcher_error", "message": str(exc)})
+                threading.Thread(target=handoff, daemon=True).start()
+                return
+            else:
+                discard_update(prepared)
+                self.status.set("Обновление лаунчера отложено. Текущий exe сохранён.")
+        elif kind == "launcher_current":
+            self.status.set(f"Лаунчер {__version__}: более нового опубликованного релиза нет.")
+        elif kind == "launcher_error":
+            message = "Обновление лаунчера не выполнено: " + event["message"]
+            self.status.set(message)
+            self._append(message)
+            log = self.state_path.parent / "logs" / "launcher-update.log"
+            try:
+                log.parent.mkdir(parents=True, exist_ok=True)
+                with log.open("a", encoding="utf-8") as stream:
+                    stream.write(message + "\n")
+            except OSError:
+                pass
+        if self.closing:
+            self.root.destroy()
 
     def poll(self):
         while True:
@@ -339,7 +465,11 @@ class Launcher:
             except queue.Empty:
                 break
             kind = event["kind"]
-            if kind == "opened":
+            if kind.startswith("launcher_"):
+                self._launcher_event(event)
+                if kind == "launcher_handoff" or self.closing:
+                    return
+            elif kind == "opened":
                 self.scanning = False
                 if event["folder"] == self.variables["venv"].get().strip():
                     self.available = event["ready"]
@@ -468,8 +598,12 @@ class Launcher:
             messagebox.showerror("Журнал", str(exc), parent=self.root)
 
     def close(self):
-        if self.busy:
-            if not messagebox.askyesno("Остановить настройку?", "Текущий шаг будет прерван. Его можно повторить "
+        if self.self_update_handoff:
+            self.status.set("Подготовка перезапуска лаунчера…")
+            return
+        if self.busy or self.self_updating:
+            title = "Остановить обновление лаунчера?" if self.self_updating else "Остановить настройку?"
+            if not messagebox.askyesno(title, "Текущий шаг будет прерван. Его можно повторить "
                                        "при следующем запуске.", parent=self.root, default="no"):
                 return
             self.closing = True
@@ -482,10 +616,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Diarrhizer graphical setup launcher")
     parser.add_argument("--state", type=Path, help="Single configuration file (portable/test use)")
     parser.add_argument("--smoke-test", action="store_true", help="Open/close an isolated UI without setup or downloads")
+    parser.add_argument("--update-ack", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     temporary = tempfile.TemporaryDirectory(prefix="diarrhizer-launcher-") if args.smoke_test else None
     state_path = (Path(temporary.name) / "settings.json" if temporary else args.state
                   or launcher_home() / "settings.json").resolve()
+    if args.update_ack and (args.update_ack.name != "startup.ack" or not args.update_ack.resolve().is_relative_to(
+            state_path.parent / "launcher-updates")):
+        parser.error("Invalid launcher startup acknowledgement path")
     root = tk.Tk()
     lock = None
     try:
@@ -495,6 +633,8 @@ def main() -> int:
             import ctypes
             ctypes.windll.kernel32.SetDllDirectoryW(None)
         Launcher(root, state_path, application_source(), probe=not args.smoke_test)
+        if args.update_ack:
+            root.after(100, lambda: atomic_text(args.update_ack, "ready"))
         if args.smoke_test:
             root.after(800, root.destroy)
         root.mainloop()

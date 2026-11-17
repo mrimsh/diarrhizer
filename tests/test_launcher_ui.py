@@ -114,3 +114,50 @@ def test_editing_ready_environment_paths_saves_without_starting_installation(ui,
     assert State.load(ui.state_path).settings.output.endswith("-edited")
     assert State.load(folder / MARKER).settings.output.endswith("-edited")
     assert "disabled" not in ui.shortcut_button.state()
+
+
+def test_launcher_update_available_without_ready_environment_and_disabled_during_setup(ui):
+    assert "disabled" not in ui.self_update_button.state()
+    ui.busy = True
+    ui.refresh()
+    assert "disabled" in ui.self_update_button.state()
+
+
+def test_declining_verified_launcher_update_preserves_settings_and_window(ui, tmp_path, monkeypatch):
+    from diarrhizer_launcher.self_update import PreparedUpdate
+
+    old = ui.state_path.read_bytes()
+    staged = tmp_path / "candidate.exe"
+    staged.write_bytes(b"new exe")
+    ui.self_updating = True
+    monkeypatch.setattr("diarrhizer_launcher.app.messagebox.askyesno", lambda *_, **__: False)
+    ui.events.put({"kind": "launcher_prepared", "prepared": PreparedUpdate(tmp_path / "plan.json", staged, "2.10")})
+    ui.poll()
+    assert not ui.self_updating
+    assert not staged.exists()
+    assert ui.state_path.read_bytes() == old
+    assert "disabled" not in ui.self_update_button.state()
+
+
+def test_launcher_update_error_keeps_existing_environment_actions(ui):
+    ui.available = ui.state.ready = True
+    ui.self_updating = True
+    ui.events.put({"kind": "launcher_error", "message": "Network unavailable"})
+    ui.poll()
+    assert not ui.self_updating
+    assert "disabled" not in ui.launch_button.state()
+    assert "Network unavailable" in ui.status.get()
+
+
+def test_failed_launcher_replacement_is_reported_once_after_restart(ui, monkeypatch):
+    folder = ui.state_path.parent / "launcher-updates"
+    folder.mkdir()
+    (folder / "last-result.json").write_text('{"status":"failed"}')
+    warnings = []
+    monkeypatch.setattr("diarrhizer_launcher.app.messagebox.showwarning", lambda *args, **_: warnings.append(args))
+    before = ui.state_path.read_bytes()
+    ui._report_launcher_update()
+    ui._report_launcher_update()
+    assert len(warnings) == 1
+    assert "не выполнено" in ui.status.get()
+    assert ui.state_path.read_bytes() == before

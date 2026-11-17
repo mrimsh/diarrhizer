@@ -1,6 +1,6 @@
 # Windows launcher
 
-Current source version: **2.8** by **MRIMSH**. The setup window and rebuilt Windows executable file/product
+Current source version: **2.9** by **MRIMSH**. The setup window and rebuilt Windows executable file/product
 properties display the shared release version; Windows company metadata names MRIMSH.
 
 `Diarrhizer.exe` is the graphical entry point for setup and everyday use on Windows 10/11 x64.
@@ -9,6 +9,40 @@ Diarrhizer `.venv` nor a manually installed launcher dependency. The processing 
 a normal Python installation in one selected virtual environment. There is no separate main-GUI exe.
 
 ## First launch
+
+### Updating the launcher itself
+
+**Обновить лаунчер…** checks the latest published stable GitHub Release and its `Diarrhizer.exe`
+asset. This is separate from **Обновить приложение**, which still installs current `main` sources.
+The launcher compares numeric `MAJOR.MINOR` versions (`2.10` is newer than `2.9`) and never downgrades.
+Drafts, prereleases, missing/ambiguous assets and assets without GitHub SHA-256 metadata are rejected.
+
+Download and verification run in the background with byte progress and cancellation. The updater
+checks SHA-256, file size, x64 PE format and matching Windows file/product version before offering
+**«Обновить и перезапустить лаунчер?»**. Until confirmation the running exe is unchanged. Canceling
+or declining the replacement leaves it in place; checking needs no prepared processing environment.
+
+After confirmation a hidden Windows PowerShell helper waits for this launcher to exit and release
+its single-instance lock, then atomically replaces the executable at the same path with a backup.
+It starts the new launcher with the same `--state` path. The new window acknowledges successful UI
+startup through a private `--update-ack` file; if startup fails or is not acknowledged, the helper
+restores and starts the previous exe. Backups are retained beside the executable; errors and outcome
+are recorded in `logs/launcher-update.log` and `launcher-updates/<attempt>/result.json` under the
+launcher-data directory. Helper startup diagnostics are in `helper-console.log` in that attempt folder.
+
+The updater does not change the main GUI, `.venv`, models, recordings, results or saved settings.
+It needs write access to the exe directory; permission failure is reported before replacing it,
+without elevating privileges. A failed filesystem replacement restarts the unchanged launcher.
+The source `.pyw` entry point displays an explanation instead of trying to overwrite Python.
+Older exe builds without this button need one manual replacement to obtain self-update support;
+future launcher versions must preserve the startup-acknowledgement protocol. No release is published
+automatically by implementing or using this feature.
+
+The helper requires Windows PowerShell/.NET already present on supported Windows versions, not a
+prepared Python environment. Its tests use temporary C# executables to verify real Windows replacement,
+Unicode/space/apostrophe paths, preserved settings, startup acknowledgement and rollback.
+
+### Prepare the processing environment
 
 1. Open `Diarrhizer.exe` and review the proposed settings.
 2. Choose an environment directory (normally `.venv`), compatible **CPython 3.11/3.12 x64**, **CPU**
