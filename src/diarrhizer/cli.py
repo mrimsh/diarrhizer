@@ -454,6 +454,12 @@ def main() -> int:
                             help="Use separate stereo channels for me/others; speaker limits then count only others")
     run_parser.add_argument("--my-channel", choices=["left", "right"], default="left",
                             help="Channel containing only your voice in me-others mode")
+    run_parser.add_argument("--channel-source", choices=["stereo", "tracks"], default="stereo",
+                            help="Me/others sources: L/R of one stereo stream or separate audio tracks")
+    run_parser.add_argument("--my-track", type=int, default=1, help="Your audio track, numbered from 1")
+    run_parser.add_argument("--others-track", type=int, default=2, help="Others' audio track, numbered from 1")
+    run_parser.add_argument("--mix-track", type=int, default=0,
+                            help="Playback audio track, numbered from 1; 0 mixes the two selected voices")
     run_parser.add_argument("--one-on-one", action=argparse.BooleanOptionalAction, default=False,
                             help="Exactly one other participant: assign both speakers by channel without diarization")
     # Not a PipelineConfig literal like the flags above: the default is
@@ -574,6 +580,7 @@ def main() -> int:
 
     not_given = object()
     run_option_names = (
+        "channel_source", "my_track", "others_track", "mix_track",
         "channel_mode", "my_channel", "one_on_one",
         "min_speakers", "max_speakers", "min_turn_duration", "lang", "device", "asr_model",
         "asr_compute_type", "asr_beam_size", "asr_temperature", "asr_condition_on_previous_text",
@@ -608,6 +615,7 @@ def main() -> int:
         #   batch: one job per file, each in its own new_job_dir(), a failed file is reported and the
         #   batch moves on, and a summary is printed at the end.
         #   Me-others mode transcribes stereo channels separately; --one-on-one bypasses model diarization.
+        #   --channel-source tracks selects explicit one-based audio streams and an optional playback mix.
         #   Resume restores saved settings/stages/names; only explicitly supplied flags override them.
         #   Optional projects/teams share portable directory-local defaults, naming and independent media retention with GUI.
         #   --recorded-at supplies recording wall time for date/time naming tokens without changing run timestamps.

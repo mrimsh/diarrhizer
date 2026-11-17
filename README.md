@@ -1,4 +1,4 @@
-# Diarrhizer 2.7
+# Diarrhizer 2.8
 
 By MRIMSH
 
@@ -8,7 +8,7 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
 and a CLI (`python -m diarrhizer run …`).
 
-**2.7** is the shared application version for the CLI, desktop GUI and Windows launcher.
+**2.8** is the shared application version for the CLI, desktop GUI and Windows launcher.
 Check it with `python -m diarrhizer --version`; the GUI shows it in the window title and sidebar.
 The launcher downloads the current GitHub `main` application when setting up or updating an environment;
 the downloaded application's version can differ from the launcher's own build version.
@@ -428,6 +428,9 @@ All options:
 | `--audio-profile` | Audio preprocessing profile: `raw`, `voice-call`, `denoise-light`, `split-stereo` | `raw` |
 | `--channel-mode` | `mixed` or `me-others` (independent stereo sources) | `mixed` |
 | `--my-channel` | Your voice in `left` or `right`, for `me-others` | `left` |
+| `--channel-source` | `stereo` for L/R, or `tracks` for separate audio streams | `stereo` |
+| `--my-track` / `--others-track` | Your/others' audio track numbers, counted from 1 (video excluded) | 1 / 2 |
+| `--mix-track` | Playback-only audio track; 0 mixes the two selected voice tracks | 0 |
 | `--one-on-one` / `--no-one-on-one` | One other participant: assign speakers by channel without model diarization | false |
 | `--audio-format` | How the job keeps its audio on disk: `wav`, `flac`, `mp3-q5`, `opus-24k` or a profile from `audio_formats.json` | the default profile in `audio_formats.json`, else `wav` |
 | `--keep-wav` | Keep the working `audio/normalized.wav` after the job completes (overrides the format's setting) | as the format says |
@@ -451,17 +454,27 @@ See [`docs/architecture.md`](docs/architecture.md#5-audio-profiles) for details.
 
 ### Separate channels: me / others
 
-Use this mode only when a recording has **one stereo audio stream**, your microphone in one
-channel and everyone else in the other. Ordinary stereo with both voices in both channels is unsuitable.
-Mono and multiple separate audio streams are rejected; export those tracks as synchronized L/R first.
+This mode supports **L/R of one stereo audio stream**, or **separate audio tracks in one file**.
+Each chosen voice source must contain only you or only the other participants. Ordinary stereo
+with both voices in both channels is unsuitable for L/R separation.
 
 In the GUI, choose **Я / остальные**, select **Мой канал: Левый / Правый**, and enable
 **Один собеседник — без диаризации** for a one-on-one call. This needs no HF token; the matching
 environment check is `python -m diarrhizer doctor --profile asr`.
 
+For a recorder producing tracks **1 = me, 2 = incoming call, 3 = joint mix**, choose
+**Источники голосов → Отдельные аудиодорожки**, **Я — дорожка: 1**, **Остальные — дорожка: 2**,
+and **Общий микс для плеера: 3**. Track numbers count audio streams from **1**, ignoring video streams.
+Voice tracks may each be mono or stereo; each is downmixed independently. The playback track is
+never transcribed or diarized. Leave playback at **Авто: смешать выбранные** to build it from the two
+voice tracks when no joint mix exists. Delayed track starts are padded to retain their common timeline.
+
 ```powershell
 # One-on-one: your microphone is on the left; no diarization model or HF token needed.
 python -m diarrhizer run "call.wav" --channel-mode me-others --my-channel left --one-on-one --lang ru
+
+# Recorder with separate me/incoming/mix tracks (1, 2, 3).
+python -m diarrhizer run "call.mkv" --channel-mode me-others --channel-source tracks --my-track 1 --others-track 2 --mix-track 3 --one-on-one --lang ru
 
 # Group: your microphone is on the right; 2-4 OTHER participants on the left.
 python -m diarrhizer run "meeting.wav" --channel-mode me-others --my-channel right --min-speakers 2 --max-speakers 4 --lang ru
@@ -474,7 +487,7 @@ Speaker_00 is always you (default name **Я**); other IDs start at Speaker_01 (d
 and overlapping speech remain in the output. Do not independently trim silence from the source channels.
 Use headphones to limit remote speech leaking into the microphone; echo suppression is not added by this mode.
 
-Channel options survive CLI/GUI resume and archive-only storage. To change the mode or your channel
+Channel/track options survive CLI/GUI resume and archive-only storage. To change the mode, channel or track selection
 on an existing job, restart from conversion; unchanged channel audio/transcripts can be reused.
 To switch a resumed job from one-on-one to a group, pass `--no-one-on-one` and the desired other-speaker
 range, or use **Пересчитать спикеров**. The mode does not capture audio itself.

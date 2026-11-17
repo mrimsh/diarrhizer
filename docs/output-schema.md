@@ -28,6 +28,12 @@ Speaker limits count remote voices only in this mode. Turns are sorted by start 
 may overlap; simultaneous speech is retained on both channels. The input channels share the original
 recording timeline. Legacy jobs without these config fields use `mixed`, `left`, `false` defaults.
 
+Separate-track mode adds `channel_source: "tracks"`, `my_track`, `others_track` and `mix_track`
+to exported config. These are one-based audio-stream ordinals, excluding video; `mix_track: 0`
+builds playback from the two voice tracks. Turns and words carry `source_track` with the actual
+input track number; `channel` is a legacy internal L/R artifact slot, not a source-track channel.
+Legacy jobs default to `channel_source: "stereo"`, tracks 1/2 and auto playback 0.
+
 ### Top-Level Structure
 
 ```json

@@ -12,7 +12,7 @@ from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.pipeline.cache import config_mismatch, is_stale
 from diarrhizer.utils import read_json, write_json_atomic
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance
-from diarrhizer.pipeline.channels import channel_settings, require_channel_transcript
+from diarrhizer.pipeline.channels import channel_settings, require_channel_transcript, CHANNEL_DEFAULTS, channel_tracks
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -121,7 +121,7 @@ class MergeStage:
 
         # Perform merge
         if job.config.channel_mode == "me-others":
-            if not model_free and any((diar_data.get("metadata") or {}).get(key) != value
+            if not model_free and any((diar_data.get("metadata") or {}).get(key, CHANNEL_DEFAULTS[key]) != value
                                       for key, value in channel_settings(job.config).items()):
                 raise ValueError("Diarization channel settings differ; rerun the diarize stage")
             merged_segments = merge_channels(transcript_data, diar_segments, job.config)
@@ -227,7 +227,7 @@ class MergeStage:
         if not isinstance(meta, dict) or meta.get("cache_version") != self.CACHE_VERSION:
             return False
         for key, expected in channel_settings(job.config).items():
-            default = {"channel_mode": "mixed", "my_channel": "left", "one_on_one": False}[key]
+            default = CHANNEL_DEFAULTS[key]
             if meta.get(key, default) != expected:
                 return False
         return not config_mismatch(
@@ -244,6 +244,7 @@ class MergeStage:
 # @description: Existing text-preserving alignment runs separately for each channel. Local speech is
 #   Speaker_00; remote diarization labels are mapped to Speaker_01 and above. One-on-one assigns a
 #   single remote speaker without consuming diarization. No pauses are removed and no times shifted.
+#   In track mode turns/words carry source_track alongside the legacy internal channel slot.
 # @inputs: per-channel transcript, remote diarization, pipeline settings
 # @outputs: stable chronological list of speaker turns with source channel on turns and words
 # @sideEffects: None
@@ -264,10 +265,14 @@ def merge_channels(transcript: dict, diar_segments: list[dict], config) -> list[
         )
         for turn in turns:
             turn["channel"] = channel
+            if config.channel_source == "tracks":
+                turn["source_track"] = channel_tracks(config)[channel]
             turn["speaker_id"] = ("Speaker_00" if local else
                                   mapping.get(turn["speaker_id"], "Speaker_01"))
             for word in turn.get("words", []):
                 word["channel"] = channel
+                if config.channel_source == "tracks":
+                    word["source_track"] = channel_tracks(config)[channel]
                 word["speaker_id"] = ("Speaker_00" if local else
                                       mapping.get(word["speaker_id"], "Speaker_01"))
             merged.append(turn)

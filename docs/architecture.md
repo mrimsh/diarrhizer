@@ -1,6 +1,6 @@
 # Architecture
 
-Current source version: **2.7**, shared by the CLI, desktop GUI and Windows launcher.
+Current source version: **2.8**, shared by the CLI, desktop GUI and Windows launcher.
 The [2.x roadmap](roadmap.md) describes the direction toward autonomous call logging, a separate
 call agent and optional integration skills; those capabilities remain planned.
 
@@ -416,15 +416,22 @@ The explicit `me-others` mode consumes separate channel files instead; the stage
 
 ### Me / others channel mode
 
-`channel_mode=me-others` requires one stereo audio stream, with the local microphone isolated in
-`my_channel=left|right`. Convert probes the input without full decoding before any model work,
-rejects mono/multiple streams, and creates full-length L/R WAVs with the selected profile filters
-(channel extraction first). The mono mix remains available for playback. No silence is trimmed.
+`channel_mode=me-others` uses either `channel_source=stereo` (one stereo stream, local microphone
+in `my_channel=left|right`) or `channel_source=tracks` (separate one-based `my_track`/`others_track`
+audio-stream ordinals). Track numbers exclude video streams, and each voice track may be mono or stereo.
+Convert probes the input before model work and rejects unavailable or duplicate voice selections.
+Track mode maps the selected streams explicitly into the existing internal L/R artifact slots, using
+`my_channel` only as a slot assignment. Each stream is independently downmixed and filtered.
+`mix_track>0` explicitly selects playback audio; 0 mixes only the two selected voice tracks. Playback
+never enters ASR or diarization. FFmpeg `copyts`/`start_at_zero` and `aresample=async=1:first_pts=0`
+retain a shared container timeline, adding leading silence to delayed tracks. No pauses are trimmed.
 
 Transcribe reuses one ASR adapter across two independent calls, then writes `asr/transcript.json` with
 `channels.left`/`channels.right` (each original ASR result, including language, words, warnings and
 input path), plus chronological combined segments carrying `channel`. Word `segment_index` values
 in the combined view point at combined segments; per-channel results retain their original ownership.
+Track-mode results also record `source_track` on channel results, combined segments/words and merged/
+exported segments/words. `channel` remains the internal artifact slot; `source_track` is the real input ordinal.
 
 Diarize receives only the opposite channel; speaker limits count other participants, excluding the
 local voice. With `one_on_one=true`, the same stage writes an explicit `metadata.model_free=true`
@@ -437,7 +444,7 @@ by start. One-on-one uses `Speaker_01` for all remote speech. Overlapping interv
 split SRT cues are sorted by start as well. Defaults name the local voice `Я`, and the single remote
 voice `Собеседник`; user mappings can override both. Ordinary stereo and microphone echo are not separated.
 
-All channel choices are recorded for CLI/GUI resume. Mode/channel changes require restarting from
+All channel/track choices are recorded for CLI/GUI resume. Mode/channel/track changes require restarting from
 convert, which can reuse unchanged WAVs and ASR while recording the new layout. Cache checks
 distinguish mixed, channel diarization and model-free results. Archive lookup uses the selected
 channel suffix and never falls back to the mono mix, including portable named jobs after WAV cleanup.

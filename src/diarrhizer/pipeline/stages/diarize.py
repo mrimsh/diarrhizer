@@ -11,7 +11,7 @@ from diarrhizer.audio_formats import find_job_audio
 from diarrhizer.pipeline.cache import config_mismatch, is_stale
 from diarrhizer.utils import read_json, write_json_atomic
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance
-from diarrhizer.pipeline.channels import channel_audio, channel_settings
+from diarrhizer.pipeline.channels import channel_audio, channel_settings, CHANNEL_DEFAULTS
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 #   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
 #   Me-others mode diarizes only the opposite channel; speaker limits count only the other participants.
 #   One-on-one writes an explicit model-free result and never checks HF credentials or loads pyannote.
+#   Audio-track source choices are recorded in metadata and participate in cache validation.
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/diar/diarization.json
 # @sideEffects: Loads pyannote model, writes diarization JSON to disk, unloads the
@@ -260,7 +261,7 @@ class DiarizeStage:
         if not isinstance(meta, dict):
             return False
         for key, expected_value in channel_settings(job.config).items():
-            default = {"channel_mode": "mixed", "my_channel": "left", "one_on_one": False}[key]
+            default = CHANNEL_DEFAULTS[key]
             if meta.get(key, default) != expected_value:
                 return False
         if job.config.channel_mode == "me-others" and not job.config.one_on_one:

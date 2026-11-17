@@ -3,6 +3,7 @@
 import json
 import math
 import struct
+import subprocess
 import wave
 from pathlib import Path
 
@@ -230,3 +231,90 @@ def test_real_ffmpeg_preserves_stereo_channel_samples_and_rejects_mono(tmp_path,
         run_pipeline(input_path=mono, out_dir=tmp_path / "rejected", channel_mode="me-others", one_on_one=True, device="cpu")
     assert not list((tmp_path / "rejected").glob("*/meta/run.json"))
     assert not list((tmp_path / "rejected").glob("*/asr/transcript.json"))
+
+
+@pytest.fixture
+def multitrack_media(tmp_path):
+    ffmpeg = resolve_ffmpeg_path()
+    if not ffmpeg:
+        pytest.skip("FFmpeg not installed")
+    source = tmp_path / "tracks.mkv"
+    subprocess.run([
+        ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=black:s=16x16:r=1:d=2",
+        "-f", "lavfi", "-i", "sine=frequency=300:sample_rate=16000:duration=2",
+        "-itsoffset", "0.5", "-f", "lavfi", "-i", "sine=frequency=600:sample_rate=16000:duration=1.5",
+        "-f", "lavfi", "-i", "sine=frequency=900:sample_rate=16000:duration=2",
+        "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:a",
+        "-filter:a:0", "pan=stereo|c0=c0|c1=c0", "-c:v", "ffv1", "-c:a", "pcm_s16le", str(source),
+    ], check=True, capture_output=True, timeout=30)
+    return source
+
+
+def samples(path):
+    with wave.open(str(path), "rb") as wav:
+        assert wav.getnchannels() == 1 and wav.getframerate() == 16000
+        return struct.unpack('<' + 'h' * wav.getnframes(), wav.readframes(wav.getnframes()))
+
+
+def amplitude(signal, frequency):
+    return abs(sum(value * math.sin(2 * math.pi * frequency * i / 16000)
+                   for i, value in enumerate(signal)))
+
+
+@pytest.mark.parametrize("mix_track", [0, 3])
+@pytest.mark.parametrize("my_channel", ["left", "right"])
+def test_multitrack_extracts_selected_voices_and_preserves_delay(multitrack_media, tmp_path, adapters, mix_track, my_channel):
+    result = run_pipeline(input_path=multitrack_media, out_dir=tmp_path / 'out', device='cpu',
+                          channel_mode='me-others', channel_source='tracks', my_track=1, others_track=2,
+                          mix_track=mix_track, my_channel=my_channel, one_on_one=True)
+    job = Path(result['job_dir'])
+    own = samples(find_job_audio(job, '_' + my_channel))
+    other_channel = 'right' if my_channel == 'left' else 'left'
+    remote = samples(find_job_audio(job, '_' + other_channel))
+    assert amplitude(own, 300) > 20 * amplitude(own, 900)
+    assert amplitude(remote, 600) > 20 * amplitude(remote, 900)
+    first_sound = next(i for i, value in enumerate(remote) if abs(value) > 4)
+    assert first_sound / 16000 == pytest.approx(.5, abs=.02)
+    assert len(own) / 16000 == pytest.approx(2, abs=.02)
+    assert len(remote) / 16000 == pytest.approx(2, abs=.02)
+    playback = samples(find_job_audio(job))
+    if mix_track:
+        assert amplitude(playback, 900) > 20 * amplitude(playback, 300)
+    else:
+        assert amplitude(playback, 300) > 20 * amplitude(playback, 900)
+        assert amplitude(playback, 600) > 20 * amplitude(playback, 900)
+    assert len(ASR.calls) == 2 and not Diar.calls
+    exported = read(job / 'export/result.json')
+    for segment in exported['segments']:
+        assert segment['source_track'] == (1 if segment['speaker_id'] == 'Speaker_00' else 2)
+    assert {seg['source_track'] for seg in read(job / 'asr/transcript.json')['segments']} == {1, 2}
+    assert read_job_settings(job)['mix_track'] == mix_track
+    rerun = run_pipeline(job_dir=job, out_dir=tmp_path / 'out')
+    assert all(stage['status'] == 'cached' for stage in rerun['stages'])
+
+
+def test_track_archives_and_changed_selection(multitrack_media, tmp_path, adapters, monkeypatch):
+    monkeypatch.setenv('HF_TOKEN', 'test-only')
+    result = run_pipeline(input_path=multitrack_media, out_dir=tmp_path / 'out', device='cpu',
+                          channel_mode='me-others', channel_source='tracks', mix_track=3,
+                          audio_format='flac', keep_wav=False)
+    job = Path(result['job_dir'])
+    assert Diar.calls[0][0].stem == 'normalized_right'
+    assert not list((job / 'audio').glob('*.wav'))
+    assert find_job_audio(job, '_left').suffix == '.flac'
+    run_pipeline(job_dir=job, out_dir=tmp_path / 'out', from_stage='transcribe', force_stage='transcribe')
+    assert ASR.calls[-1].name == 'archive_right.flac'
+    with pytest.raises(ValueError, match='restarting from convert'):
+        run_pipeline(job_dir=job, out_dir=tmp_path / 'out', from_stage='transcribe', my_track=3)
+    run_pipeline(job_dir=job, out_dir=tmp_path / 'out', my_track=2, others_track=1)
+    assert read_job_settings(job)['my_track'] == 2
+    segments = read(job / 'merged/segments.json')['segments']
+    assert {s['source_track'] for s in segments if s['speaker_id'] == 'Speaker_00'} == {2}
+
+
+@pytest.mark.parametrize('options', [dict(my_track=0), dict(others_track=1), dict(my_track=4), dict(mix_track=4)])
+def test_invalid_track_selection_fails_before_asr(multitrack_media, tmp_path, adapters, options):
+    with pytest.raises(ValueError):
+        run_pipeline(input_path=multitrack_media, out_dir=tmp_path / 'out', device='cpu',
+                     channel_mode='me-others', channel_source='tracks', one_on_one=True, **options)
+    assert not ASR.calls and not Diar.calls

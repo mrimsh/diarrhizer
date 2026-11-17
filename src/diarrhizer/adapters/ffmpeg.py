@@ -90,6 +90,8 @@ def list_audio_encoders(ffmpeg_path: str) -> set[str]:
 #   copy, see CONFIG:AUDIO_FORMATS), reading the original input and applying the same profile filter
 #   chain (_profile_filter) as the working WAV. validate_split_input checks one stereo stream without
 #   decoding the recording. encode(channel=...) extracts the channel before applying profile filters.
+#   encode_tracks selects one-based audio streams explicitly; copyts/start_at_zero plus first_pts=0
+#   retains the container timeline and pads delayed streams before independent ASR or playback mixing.
 # @inputs: input_path (str or Path), output_path (str or Path), audio_profile, encoder_args, ffmpeg_path (optional override)
 # @outputs: Path to converted audio file, or [output_path, left_path, right_path] for split-stereo
 # @sideEffects: Executes FFmpeg subprocess, creates output file(s) on disk, reads DIARRHIZER_FFMPEG_PATH env var
@@ -366,12 +368,48 @@ class FFmpegAdapter:
 
     def validate_split_input(self, input_path: str | Path) -> None:
         """Require one actual stereo stream; identical L/R contents cannot be detected here."""
+        streams = self._input_audio_streams(input_path)
+        if len(streams) != 1 or not re.search(r"\bstereo\b|\b2 channels\b", streams[0]):
+            raise ValueError("L/R mode requires one stereo audio stream. For separate audio tracks, "
+                             "select channel_source=tracks and choose your/others audio track numbers.")
+
+    def _input_audio_streams(self, input_path: str | Path) -> list[str]:
         result = subprocess.run([self._ffmpeg_path, "-hide_banner", "-i", str(input_path)],
                                 capture_output=True, text=True, check=False, timeout=30)
-        streams = re.findall(r"Stream[^\r\n]*Audio:[^\r\n]*", result.stderr)
-        if len(streams) != 1 or not re.search(r"\bstereo\b|\b2 channels\b", streams[0]):
-            raise ValueError("Me / others requires one stereo audio stream with separate L/R sources; "
-                             "mono and multiple audio streams are unsupported")
+        return re.findall(r"Stream[^\r\n]*Audio:[^\r\n]*", result.stderr)
+
+    def validate_track_input(self, input_path: str | Path, tracks: Sequence[int]) -> None:
+        """Check one-based audio-track ordinals (video streams do not count)."""
+        count = len(self._input_audio_streams(input_path))
+        if not tracks or any(type(track) is not int or not 1 <= track <= count for track in tracks):
+            raise ValueError(f"Selected audio tracks {list(tracks)} are unavailable; file has {count} audio track(s). "
+                             "Number audio tracks from 1, excluding video streams.")
+
+    def encode_tracks(self, input_path: str | Path, output_path: str | Path,
+                      encoder_args: Sequence[str], tracks: Sequence[int], audio_profile: str = PROFILE_RAW) -> Path:
+        """Encode one selected track or a synchronized mix of selected tracks, without trimming pauses."""
+        if not tracks or any(type(track) is not int or track < 1 for track in tracks):
+            raise ValueError("Audio track numbers must be positive integers")
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [self._ffmpeg_path, "-y", "-copyts", "-start_at_zero", "-i", str(input_path)]
+        filters = "aresample=async=1:first_pts=0,aformat=channel_layouts=mono"
+        profile_filter = self._profile_filter(audio_profile)
+        if len(tracks) == 1:
+            cmd += ["-map", f"0:a:{tracks[0] - 1}", "-af",
+                    filters + ("," + profile_filter if profile_filter else "")]
+        else:
+            graph = ";".join(f"[0:a:{track - 1}]{filters}[voice{i}]" for i, track in enumerate(tracks))
+            graph += ";" + "".join(f"[voice{i}]" for i in range(len(tracks)))
+            graph += f"amix=inputs={len(tracks)}:duration=longest:dropout_transition=0"
+            graph += ("," + profile_filter if profile_filter else "") + "[playback]"
+            cmd += ["-filter_complex", graph, "-map", "[playback]"]
+        cmd += [*encoder_args, str(output_path)]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=3600)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"FFmpeg audio-track extraction failed: {exc.stderr}") from exc
+        return output_path
 
     def get_audio_info(self, input_path: str | Path) -> dict:
         """Get audio information from a media file.

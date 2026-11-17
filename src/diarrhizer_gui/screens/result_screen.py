@@ -242,6 +242,7 @@ class RediarizeDialog(QDialog):
 #   Team-scoped suggestions are explicit roster entries; typing/saving a speaker alone never enrolls a name.
 #   Moving a job refreshes suggestions from its new team while preserving unsaved job-specific names.
 #   Me-others results label model-free separation and offer recalculation only for the remote channel.
+#   Track-separated jobs display the actual selected audio-track numbers rather than internal L/R slots.
 #   Invalid transcript JSON is shown as a readable error. Failed writes keep edits available to retry.
 #   Legacy reversed intervals are recovered in memory by READ:MERGED_SEGMENTS; alignment warnings
 #   remain visible while all transcript text and speaker names are available without recomputation.
@@ -499,7 +500,10 @@ class ResultScreen(QWidget):
             parts.append(f"модель {config['asr_model']}")
         if config.get("channel_mode") == "me-others":
             channel = "L" if config.get("my_channel", "left") == "left" else "R"
-            parts.append(f"Я / остальные · мой канал {channel}")
+            if config.get("channel_source") == "tracks":
+                parts.append(f"Я / остальные · дорожки {config.get('my_track', 1)} / {config.get('others_track', 2)}")
+            else:
+                parts.append(f"Я / остальные · мой канал {channel}")
             if config.get("one_on_one"):
                 parts.append("один на один, без диаризации")
         if self._has_diarization:

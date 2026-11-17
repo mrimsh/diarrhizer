@@ -10,11 +10,12 @@ from diarrhizer.asr_settings import compose_asr_prompt, validate_vad_options, VA
 from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.utils import write_json_atomic
 from diarrhizer.projects import export_path
-from diarrhizer.pipeline.channels import validate_channel_settings
+from diarrhizer.pipeline.channels import validate_channel_settings, TRACK_DEFAULTS
 
 FULL_STAGES = ("convert", "transcribe", "diarize", "merge", "export")
 RECORDED_RUN_KEYS = (
     "channel_mode", "my_channel", "one_on_one",
+    *TRACK_DEFAULTS,
     "language", "device", "min_speakers", "max_speakers", "asr_model", "asr_compute_type",
     "asr_beam_size", "asr_temperature", "asr_condition_on_previous_text", "asr_initial_prompt",
     "asr_vad_filter", "asr_vad_min_silence_ms", "audio_profile", "min_turn_duration",
@@ -32,6 +33,7 @@ RECORDED_RUN_KEYS = (
 #   ASR profiles, glossary contents and real VAD controls survive resume; missing legacy keys use defaults.
 #   Portable jobs resolve their named export through job.json; legacy result.json remains supported.
 #   Channel layout, local channel and one-on-one choice survive CLI/GUI resume unchanged.
+#   One-based track selection and optional playback mix survive resume; legacy jobs use stereo defaults.
 # @inputs: job directory, optional already-read metadata
 # @outputs: recorded run kwargs and stage names
 # @sideEffects: Reads job JSON only; never changes a queued job
@@ -67,7 +69,8 @@ def read_job_settings(job_dir: Path, meta: dict | None = None, *, include_speake
     if not isinstance(config, dict):
         raise ValueError(f"{job_dir}/meta/run.json: pipeline_config must be an object")
     settings = {key: config[key] for key in RECORDED_RUN_KEYS if key in config}
-    integers = {"min_speakers", "max_speakers", "asr_beam_size", "asr_vad_min_silence_ms", "asr_chunk_size"}
+    integers = {"min_speakers", "max_speakers", "asr_beam_size", "asr_vad_min_silence_ms", "asr_chunk_size",
+                "my_track", "others_track", "mix_track"}
     numbers = {"asr_temperature", "min_turn_duration", "asr_vad_onset", "asr_vad_offset"}
     booleans = {"asr_condition_on_previous_text", "asr_vad_filter", "one_on_one"}
     nullable = {"asr_compute_type", "asr_initial_prompt", "asr_glossary"}
@@ -83,7 +86,8 @@ def read_job_settings(job_dir: Path, meta: dict | None = None, *, include_speake
         if not valid:
             raise ValueError(f"{job_dir}/meta/run.json: invalid {key}")
     validate_channel_settings(settings.get("channel_mode", "mixed"), settings.get("my_channel", "left"),
-                              settings.get("one_on_one", False))
+                              settings.get("one_on_one", False),
+                              **{key: settings.get(key, default) for key, default in TRACK_DEFAULTS.items()})
     compose_asr_prompt(settings.get("asr_profile", "default"), settings.get("asr_initial_prompt"),
                        settings.get("asr_glossary"))
     validate_vad_options(settings.get("asr_vad_onset", VAD_ONSET), settings.get("asr_vad_offset", VAD_OFFSET),

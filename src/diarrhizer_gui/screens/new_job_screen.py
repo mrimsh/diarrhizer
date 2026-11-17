@@ -60,7 +60,7 @@ ASR_MODELS = ["tiny", "base", "small", "medium", "large-v2", "large-v3"]
 MODES = [
     ("Полный цикл (распознавание + спикеры)", "full"),
     ("Только распознавание (без диаризации)", "asr_only"),
-    ("Я / остальные (раздельные L/R-каналы)", "me_others"),
+    ("Я / остальные (каналы или дорожки)", "me_others"),
 ]
 
 # Codes Whisper understands; the field stays editable for any other code.
@@ -209,6 +209,7 @@ class FileList(QListWidget):
 #   file keeps its own recording time; editing a multi-selection applies the chosen value to those files.
 #   ASR profile/glossary and real VAD controls are remembered and copied as values into each queued run.
 #   Me-others offers the local channel and one-on-one switch; only group mode requires an HF token.
+#   Source type, one-based voice track numbers and optional playback mix are remembered in queued jobs.
 #   The queue captures timestamps before processing, and planning never creates or renames job artifacts.
 # @inputs: media files, recording-time editor, project/team and processing settings
 # @outputs: QueuedRun items with explicit recorded_at wall time
@@ -308,11 +309,35 @@ class NewJobScreen(QWidget):
         self._one_on_one_checkbox.setChecked(True)
         self._one_on_one_checkbox.toggled.connect(self._validate)
         self._channel_options = QWidget()
-        channel_row = QHBoxLayout(self._channel_options)
+        channel_row = QFormLayout(self._channel_options)
         channel_row.setContentsMargins(0, 0, 0, 0)
-        channel_row.addWidget(QLabel("Мой канал:"))
-        channel_row.addWidget(self._my_channel_combo)
-        channel_row.addWidget(self._one_on_one_checkbox)
+        self._channel_source_combo = QComboBox()
+        self._channel_source_combo.addItem("L/R одной стереодорожки", "stereo")
+        self._channel_source_combo.addItem("Отдельные аудиодорожки", "tracks")
+        self._channel_source_combo.currentIndexChanged.connect(self._validate)
+        channel_row.addRow("Источники голосов:", self._channel_source_combo)
+        self._stereo_options = QWidget()
+        stereo_row = QHBoxLayout(self._stereo_options)
+        stereo_row.setContentsMargins(0, 0, 0, 0)
+        stereo_row.addWidget(QLabel("Мой канал:"))
+        stereo_row.addWidget(self._my_channel_combo)
+        channel_row.addRow(self._stereo_options)
+        self._tracks_options = QWidget()
+        track_form = QFormLayout(self._tracks_options)
+        track_form.setContentsMargins(0, 0, 0, 0)
+        for key, label, initial in (("my_track", "Я — дорожка:", 1),
+                                    ("others_track", "Остальные — дорожка:", 2),
+                                    ("mix_track", "Общий микс для плеера:", 0)):
+            spin = QSpinBox()
+            spin.setRange(0 if key == "mix_track" else 1, 999)
+            if key == "mix_track":
+                spin.setSpecialValueText("Авто: смешать выбранные")
+            spin.setValue(initial)
+            spin.valueChanged.connect(self._validate)
+            setattr(self, f"_{key}_spin", spin)
+            track_form.addRow(label, spin)
+        channel_row.addRow(self._tracks_options)
+        channel_row.addRow(self._one_on_one_checkbox)
         self._channel_hint = QLabel("Нужна стереозапись: ваш голос только в одном канале, "
                                    "собеседники — в другом. Число спикеров ниже — без вас.")
         self._channel_hint.setWordWrap(True)
@@ -608,6 +633,10 @@ class NewJobScreen(QWidget):
         channel = value(self._key("my_channel"), "left", type=str)
         self._my_channel_combo.setCurrentIndex(max(0, self._my_channel_combo.findData(channel)))
         self._one_on_one_checkbox.setChecked(value(self._key("one_on_one"), True, type=bool))
+        source = value(self._key("channel_source"), "stereo", type=str)
+        self._channel_source_combo.setCurrentIndex(max(0, self._channel_source_combo.findData(source)))
+        for key, default in (("my_track", 1), ("others_track", 2), ("mix_track", 0)):
+            getattr(self, f"_{key}_spin").setValue(value(self._key(key), default, type=int))
         self._language_combo.setCurrentText(value(self._key("language"), "auto", type=str) or "auto")
         self._min_speakers.setValue(value(self._key("min_speakers"), 1, type=int))
         self._max_speakers.setValue(value(self._key("max_speakers"), 10, type=int))
@@ -642,6 +671,9 @@ class NewJobScreen(QWidget):
         set_value(self._key("mode"), self._mode_combo.currentData())
         set_value(self._key("my_channel"), self._my_channel_combo.currentData())
         set_value(self._key("one_on_one"), self._one_on_one_checkbox.isChecked())
+        set_value(self._key("channel_source"), self._channel_source_combo.currentData())
+        for key in ("my_track", "others_track", "mix_track"):
+            set_value(self._key(key), getattr(self, f"_{key}_spin").value())
         set_value(self._key("language"), self._language_combo.currentText().strip())
         set_value(self._key("min_speakers"), self._min_speakers.value())
         set_value(self._key("max_speakers"), self._max_speakers.value())
@@ -818,6 +850,16 @@ class NewJobScreen(QWidget):
         model_free = separated and self._one_on_one_checkbox.isChecked()
         self._channel_options.setVisible(separated)
         self._channel_hint.setVisible(separated)
+        tracks = self._channel_source_combo.currentData() == "tracks"
+        self._stereo_options.setVisible(not tracks)
+        self._tracks_options.setVisible(tracks)
+        self._channel_hint.setText(
+            "Номера аудиодорожек начинаются с 1, видеодорожки не считаются. "
+            "Микс используется только для прослушивания. Число спикеров — без вас."
+            if tracks else "Ваш голос должен быть только в одном L/R-канале, собеседники — в другом. "
+            "Число спикеров — без вас.")
+        if separated and tracks and self._my_track_spin.value() == self._others_track_spin.value():
+            problems.append("для вас и собеседников выберите разные аудиодорожки")
         self._min_speakers.setEnabled(not model_free)
         self._max_speakers.setEnabled(not model_free)
         self._speakers_label.setText("Остальные (мин–макс):" if separated else "Спикеры (мин–макс):")
@@ -868,6 +910,10 @@ class NewJobScreen(QWidget):
         common = {
             "channel_mode": "me-others" if mode == "me_others" else "mixed",
             "my_channel": self._my_channel_combo.currentData(),
+            "channel_source": self._channel_source_combo.currentData() if mode == "me_others" else "stereo",
+            "my_track": self._my_track_spin.value(),
+            "others_track": self._others_track_spin.value(),
+            "mix_track": self._mix_track_spin.value(),
             "one_on_one": mode == "me_others" and self._one_on_one_checkbox.isChecked(),
             **self._project_panel.options(),
             "out_dir": self._out_field.text(),

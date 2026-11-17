@@ -12,7 +12,9 @@ from diarrhizer.export.plain_transcript import format_plain_transcript
 from diarrhizer.pipeline.cache import config_mismatch, is_stale, prompt_digest
 from diarrhizer.utils import read_json, write_json_atomic, write_text_atomic
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance
-from diarrhizer.pipeline.channels import channel_audio, channel_settings, combine_channel_transcripts
+from diarrhizer.pipeline.channels import (
+    channel_audio, channel_settings, combine_channel_transcripts, track_settings, TRACK_DEFAULTS, channel_tracks,
+)
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -31,6 +33,7 @@ logger = logging.getLogger(__name__)
 #   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
 #   In me-others mode both full-length channels are transcribed independently with one reusable adapter;
 #   transcript.json retains per-channel results and a chronological combined view (including overlap).
+#   Track-mode results also record the selected source_track; caches distinguish source layouts.
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/asr/transcript.json, artifacts/asr/transcript.txt (readable paragraphs, no speakers)
 # @sideEffects: Loads WhisperX model, writes transcript JSON to disk, unloads the
@@ -225,6 +228,8 @@ class TranscribeStage:
                                 extra={"stage": self.NAME})
                     channels[channel] = {**self.whisperx_adapter.transcribe(str(source), language=lang_param),
                                          "input_audio": str(source)}
+                    if config.channel_source == "tracks":
+                        channels[channel]["source_track"] = channel_tracks(config)[channel]
                 result = combine_channel_transcripts(channels)
             else:
                 result = self.whisperx_adapter.transcribe(
@@ -353,6 +358,8 @@ class TranscribeStage:
         if not isinstance(meta, dict) or meta.get("cache_version") != self.CACHE_VERSION:
             return False
         if meta.get("channel_mode", "mixed") != job.config.channel_mode:
+            return False
+        if any(meta.get(key, TRACK_DEFAULTS[key]) != value for key, value in track_settings(job.config).items()):
             return False
         if job.config.channel_mode == "me-others":
             if set(data.get("channels", {})) != {"left", "right"}:

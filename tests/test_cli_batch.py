@@ -45,6 +45,15 @@ def _touch(path: Path) -> Path:
     return path
 
 
+def test_audio_track_flags_reach_runner(tmp_path, monkeypatch, calls):
+    source = _touch(tmp_path / 'tracks.mkv')
+    assert _main(monkeypatch, source, '--out', tmp_path / 'out', '--channel-mode', 'me-others',
+                 '--channel-source', 'tracks', '--my-track', '1', '--others-track', '2',
+                 '--mix-track', '3', '--one-on-one') == 0
+    assert calls[-1]['channel_source'] == 'tracks'
+    assert [calls[-1][key] for key in ('my_track', 'others_track', 'mix_track')] == [1, 2, 3]
+
+
 def test_channel_mode_flags_reach_runner_and_support_explicit_reset(tmp_path, monkeypatch, calls):
     source = _touch(tmp_path / "call.wav")
     assert _main(monkeypatch, source, "--out", tmp_path / "out", "--channel-mode", "me-others",

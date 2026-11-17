@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 # @purpose: Export merged segments to structured JSON format
 # @description: Creates machine-readable JSON with metadata and segments. Adds speaker_name field when config.speakers mapping is provided
 #   Channel mode/options and per-turn channel identity accompany independently transcribed stereo jobs.
+#   Separate-track jobs additionally expose one-based source_track on segments/words and track choices in config.
 # @inputs: segments data from merge stage, config metadata (including optional speakers mapping)
 # @outputs: JSON-formatted string
 # @sideEffects: None (pure function)
@@ -89,6 +90,9 @@ def export_to_json(
                 "max_speakers": config.max_speakers,
                 **({"channel_mode": config.channel_mode, "my_channel": config.my_channel,
                     "one_on_one": config.one_on_one} if config.channel_mode == "me-others" else {}),
+                **({"channel_source": "tracks", "my_track": config.my_track,
+                    "others_track": config.others_track, "mix_track": config.mix_track}
+                   if config.channel_source == "tracks" else {}),
             },
             "speakers": config.speakers or {},
         },

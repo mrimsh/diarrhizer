@@ -17,7 +17,7 @@ from diarrhizer.utils import read_json, write_json_atomic
 from diarrhizer.artifacts import locked_job, job_write_lock, recover_bundles
 from diarrhizer.pipeline.settings import FULL_STAGES, read_job_settings, recorded_stage_names, build_stages, set_aside_speaker_names
 from diarrhizer.projects import JOB_FILE, reserve_job, resolve_input
-from diarrhizer.pipeline.channels import validate_channel_settings, default_channel_speakers
+from diarrhizer.pipeline.channels import validate_channel_settings, default_channel_speakers, TRACK_DEFAULTS
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -84,6 +84,7 @@ class StageProtocol(Protocol):
 #   ASR profile/glossary inputs and real VAD controls are validated before artifact writes.
 #   Explicit me-others mode keeps stereo channels independent; one_on_one bypasses model diarization.
 #   In channel mode min/max_speakers count remote voices; Speaker_00 stays local, with overridable names.
+#   Track source selection is validated and recorded at conversion, with legacy stereo defaults.
 # @inputs: (none - constructed by run_pipeline from its own parameters)
 # @outputs: PipelineConfig instance, carried as JobContext.config
 # @sideEffects: None (plain dataclass)
@@ -121,8 +122,12 @@ class PipelineConfig:
         asr_vad_filter: Enable VAD filtering
         asr_vad_min_silence_ms: VAD minimum silence in milliseconds
         audio_profile: Audio preprocessing profile
-        channel_mode: mixed or me-others (independent stereo sources)
-        my_channel: left or right channel holding only the local microphone
+        channel_mode: mixed or me-others (independent voice sources)
+        channel_source: stereo L/R or separate audio tracks
+        my_track: One-based local audio-track ordinal, excluding video streams
+        others_track: One-based remote audio-track ordinal
+        mix_track: Playback-only audio-track ordinal; zero mixes the selected voices
+        my_channel: Local L/R channel in stereo mode; internal local artifact slot in track mode
         one_on_one: Assign both speakers by channel without model diarization
         audio_format: How the job's audio is stored: archive codec/quality and
             whether the working WAV is kept (resolved from a profile name by
@@ -162,6 +167,10 @@ class PipelineConfig:
     asr_chunk_size: int = CHUNK_SIZE
     audio_profile: str = "raw"
     channel_mode: str = "mixed"
+    channel_source: str = "stereo"
+    my_track: int = 1
+    others_track: int = 2
+    mix_track: int = 0
     my_channel: str = "left"
     one_on_one: bool = False
     audio_format: AudioFormat = WAV_FORMAT
@@ -169,7 +178,8 @@ class PipelineConfig:
     stages: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        validate_channel_settings(self.channel_mode, self.my_channel, self.one_on_one)
+        validate_channel_settings(self.channel_mode, self.my_channel, self.one_on_one,
+                                  self.channel_source, self.my_track, self.others_track, self.mix_track)
         if self.channel_mode == "me-others":
             self.speakers = {**default_channel_speakers(self), **(self.speakers or {})}
         compose_asr_prompt(self.asr_profile, self.asr_initial_prompt, self.asr_glossary)
@@ -183,7 +193,7 @@ class PipelineConfig:
 # (PipelineConfig holds the resolved AudioFormat, run.json records its name),
 # PipelineConfig fields. device is shared by the two GPU stages.
 STAGE_SETTINGS: dict[str, tuple[str, ...]] = {
-    "convert": ("audio_profile", "audio_format", "channel_mode", "my_channel"),
+    "convert": ("audio_profile", "audio_format", "channel_mode", "my_channel", *TRACK_DEFAULTS),
     "transcribe": (
         "language",
         "device",
@@ -318,6 +328,7 @@ def _record_stage_settings(job_dir: Path, stage_name: str, config: PipelineConfi
 
 _UNSET = object()
 _RESUMABLE_SETTINGS = (
+    *TRACK_DEFAULTS,
     "channel_mode", "my_channel", "one_on_one",
     "min_speakers", "max_speakers", "language", "device", "speakers", "asr_model",
     "asr_compute_type", "asr_beam_size", "asr_temperature", "asr_condition_on_previous_text",
@@ -374,6 +385,10 @@ def run_pipeline(
     asr_chunk_size: int = _UNSET,
     audio_profile: str = _UNSET,
     channel_mode: str = _UNSET,
+    channel_source: str = _UNSET,
+    my_track: int = _UNSET,
+    others_track: int = _UNSET,
+    mix_track: int = _UNSET,
     my_channel: str = _UNSET,
     one_on_one: bool = _UNSET,
     audio_format: AudioFormat | str | None = _UNSET,
@@ -396,7 +411,8 @@ def run_pipeline(
     overrides = {key: supplied[key] for key in _RESUMABLE_SETTINGS if supplied[key] is not _UNSET}
     settings = read_job_settings(Path(job_dir), include_speakers="speakers" not in overrides) if job_dir is not None else {}
     layout_changed = any(key in overrides and overrides[key] != settings.get(key, default)
-                         for key, default in (("channel_mode", "mixed"), ("my_channel", "left")))
+                         for key, default in (("channel_mode", "mixed"), ("my_channel", "left"),
+                                              *TRACK_DEFAULTS.items()))
     if layout_changed and "speakers" not in overrides:
         settings["speakers"] = None
     settings.update(overrides)
@@ -442,6 +458,10 @@ def _run_pipeline(
     asr_chunk_size: int = PipelineConfig.asr_chunk_size,
     audio_profile: str = PipelineConfig.audio_profile,
     channel_mode: str = PipelineConfig.channel_mode,
+    channel_source: str = PipelineConfig.channel_source,
+    my_track: int = PipelineConfig.my_track,
+    others_track: int = PipelineConfig.others_track,
+    mix_track: int = PipelineConfig.mix_track,
     my_channel: str = PipelineConfig.my_channel,
     one_on_one: bool = PipelineConfig.one_on_one,
     audio_format: AudioFormat | str | None = PipelineConfig.audio_format,
@@ -542,7 +562,9 @@ def _run_pipeline(
         recorded = read_json(Path(job_dir) / "meta" / "run.json") or {}
         recorded_config = recorded.get("pipeline_config", {})
         if recorded_config and not convert_in_range and any(recorded_config.get(key, default) != value for key, value, default in (
-                ("channel_mode", channel_mode, "mixed"), ("my_channel", my_channel, "left"))):
+                ("channel_mode", channel_mode, "mixed"), ("my_channel", my_channel, "left"),
+                ("channel_source", channel_source, "stereo"), ("my_track", my_track, 1),
+                ("others_track", others_track, 2), ("mix_track", mix_track, 0))):
             raise ValueError("Changing channel mode or your channel requires restarting from convert")
         if (recorded_config and recorded_config.get("one_on_one", False) != one_on_one
                 and not convert_in_range and "diarize" not in stage_names[from_index:to_index + 1]):
@@ -621,6 +643,10 @@ def _run_pipeline(
         asr_chunk_size=asr_chunk_size,
         audio_profile=audio_profile,
         channel_mode=channel_mode,
+        channel_source=channel_source,
+        my_track=my_track,
+        others_track=others_track,
+        mix_track=mix_track,
         my_channel=my_channel,
         one_on_one=one_on_one,
         audio_format=audio_format,

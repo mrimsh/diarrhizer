@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.8 — 2026-11-17
+
+- Support separate audio tracks for me/others in CLI and GUI, with one-based voice-track selection
+  and an optional playback-only joint mix; retain the stereo L/R mode and existing artifacts.
+- Preserve track selection through cache/resume/restart and exports; retain delayed stream starts
+  on a common timeline, validate missing/duplicate tracks before ASR, and keep the joint mix out of ASR.
+
 ## 2.7 — 2026-11-16
 
 - Add explicit me/others stereo processing in CLI and GUI: select the local channel, transcribe

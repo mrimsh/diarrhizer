@@ -12,6 +12,7 @@ from diarrhizer.pipeline.cache import config_mismatch, is_stale, source_fingerpr
 from diarrhizer.utils import read_json, write_json_atomic
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance
 from diarrhizer.projects import JOB_FILE, read_config, media_path, validate_storage
+from diarrhizer.pipeline.channels import track_settings, channel_tracks, TRACK_DEFAULTS
 
 if TYPE_CHECKING:
     from diarrhizer.pipeline.runner import JobContext
@@ -26,6 +27,8 @@ logger = logging.getLogger(__name__)
 #   audio/normalized_left.wav / normalized_right.wav as extras in mixed mode.
 #   Explicit me-others mode also creates these channels (with the chosen filters), validates stereo
 #   before any stage runs, and feeds each channel downstream without trimming silence or shifting time.
+#   channel_source=tracks extracts explicit one-based audio streams into the same internal slots;
+#   the chosen mix track (or a mix of the two voices) is used only for playback, never for ASR.
 #   config.audio_format (CONFIG:AUDIO_FORMATS) may add an archive copy of each of those files
 #   (audio/archive[_left|_right].<ext>), encoded from the original input with the same filters; with
 #   keep_wav=false, finalize() drops the working WAVs once the whole job completed, leaving only archives.
@@ -48,7 +51,7 @@ logger = logging.getLogger(__name__)
 #   split-stereo also artifacts/audio/normalized_left.wav / normalized_right.wav (+ archive_left/right.<ext>)
 # @sideEffects: Creates output directory structure, writes audio file(s) to disk, deletes superseded audio
 #   files, finalize() deletes working WAVs, logs progress via logging (INFO, extra={"stage": "convert"})
-# @errors: RuntimeError, FileNotFoundError
+# @errors: RuntimeError, FileNotFoundError; ValueError for invalid or missing voice tracks
 # @see: ADAPTER:FFMPEG, CONFIG:AUDIO_FORMATS, ARTIFACTS:JOB_AUDIO, PIPELINE:RUNNER
 class ConvertStage:
     """Stage for converting input media to normalized WAV format."""
@@ -122,6 +125,7 @@ class ConvertStage:
             and self._source_matches(job, fingerprint)
             and recorded.get("audio_profile") == audio_profile
             and recorded.get("channel_mode", "mixed") == config.channel_mode
+            and all(recorded.get(key, TRACK_DEFAULTS[key]) == value for key, value in track_settings(config).items())
             and not is_stale(outputs=[meta_output], inputs=[input_path])
         )
         if signal_unchanged and all(p.exists() for p in wav_paths.values()):
@@ -146,12 +150,18 @@ class ConvertStage:
             if input_path.resolve() != original.resolve():
                 shutil.copy2(input_path, original)
         if wav_action == "convert":
-            self.ffmpeg_adapter.convert_to_wav(
-                input_path=str(input_path),
-                output_path=str(audio_output),
-                audio_profile=audio_profile,
-            )
-            if split and audio_profile != FFmpegAdapter.PROFILE_SPLIT_STEREO:
+            if config.channel_source == "tracks":
+                for key, path in wav_paths.items():
+                    channel = None if key == "audio" else (0 if key.endswith("_left") else 1)
+                    self.ffmpeg_adapter.encode_tracks(
+                        input_path, path, ["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"],
+                        self._input_tracks(config, channel), audio_profile=audio_profile,
+                    )
+            else:
+                self.ffmpeg_adapter.convert_to_wav(
+                    input_path=str(input_path), output_path=str(audio_output), audio_profile=audio_profile,
+                )
+            if split and config.channel_source != "tracks" and audio_profile != FFmpegAdapter.PROFILE_SPLIT_STEREO:
                 for key_suffix, _, channel in self._SPLIT_CHANNELS:
                     self.ffmpeg_adapter.encode(
                         input_path, wav_paths[f"audio{key_suffix}"],
@@ -167,13 +177,17 @@ class ConvertStage:
             )
 
         for path, channel in archive_targets.values():
-            self.ffmpeg_adapter.encode(
-                input_path=input_path,
-                output_path=path,
-                encoder_args=audio_format.encoder_args(channels=1 if channel is not None else None),
-                audio_profile=audio_profile,
-                channel=channel,
-            )
+            if config.channel_source == "tracks":
+                self.ffmpeg_adapter.encode_tracks(
+                    input_path, path, audio_format.encoder_args(channels=1),
+                    self._input_tracks(config, channel), audio_profile=audio_profile,
+                )
+            else:
+                self.ffmpeg_adapter.encode(
+                    input_path=input_path, output_path=path,
+                    encoder_args=audio_format.encoder_args(channels=1 if channel is not None else None),
+                    audio_profile=audio_profile, channel=channel,
+                )
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
 
@@ -200,6 +214,7 @@ class ConvertStage:
                 "format": "wav",
                 "audio_profile": audio_profile,
                 "channel_mode": config.channel_mode,
+                **track_settings(config),
                 "audio_format": audio_format.to_dict(),
             },
             "start_time": start_time.isoformat(),
@@ -210,6 +225,7 @@ class ConvertStage:
                 "channel_mode": config.channel_mode,
                 "my_channel": config.my_channel,
                 "one_on_one": config.one_on_one,
+                **track_settings(config),
                 "max_speakers": config.max_speakers,
                 "language": config.language,
                 "device": config.device,
@@ -414,6 +430,8 @@ class ConvertStage:
         if not self._source_matches(job):
             return False
         recorded = self._read_recorded_config(job_dir)
+        if any(recorded.get(key, TRACK_DEFAULTS[key]) != value for key, value in track_settings(job.config).items()):
+            return False
         if recorded.get("channel_mode", "mixed") != job.config.channel_mode:
             return False
         meta = read_json(job_dir / self.META_RUN_JSON) or {}
@@ -433,7 +451,19 @@ class ConvertStage:
     def preflight(self, job: "JobContext") -> None:
         if job.config.channel_mode == "me-others" and (job.config.force
                 or job.config.force_stage == self.NAME or not self.is_cache_valid(job)):
-            self.ffmpeg_adapter.validate_split_input(job.input_path)
+            if job.config.channel_source == "tracks":
+                tracks = [job.config.my_track, job.config.others_track]
+                if job.config.mix_track:
+                    tracks.append(job.config.mix_track)
+                self.ffmpeg_adapter.validate_track_input(job.input_path, tracks)
+            else:
+                self.ffmpeg_adapter.validate_split_input(job.input_path)
+
+    @staticmethod
+    def _input_tracks(config, channel: int | None) -> tuple[int, ...]:
+        if channel is None:
+            return (config.mix_track,) if config.mix_track else (config.my_track, config.others_track)
+        return (channel_tracks(config)["left" if channel == 0 else "right"],)
 
     def _source_matches(self, job: "JobContext", current: dict | None = None) -> bool:
         meta = read_json(job.job_dir / self.META_RUN_JSON)

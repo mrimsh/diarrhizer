@@ -47,7 +47,8 @@ from diarrhizer_gui.screens.new_job_screen import (
 # (heading, settings under it) in pipeline order; device has no heading - it
 # belongs to two stages and sits at the top.
 SECTIONS = [
-    ("Конвертация", ("audio_profile", "audio_format", "channel_mode", "my_channel")),
+    ("Конвертация", ("audio_profile", "audio_format", "channel_mode", "my_channel", "channel_source",
+                     "my_track", "others_track", "mix_track")),
     (
         "Распознавание",
         (
@@ -90,6 +91,7 @@ MIN_TURN_TOOLTIP = (
 #   Compatibility ASR controls explicitly label the pinned backend's unsupported/effective behavior.
 #   ASR profile/glossary and actual VAD controls can be changed independently; invalid VAD hysteresis is rejected.
 #   Channel mode/local channel can change from conversion; one-on-one can change from diarization.
+#   Track source and one-based voice/playback selections are editable when restarting conversion.
 # @inputs: intro text, settings keys, recorded kwargs, QSettings (custom model list), optional EnvironmentProbe
 # @outputs: overrides() -> {run_pipeline setting: new value}, accepted/rejected dialog result
 # @sideEffects: Reads audio_formats.json and the HF cache listing to fill the choices; writes nothing
@@ -210,7 +212,23 @@ class RestartDialog(QDialog):
 
     def _add_field(self, form: QFormLayout, key: str) -> None:
         value = self._recorded_value(key)
-        if key in ("channel_mode", "my_channel"):
+        if key == "channel_source":
+            combo = QComboBox()
+            combo.addItem("L/R одной стереодорожки", "stereo")
+            combo.addItem("Отдельные аудиодорожки", "tracks")
+            self._select_data(combo, value)
+            self._register(key, combo, combo.currentData)
+            form.addRow("Источники голосов:", combo)
+        elif key in ("my_track", "others_track", "mix_track"):
+            spin = QSpinBox()
+            spin.setRange(0 if key == "mix_track" else 1, 999)
+            if key == "mix_track":
+                spin.setSpecialValueText("Авто: смешать выбранные")
+            spin.setValue(int(value))
+            self._register(key, spin, spin.value)
+            form.addRow({"my_track": "Я — аудиодорожка:", "others_track": "Остальные — аудиодорожка:",
+                         "mix_track": "Общий микс для плеера:"}[key], spin)
+        elif key in ("channel_mode", "my_channel"):
             combo = QComboBox()
             choices = ([("Общий микс", "mixed"), ("Я / остальные", "me-others")]
                        if key == "channel_mode" else [("Левый (L)", "left"), ("Правый (R)", "right")])
@@ -432,11 +450,11 @@ class RestartDialog(QDialog):
     def _problem(self) -> Optional[str]:
         values = self._values()
         options = {key: values.get(key, self._recorded_value(key))
-                   for key in ("channel_mode", "my_channel", "one_on_one")}
+                   for key in ("channel_mode", "my_channel", "one_on_one", "channel_source", "my_track", "others_track", "mix_track")}
         try:
             validate_channel_settings(**options)
-        except ValueError:
-            return "Флажок «Один собеседник» доступен только в режиме «Я / остальные»."
+        except ValueError as exc:
+            return str(exc)
         if "asr_model" in values and not values["asr_model"]:
             return "Укажите модель распознавания."
         if "min_speakers" in values and values["min_speakers"] > values["max_speakers"]:
