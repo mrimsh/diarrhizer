@@ -53,6 +53,31 @@ def resolve_ffmpeg_path(explicit: Optional[str | Path] = None) -> Optional[str]:
     return shutil.which("ffmpeg")
 
 
+# [SEMANTIC-BEGIN] ADAPTER:MEDIA_PROBE
+# @purpose: Read metadata for local media without decoding the whole recording
+# @description: Prefer ffprobe beside the configured FFmpeg, then look on PATH. Request only
+#   container duration/size and audio streams in input order, matching FFmpeg's audio-only mapping.
+# @inputs: local media path
+# @outputs: command argv for a caller-managed process that returns UTF-8 JSON
+# @sideEffects: Checks executable paths; never starts a process or writes files itself
+# @errors: FileNotFoundError if ffprobe or the configured FFmpeg executable is missing
+# @see: ADAPTER:FFMPEG, GUI:MEDIA_INFO
+def media_probe_command(path: Path) -> list[str]:
+    ffmpeg = resolve_ffmpeg_path()
+    probe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    sibling = Path(ffmpeg).with_name(probe_name) if ffmpeg else None
+    probe = str(sibling.resolve()) if sibling and sibling.is_file() else shutil.which(probe_name)
+    if not probe:
+        raise FileNotFoundError("FFprobe not found")
+    return [
+        probe, "-v", "error", "-protocol_whitelist", "file", "-select_streams", "a",
+        "-show_entries", "format=duration,size:stream=codec_name,sample_rate,channels,channel_layout:"
+                         "stream_tags=title,language",
+        "-of", "json", "-i", str(path.absolute()),
+    ]
+# [SEMANTIC-END] ADAPTER:MEDIA_PROBE
+
+
 def list_audio_encoders(ffmpeg_path: str) -> set[str]:
     """Names of the audio encoders this ffmpeg build ships (`ffmpeg -encoders`).
 

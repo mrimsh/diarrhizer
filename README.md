@@ -1,4 +1,4 @@
-# Diarrhizer 2.11
+# Diarrhizer 2.12
 
 By MRIMSH
 
@@ -8,7 +8,7 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
 and a CLI (`python -m diarrhizer run …`).
 
-**2.11** is the shared application version for the CLI, desktop GUI and Windows launcher.
+**2.12** is the shared application version for the CLI, desktop GUI and Windows launcher.
 Check it with `python -m diarrhizer --version`; the GUI shows it in the window title and sidebar.
 The launcher downloads the current GitHub `main` application when setting up or updating an environment;
 the downloaded application's version can differ from the launcher's own build version.
@@ -202,7 +202,11 @@ python -m diarrhizer_gui.app
 
 * **Новое задание** — add files or whole folders (buttons or drag & drop onto the window), pick the
   mode and parameters, run. Every file becomes its own job; they run one after another. The
-  parameters of the last run are remembered. The file list is the processing order: drag rows (several at once) or use **Вверх** / **Вниз** / **По имени**.
+  parameters of the last run are remembered. Select a file to see its duration, size and audio tracks
+  below the list, with the codec, sample rate and channel count of each track. Track numbers start at
+  1 and skip video streams, matching the **Я / остальные** settings. One stereo track is shown as
+  one audio track with two channels. Drag rows to change the processing order, or use **Вверх** /
+  **Вниз** / **По имени**.
 * **Выполнение** — the running batch: stage progress, live log, queue, **Остановить** (stops at
   once; finished stages are kept). Jobs still waiting in the queue can be dragged into a new order or withdrawn with ✕. Reachable from the sidebar at any time; the sidebar, window title
   and a taskbar flash show progress and completion.

@@ -45,6 +45,7 @@ from diarrhizer.diagnostics import models as model_cache
 from diarrhizer.media import MEDIA_EXTENSIONS, expand_media_paths, is_media_file
 from diarrhizer_gui import custom_models, settings_keys
 from diarrhizer_gui.job_queue import QueuedRun
+from diarrhizer_gui.screens.media_info import MediaInfo
 from diarrhizer_gui.screens.project_panel import ProjectPanel
 from diarrhizer_gui.screens.recording_time import RecordingTimeEditor
 from diarrhizer.recording_time import suggest_recording_time
@@ -211,12 +212,13 @@ class FileList(QListWidget):
 #   Me-others offers the local channel and one-on-one switch; only group mode requires an HF token.
 #   Source type, one-based voice track numbers and optional playback mix are remembered in queued jobs.
 #   In me-others mode the playback mix can be omitted independently of voice storage.
+#   Selecting a source previews its file properties and audio-only track numbers asynchronously.
 #   The queue captures timestamps before processing, and planning never creates or renames job artifacts.
 # @inputs: media files, recording-time editor, project/team and processing settings
 # @outputs: QueuedRun items with explicit recorded_at wall time
 # @sideEffects: Reads media paths; remembers processing choices in QSettings on Run
 # @errors: Invalid run choices are shown on the form before queuing
-# @see: JOB:RECORDING_TIME, GUI:RECORDING_TIME, GUI:PROJECT_SELECTION, GUI:JOB_QUEUE
+# @see: JOB:RECORDING_TIME, GUI:RECORDING_TIME, GUI:PROJECT_SELECTION, GUI:JOB_QUEUE, GUI:MEDIA_INFO
 class NewJobScreen(QWidget):
     runs_requested = Signal(list)  # [QueuedRun]
 
@@ -282,6 +284,8 @@ class NewJobScreen(QWidget):
         files_box.addWidget(self._files)
         files_box.addLayout(files_buttons)
         files_box.addWidget(files_hint)
+        self._media_info = MediaInfo()
+        files_box.addWidget(self._media_info)
         self._recording = RecordingTimeEditor()
         self._recording.setEnabled(False)
         self._recording.changed.connect(self._recording_edited)
@@ -596,8 +600,9 @@ class NewJobScreen(QWidget):
 
     def _recording_selection(self, current, previous=None):
         self._recording.setEnabled(current is not None)
+        source = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
+        self._media_info.show_file(source)
         if current is not None:
-            source = current.data(Qt.ItemDataRole.UserRole)
             self._recording.set_source(source)
             self._recording.set_value(self._recording_times[source])
             self._project_panel.set_recording_context(source, self._recording.value())

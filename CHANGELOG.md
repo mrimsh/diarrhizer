@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.12 — 2026-11-18
+
+- Show duration, file size and audio track details for the selected file in New Job. Track
+  numbers match the me/others selectors and exclude video. Inspect metadata in the background
+  so a slow or failed preview does not block the form.
+
 ## 2.11 — 2026-11-18
 
 - Add a GUI option to omit the playback mix in me/others mode for both stereo L/R and separate

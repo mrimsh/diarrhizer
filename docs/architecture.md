@@ -1,6 +1,6 @@
 # Architecture
 
-Current source version: **2.11**, shared by the CLI, desktop GUI and Windows launcher.
+Current source version: **2.12**, shared by the CLI, desktop GUI and Windows launcher.
 The [2.x roadmap](roadmap.md) describes the direction toward autonomous call logging, a separate
 call agent and optional integration skills; those capabilities remain planned.
 
@@ -458,6 +458,10 @@ sources. The two voice files are sufficient for conversion to count as complete 
 remote diarization to run again. Voice retention and format still follow the job's storage settings.
 The GUI restores the choice when resuming and lets users change it by restarting conversion.
 Without the saved mix the combined player in the result screen is unavailable.
+
+On **Новое задание**, the file preview reads only the current file's metadata via FFprobe, without
+blocking the GUI or decoding the whole recording. Its track numbers match conversion's audio-only
+ordinals. A missing or failed preview does not change the queued run.
 
 ### Audio storage formats
 
