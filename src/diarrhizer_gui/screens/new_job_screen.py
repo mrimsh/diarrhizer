@@ -210,6 +210,7 @@ class FileList(QListWidget):
 #   ASR profile/glossary and real VAD controls are remembered and copied as values into each queued run.
 #   Me-others offers the local channel and one-on-one switch; only group mode requires an HF token.
 #   Source type, one-based voice track numbers and optional playback mix are remembered in queued jobs.
+#   In me-others mode the playback mix can be omitted independently of voice storage.
 #   The queue captures timestamps before processing, and planning never creates or renames job artifacts.
 # @inputs: media files, recording-time editor, project/team and processing settings
 # @outputs: QueuedRun items with explicit recorded_at wall time
@@ -337,6 +338,11 @@ class NewJobScreen(QWidget):
             setattr(self, f"_{key}_spin", spin)
             track_form.addRow(label, spin)
         channel_row.addRow(self._tracks_options)
+        self._no_mix_checkbox = QCheckBox("Не сохранять общий микс")
+        self._no_mix_checkbox.setToolTip("Раздельные голоса сохраняются по настройкам «Организация задания». "
+                                        "Общее воспроизведение в GUI будет недоступно.")
+        self._no_mix_checkbox.toggled.connect(self._validate)
+        channel_row.addRow(self._no_mix_checkbox)
         channel_row.addRow(self._one_on_one_checkbox)
         self._channel_hint = QLabel("Нужна стереозапись: ваш голос только в одном канале, "
                                    "собеседники — в другом. Число спикеров ниже — без вас.")
@@ -633,6 +639,7 @@ class NewJobScreen(QWidget):
         channel = value(self._key("my_channel"), "left", type=str)
         self._my_channel_combo.setCurrentIndex(max(0, self._my_channel_combo.findData(channel)))
         self._one_on_one_checkbox.setChecked(value(self._key("one_on_one"), True, type=bool))
+        self._no_mix_checkbox.setChecked(value(self._key("no_mix"), False, type=bool))
         source = value(self._key("channel_source"), "stereo", type=str)
         self._channel_source_combo.setCurrentIndex(max(0, self._channel_source_combo.findData(source)))
         for key, default in (("my_track", 1), ("others_track", 2), ("mix_track", 0)):
@@ -671,6 +678,7 @@ class NewJobScreen(QWidget):
         set_value(self._key("mode"), self._mode_combo.currentData())
         set_value(self._key("my_channel"), self._my_channel_combo.currentData())
         set_value(self._key("one_on_one"), self._one_on_one_checkbox.isChecked())
+        set_value(self._key("no_mix"), self._no_mix_checkbox.isChecked())
         set_value(self._key("channel_source"), self._channel_source_combo.currentData())
         for key in ("my_track", "others_track", "mix_track"):
             set_value(self._key(key), getattr(self, f"_{key}_spin").value())
@@ -853,6 +861,7 @@ class NewJobScreen(QWidget):
         tracks = self._channel_source_combo.currentData() == "tracks"
         self._stereo_options.setVisible(not tracks)
         self._tracks_options.setVisible(tracks)
+        self._mix_track_spin.setEnabled(not self._no_mix_checkbox.isChecked())
         self._channel_hint.setText(
             "Номера аудиодорожек начинаются с 1, видеодорожки не считаются. "
             "Микс используется только для прослушивания. Число спикеров — без вас."
@@ -914,6 +923,7 @@ class NewJobScreen(QWidget):
             "my_track": self._my_track_spin.value(),
             "others_track": self._others_track_spin.value(),
             "mix_track": self._mix_track_spin.value(),
+            "save_mix": mode != "me_others" or not self._no_mix_checkbox.isChecked(),
             "one_on_one": mode == "me_others" and self._one_on_one_checkbox.isChecked(),
             **self._project_panel.options(),
             "out_dir": self._out_field.text(),

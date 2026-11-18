@@ -73,14 +73,24 @@ def test_track_choices_are_validated_queued_and_remembered(qapp, ini_settings, t
     screen._my_track_spin.setValue(1)
     screen._mix_track_spin.setValue(3)
     assert screen._run_button.isEnabled()
+    screen._no_mix_checkbox.setChecked(True)
+    assert not screen._mix_track_spin.isEnabled()
+    screen._audio_format_combo.setCurrentIndex(screen._audio_format_combo.findData('flac'))
+    for kind, mode in (('working', 'discard'), ('original', 'discard'), ('archive', 'template')):
+        combo = screen._project_panel.storage[kind]
+        combo.setCurrentIndex(combo.findData(mode))
     queued = []
     screen.runs_requested.connect(queued.extend)
     screen._emit_run_requested()
     assert queued[0].kwargs['channel_source'] == 'tracks'
     assert [queued[0].kwargs[k] for k in ('my_track', 'others_track', 'mix_track')] == [1, 2, 3]
+    assert queued[0].kwargs['save_mix'] is False
+    assert queued[0].kwargs['audio_format'].name == 'flac'
+    assert queued[0].kwargs['storage'] == {'working': 'discard', 'original': 'discard', 'archive': 'template'}
     again = new_job_screen.NewJobScreen()
     assert again._channel_source_combo.currentData() == 'tracks'
     assert again._mix_track_spin.value() == 3
+    assert again._no_mix_checkbox.isChecked() and not again._mix_track_spin.isEnabled()
     assert not again._tracks_options.isHidden() and again._stereo_options.isHidden()
     screen.close()
     again.close()
@@ -97,4 +107,7 @@ def test_conversion_restart_exposes_audio_track_selection(qapp, ini_settings):
     assert dialog._problem() is not None
     dialog._widgets['my_track'].setValue(3)
     assert dialog._problem() is None and dialog.overrides() == {'my_track': 3}
+    dialog.field('save_mix').setChecked(True)
+    assert not dialog.field('mix_track').isEnabled()
+    assert dialog.overrides() == {'my_track': 3, 'save_mix': False}
     dialog.close()

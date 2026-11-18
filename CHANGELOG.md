@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.11 — 2026-11-18
+
+- Add a GUI option to omit the playback mix in me/others mode for both stereo L/R and separate
+  audio tracks. With FLAC archiving and WAV retention disabled, only the two voice files remain.
+- Remember the option when resuming or restarting conversion; recognition can be rerun using only
+  the separate voice archives.
+
 ## 2.10 — 2026-11-18
 
 - In me/others mode, split long recognition chunks at timed pauses and replies from the other

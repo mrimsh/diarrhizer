@@ -238,6 +238,7 @@ class RediarizeDialog(QDialog):
 # [SEMANTIC-BEGIN] GUI:RESULT_SCREEN
 # @purpose: Display a validated transcript and safely edit speaker names
 # @description: Switching/reloading results and closing the window ask to save/discard/cancel dirty names.
+#   When the job omits its playback mix, the combined player is disabled; voice files remain separate.
 #   An unopened result has no dirty state; saves hold the per-job OS write lock through re-export.
 #   Team-scoped suggestions are explicit roster entries; typing/saving a speaker alone never enrolls a name.
 #   Moving a job refreshes suggestions from its new team while preserving unsaved job-specific names.
@@ -848,7 +849,7 @@ class ResultScreen(QWidget):
         return True
 
     def _audio_source(self) -> Optional[Path]:
-        if self._job_dir is None:
+        if self._job_dir is None or self._mix_disabled():
             return None
         audio = find_job_audio(self._job_dir)
         if audio is not None:
@@ -860,11 +861,18 @@ class ResultScreen(QWidget):
                 return source
         return None
 
+    def _mix_disabled(self) -> bool:
+        config = self._meta.get("pipeline_config")
+        return isinstance(config, dict) and config.get("save_mix") is False
+
     def _load_audio(self) -> None:
         source = self._audio_source()
         if source is None:
             self._player_bar.hide()
-            self._player_note.setText("Аудио задания не найдено — воспроизведение недоступно.")
+            self._player_note.setText(
+                "Общий микс не сохранён — воспроизведение в плеере недоступно."
+                if self._mix_disabled() else "Аудио задания не найдено — воспроизведение недоступно."
+            )
             self._player_note.show()
             self._set_sample_buttons_enabled(False)
             return

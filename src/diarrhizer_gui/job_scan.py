@@ -116,6 +116,7 @@ def _read_meta(job_dir: Path) -> dict:
 # [SEMANTIC-BEGIN] GUI:JOB_ARTIFACTS
 # @purpose: Discover job state and delete an explicitly selected job without racing its writer
 # @description: Main artifacts define completed stages; export manifests reject incomplete bundles.
+#   When conversion omits the playback mix, the two voice files count as its audio outputs.
 #   Legacy exports remain readable. Hidden OS lock files are not jobs; deletion acquires the job lock.
 #   Scope marker files drive recursive project/team discovery; only actual job folders can be deleted.
 #   History displays/sorts explicit recording time when present, otherwise the legacy processing date.
@@ -130,6 +131,10 @@ def stage_done(job_dir: Path) -> dict:
     # An audio format with keep_wav=false drops normalized.wav once the job
     # completes and keeps audio/archive.<ext> instead - still converted.
     done["convert"] = find_job_audio(job_dir) is not None or bool(read_config(job_dir / JOB_FILE).get("media_finalized"))
+    if not done["convert"]:
+        config = _read_meta(job_dir).get("pipeline_config")
+        if isinstance(config, dict) and config.get("save_mix") is False:
+            done["convert"] = all(find_job_audio(job_dir, suffix) is not None for suffix in ("_left", "_right"))
     done["export"] = export_path(job_dir, "md").is_file() and bundle_valid(job_dir / "export", "manifest.json")
     return done
 

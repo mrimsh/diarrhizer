@@ -48,7 +48,7 @@ from diarrhizer_gui.screens.new_job_screen import (
 # belongs to two stages and sits at the top.
 SECTIONS = [
     ("Конвертация", ("audio_profile", "audio_format", "channel_mode", "my_channel", "channel_source",
-                     "my_track", "others_track", "mix_track")),
+                     "my_track", "others_track", "mix_track", "save_mix")),
     (
         "Распознавание",
         (
@@ -92,6 +92,7 @@ MIN_TURN_TOOLTIP = (
 #   ASR profile/glossary and actual VAD controls can be changed independently; invalid VAD hysteresis is rejected.
 #   Channel mode/local channel can change from conversion; one-on-one can change from diarization.
 #   Track source and one-based voice/playback selections are editable when restarting conversion.
+#   Conversion restarts may also change mix retention without changing the voice sources.
 #   The mixed mode disables saved L/R and track processing options for that run.
 # @inputs: intro text, settings keys, recorded kwargs, QSettings (custom model list), optional EnvironmentProbe
 # @outputs: overrides() -> {run_pipeline setting: new value}, accepted/rejected dialog result
@@ -134,6 +135,12 @@ class RestartDialog(QDialog):
             form.addRow(header)
             for key in shown:
                 self._add_field(form, key)
+
+        if "save_mix" in self._widgets:
+            self._widgets["save_mix"].toggled.connect(self._update_mix_controls)
+            self._widgets["channel_mode"].currentIndexChanged.connect(self._update_mix_controls)
+            self._widgets["channel_source"].currentIndexChanged.connect(self._update_mix_controls)
+            self._update_mix_controls()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -242,6 +249,11 @@ class RestartDialog(QDialog):
             checkbox = QCheckBox("Один собеседник — без диаризации (режим «Я / остальные»)")
             checkbox.setChecked(bool(value))
             self._register(key, checkbox, checkbox.isChecked)
+            form.addRow("", checkbox)
+        elif key == "save_mix":
+            checkbox = QCheckBox("Не сохранять общий микс")
+            checkbox.setChecked(not value)
+            self._register(key, checkbox, lambda: not checkbox.isChecked())
             form.addRow("", checkbox)
         elif key == "audio_profile":
             combo = QComboBox()
@@ -445,10 +457,17 @@ class RestartDialog(QDialog):
 
     # --- reading the form back --------------------------------------------------
 
+    def _update_mix_controls(self) -> None:
+        separated = self._widgets["channel_mode"].currentData() == "me-others"
+        tracks = self._widgets["channel_source"].currentData() == "tracks"
+        no_mix = self._widgets["save_mix"]
+        no_mix.setEnabled(separated)
+        self._widgets["mix_track"].setEnabled(separated and tracks and not no_mix.isChecked())
+
     def _values(self) -> dict:
         values = {key: getter() for key, getter in self._getters.items()}
         if values.get("channel_mode") == "mixed":
-            for key in ("channel_source", "one_on_one"):
+            for key in ("channel_source", "one_on_one", "save_mix"):
                 if key in values:
                     values[key] = getattr(PipelineConfig, key)
         return values
@@ -456,7 +475,8 @@ class RestartDialog(QDialog):
     def _problem(self) -> Optional[str]:
         values = self._values()
         options = {key: values.get(key, self._recorded_value(key))
-                   for key in ("channel_mode", "my_channel", "one_on_one", "channel_source", "my_track", "others_track", "mix_track")}
+                   for key in ("channel_mode", "my_channel", "one_on_one", "channel_source",
+                               "my_track", "others_track", "mix_track", "save_mix")}
         try:
             validate_channel_settings(**options)
         except ValueError as exc:

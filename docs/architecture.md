@@ -1,6 +1,6 @@
 # Architecture
 
-Current source version: **2.10**, shared by the CLI, desktop GUI and Windows launcher.
+Current source version: **2.11**, shared by the CLI, desktop GUI and Windows launcher.
 The [2.x roadmap](roadmap.md) describes the direction toward autonomous call logging, a separate
 call agent and optional integration skills; those capabilities remain planned.
 
@@ -453,13 +453,20 @@ convert, which can reuse unchanged WAVs and ASR while recording the new layout. 
 distinguish mixed, channel diarization and model-free results. Archive lookup uses the selected
 channel suffix and never falls back to the mono mix, including portable named jobs after WAV cleanup.
 
+In separated mode, `save_mix=false` skips the working and archive mix for both L/R and track
+sources. The two voice files are sufficient for conversion to count as complete and for ASR and
+remote diarization to run again. Voice retention and format still follow the job's storage settings.
+The GUI restores the choice when resuming and lets users change it by restarting conversion.
+Without the saved mix the combined player in the result screen is unavailable.
+
 ### Audio storage formats
 
 Profiles decide *what the pipeline processes*; storage formats
 (`src/diarrhizer/audio_formats.py`, `--audio-format`) decide *what the job keeps*.
 Processing always uses the lossless working WAV. A format other than `wav` makes
 convert also write an archive copy, `audio/archive.<ext>` (plus
-`archive_left/right.<ext>` for `split-stereo` or `me-others`). Each copy is encoded from the
+`archive_left/right.<ext>` for `split-stereo` or `me-others`; with `save_mix=false` only the
+two channel copies are written). Each copy is encoded from the
 original input with the format's codec, `-q:a` or `-b:a`, sample rate, channel
 count and extra args, with `-vn`, and gets the same profile filters as the WAV.
 Formats with `keep_wav: false` drop the working WAV(s) once the job completes.

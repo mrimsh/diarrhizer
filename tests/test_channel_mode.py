@@ -13,7 +13,7 @@ from diarrhizer.adapters.ffmpeg import FFmpegAdapter, resolve_ffmpeg_path
 from diarrhizer.audio_formats import ENV_AUDIO_FORMATS_FILE, find_job_audio
 from diarrhizer.pipeline.runner import run_pipeline
 from diarrhizer.pipeline.settings import read_job_settings
-from diarrhizer_gui.job_scan import job_mode, rediarize_plan, resume_plan, restart_plan
+from diarrhizer_gui.job_scan import job_mode, rediarize_plan, resume_plan, restart_plan, stage_done
 
 
 def read(path):
@@ -357,6 +357,57 @@ def test_track_slot_change_rebuilds_wavs_instead_of_relabelling_old_audio(multit
     assert samples(left_wav) == original_right
     assert samples(right_wav) == original_left
     assert read(job / 'asr/transcript.json')['channels']['right']['source_track'] == 1
+
+
+@pytest.mark.parametrize("source_kind", ["stereo", "tracks"])
+def test_only_two_flacs_remain_and_resume_without_mix(source_kind, request, tmp_path, adapters):
+    if source_kind == "tracks":
+        source = request.getfixturevalue("multitrack_media")
+        options = {"channel_source": "tracks", "mix_track": 99}
+    else:
+        if not resolve_ffmpeg_path():
+            pytest.skip("FFmpeg not installed")
+        source = tmp_path / "stereo.wav"
+        with wave.open(str(source), "wb") as wav:
+            wav.setparams((2, 2, 16000, 0, "NONE", "not compressed"))
+            wav.writeframes(struct.pack("<hh", 1000, -1000) * 16000)
+        options = {"audio_profile": "split-stereo"}
+
+    output = tmp_path / "out"
+    first = run_pipeline(input_path=source, out_dir=output, device="cpu", channel_mode="me-others",
+                         one_on_one=True, save_mix=False, audio_format="flac", to_stage="convert",
+                         storage={"original": "discard", "working": "discard", "archive": "template"},
+                         **options)
+    job = Path(first["job_dir"])
+    assert find_job_audio(job) is None
+    assert stage_done(job)["convert"]
+    _, resume = resume_plan(job)
+    assert resume["from_stage"] == "transcribe" and resume["save_mix"] is False
+    run_pipeline(**resume)
+
+    voices = {find_job_audio(job, suffix) for suffix in ("_left", "_right")}
+    assert all(path is not None and path.suffix == ".flac" for path in voices)
+    assert {path for path in (job / "audio").rglob("*") if path.is_file()} == voices
+    assert find_job_audio(job) is None
+    assert not Diar.calls
+    cached = run_pipeline(job_dir=job, out_dir=output)
+    assert all(stage["status"] == "cached" for stage in cached["stages"])
+
+    _, restart = restart_plan(job, "transcribe")
+    run_pipeline(**restart)
+    assert set(ASR.calls[-2:]) == voices
+
+
+def test_conversion_restart_removes_previous_mix_and_keeps_voice_archives(tmp_path, fake_media):
+    job = Path(start(tmp_path, one_on_one=True, audio_format="flac")["job_dir"])
+    previous_mix = find_job_audio(job)
+    assert previous_mix is not None
+
+    _, restart = restart_plan(job, "convert", {"save_mix": False})
+    run_pipeline(**restart)
+
+    assert not previous_mix.exists()
+    assert {path.name for path in (job / "audio").iterdir()} == {"archive_left.flac", "archive_right.flac"}
 
 
 @pytest.mark.parametrize('options', [dict(my_track=0), dict(others_track=1), dict(my_track=4), dict(mix_track=4)])

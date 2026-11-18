@@ -1,4 +1,4 @@
-# Diarrhizer 2.10
+# Diarrhizer 2.11
 
 By MRIMSH
 
@@ -8,7 +8,7 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
 and a CLI (`python -m diarrhizer run …`).
 
-**2.10** is the shared application version for the CLI, desktop GUI and Windows launcher.
+**2.11** is the shared application version for the CLI, desktop GUI and Windows launcher.
 Check it with `python -m diarrhizer --version`; the GUI shows it in the window title and sidebar.
 The launcher downloads the current GitHub `main` application when setting up or updating an environment;
 the downloaded application's version can differ from the launcher's own build version.
@@ -474,6 +474,13 @@ and **Общий микс для плеера: 3**. Track numbers count audio st
 Voice tracks may each be mono or stereo; each is downmixed independently. The playback track is
 never transcribed or diarized. Leave playback at **Авто: смешать выбранные** to build it from the two
 voice tracks when no joint mix exists. Delayed track starts are padded to retain their common timeline.
+
+To keep only the two voices as FLAC, enable **Не сохранять общий микс** in **Я / остальные**
+and select **Формат архива → FLAC**. Under **Организация задания**, keep **Архивная копия**
+(**По шаблону задания** or **С исходным именем**) and set **Рабочий WAV** and **Оригинальный файл**
+to **Не сохранять**. Only the two audio files with `_left` and `_right` suffixes remain after
+completion. The combined result player is unavailable, but voice recognition can be rerun from
+the separate FLAC files. This works with both stereo L/R and separate audio tracks.
 
 ```powershell
 # One-on-one: your microphone is on the left; no diarization model or HF token needed.

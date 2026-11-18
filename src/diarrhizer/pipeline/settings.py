@@ -14,7 +14,7 @@ from diarrhizer.pipeline.channels import validate_channel_settings, TRACK_DEFAUL
 
 FULL_STAGES = ("convert", "transcribe", "diarize", "merge", "export")
 RECORDED_RUN_KEYS = (
-    "channel_mode", "my_channel", "one_on_one",
+    "channel_mode", "my_channel", "one_on_one", "save_mix",
     *TRACK_DEFAULTS,
     "language", "device", "min_speakers", "max_speakers", "asr_model", "asr_compute_type",
     "asr_beam_size", "asr_temperature", "asr_condition_on_previous_text", "asr_initial_prompt",
@@ -33,7 +33,7 @@ RECORDED_RUN_KEYS = (
 #   ASR profiles, glossary contents and real VAD controls survive resume; missing legacy keys use defaults.
 #   Portable jobs resolve their named export through job.json; legacy result.json remains supported.
 #   Channel layout, local channel and one-on-one choice survive CLI/GUI resume unchanged.
-#   One-based track selection and optional playback mix survive resume; legacy jobs use stereo defaults.
+#   Track selection and mix retention survive resume; legacy jobs keep the mix by default.
 # @inputs: job directory, optional already-read metadata
 # @outputs: recorded run kwargs and stage names
 # @sideEffects: Reads job JSON only; never changes a queued job
@@ -72,7 +72,7 @@ def read_job_settings(job_dir: Path, meta: dict | None = None, *, include_speake
     integers = {"min_speakers", "max_speakers", "asr_beam_size", "asr_vad_min_silence_ms", "asr_chunk_size",
                 "my_track", "others_track", "mix_track"}
     numbers = {"asr_temperature", "min_turn_duration", "asr_vad_onset", "asr_vad_offset"}
-    booleans = {"asr_condition_on_previous_text", "asr_vad_filter", "one_on_one"}
+    booleans = {"asr_condition_on_previous_text", "asr_vad_filter", "one_on_one", "save_mix"}
     nullable = {"asr_compute_type", "asr_initial_prompt", "asr_glossary"}
     for key, value in settings.items():
         if key in integers:
@@ -87,6 +87,7 @@ def read_job_settings(job_dir: Path, meta: dict | None = None, *, include_speake
             raise ValueError(f"{job_dir}/meta/run.json: invalid {key}")
     validate_channel_settings(settings.get("channel_mode", "mixed"), settings.get("my_channel", "left"),
                               settings.get("one_on_one", False),
+                              save_mix=settings.get("save_mix", True),
                               **{key: settings.get(key, default) for key, default in TRACK_DEFAULTS.items()})
     compose_asr_prompt(settings.get("asr_profile", "default"), settings.get("asr_initial_prompt"),
                        settings.get("asr_glossary"))

@@ -41,7 +41,7 @@ def default_channel_speakers(config) -> dict:
 
 def validate_channel_settings(channel_mode: str, my_channel: str, one_on_one: bool,
                               channel_source: str = "stereo", my_track: int = 1,
-                              others_track: int = 2, mix_track: int = 0) -> None:
+                              others_track: int = 2, mix_track: int = 0, *, save_mix: bool = True) -> None:
     if channel_mode not in ("mixed", "me-others"):
         raise ValueError("channel_mode must be mixed or me-others")
     if my_channel not in ("left", "right"):
@@ -50,6 +50,8 @@ def validate_channel_settings(channel_mode: str, my_channel: str, one_on_one: bo
         raise ValueError("one_on_one must be boolean")
     if one_on_one and channel_mode != "me-others":
         raise ValueError("one_on_one requires channel_mode=me-others")
+    if type(save_mix) is not bool or (not save_mix and channel_mode != "me-others"):
+        raise ValueError("save_mix must be boolean and can only be disabled in me-others mode")
     if channel_source not in ("stereo", "tracks"):
         raise ValueError("channel_source must be stereo or tracks")
     for key, value, minimum in (("my_track", my_track, 1), ("others_track", others_track, 1),

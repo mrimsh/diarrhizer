@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 #   Stored JSON includes schema_version and installed-package provenance; cache_version stays algorithm-specific.
 #   Me-others mode diarizes only the opposite channel; speaker limits count only the other participants.
 #   One-on-one writes an explicit model-free result and never checks HF credentials or loads pyannote.
+#   Separated modes do not depend on a playback mix for cache freshness.
 #   Audio-track source choices are recorded in metadata and participate in cache validation.
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/diar/diarization.json
@@ -125,19 +126,22 @@ class DiarizeStage:
 
         # The working WAV while it exists, else the archive copy a keep_wav=false
         # format left behind (ARTIFACTS:JOB_AUDIO).
-        audio_input = find_job_audio(job_dir) or job_dir / self.INPUT_WAV
         model_free = config.channel_mode == "me-others" and config.one_on_one
-        if config.channel_mode == "me-others" and not model_free:
+        if model_free:
+            audio_input = None
+        elif config.channel_mode == "me-others":
             other_channel = "right" if config.my_channel == "left" else "left"
             audio_input = channel_audio(job_dir, other_channel)
+        else:
+            audio_input = find_job_audio(job_dir) or job_dir / self.INPUT_WAV
 
         # Build output paths
         diar_output = job_dir / self.DIARIZATION_JSON
 
-        logger.info(f"[{self.NAME}] Diarizing: {audio_input}", extra={"stage": self.NAME})
+        logger.info(f"[{self.NAME}] Diarizing: {audio_input or 'channel labels only'}", extra={"stage": self.NAME})
 
         # Check if input exists
-        if not model_free and not audio_input.exists():
+        if audio_input is not None and not audio_input.exists():
             raise FileNotFoundError(
                 f"Audio file not found: {audio_input}. "
                 "Please run the convert stage first."
@@ -191,7 +195,7 @@ class DiarizeStage:
             "metadata": {
                 **channel_settings(config),
                 "model_free": model_free,
-                "input_audio": str(audio_input),
+                "input_audio": str(audio_input) if audio_input is not None else None,
                 "output_path": str(diar_output),
                 "device": device,
                 "min_speakers": min_speakers,
@@ -251,7 +255,7 @@ class DiarizeStage:
         artifacts = self.get_artifact_paths(job_dir)
         if is_stale(
             outputs=list(self.get_output_paths(job_dir).values()),
-            inputs=[artifacts["input_audio"]],
+            inputs=[] if job.config.channel_mode == "me-others" else [artifacts["input_audio"]],
         ):
             return False
         data = read_json(artifacts["diarization"])

@@ -23,12 +23,13 @@ logger = logging.getLogger(__name__)
 # [SEMANTIC-BEGIN] STAGE:CONVERT
 # @purpose: Normalize input media to WAV mono 16kHz with optional audio profiles, plus an archive copy
 # @description: Uses FFmpeg adapter to convert input audio/video to a standardized format with preprocessing.
-#   Every profile produces a mono mix for playback and mixed-mode ASR. split-stereo additionally produces
+#   By default every profile produces a mono mix for playback and mixed-mode ASR. split-stereo additionally produces
 #   audio/normalized_left.wav / normalized_right.wav as extras in mixed mode.
 #   Explicit me-others mode also creates these channels (with the chosen filters), validates stereo
 #   before any stage runs, and feeds each channel downstream without trimming silence or shifting time.
 #   channel_source=tracks extracts explicit one-based audio streams into the same internal slots;
 #   the chosen mix track (or a mix of the two voices) is used only for playback, never for ASR.
+#   save_mix=false in me-others omits both the working and archive mixes for either source layout.
 #   Reuse requires the recorded slot-to-track mapping; old track artifacts without it are rebuilt.
 #   config.audio_format (CONFIG:AUDIO_FORMATS) may add an archive copy of each of those files
 #   (audio/archive[_left|_right].<ext>), encoded from the original input with the same filters; with
@@ -48,7 +49,7 @@ logger = logging.getLogger(__name__)
 #   Portable job.json independently controls original/working/archive retention and filename templates.
 #   Originals are copied, never moved; discard removes generated media only after successful completion.
 # @inputs: job.input_path, config.audio_profile, config.audio_format
-# @outputs: artifacts/audio/normalized.wav, meta/run.json, optional artifacts/audio/archive.<ext>, and for
+# @outputs: meta/run.json, optional artifacts/audio/normalized.wav and artifacts/audio/archive.<ext>, and for
 #   split-stereo also artifacts/audio/normalized_left.wav / normalized_right.wav (+ archive_left/right.<ext>)
 # @sideEffects: Creates output directory structure, writes audio file(s) to disk, deletes superseded audio
 #   files, finalize() deletes working WAVs, logs progress via logging (INFO, extra={"stage": "convert"})
@@ -102,17 +103,16 @@ class ConvertStage:
         split = audio_profile == FFmpegAdapter.PROFILE_SPLIT_STEREO or config.channel_mode == "me-others"
 
         # Build output paths
-        audio_output = self._wav_paths(job_dir, split)["audio"]
         meta_output = job_dir / self.META_RUN_JSON
-        wav_paths = self._wav_paths(job_dir, split)
-        archive_targets = self._archive_targets(job_dir, audio_format, split)
+        wav_paths = self._wav_paths(job_dir, split, config.save_mix)
+        archive_targets = self._archive_targets(job_dir, audio_format, split, config.save_mix)
 
         # Whether to (re)run is decided by the pipeline runner (is_cache_valid
         # + force flags), not here - run() always does the work when called.
         # It only decides whether the *working WAV* needs rewriting.
 
         # Ensure output directories exist
-        audio_output.parent.mkdir(parents=True, exist_ok=True)
+        next(iter(wav_paths.values())).parent.mkdir(parents=True, exist_ok=True)
         meta_output.parent.mkdir(parents=True, exist_ok=True)
 
         # The WAV's content depends only on source + audio_profile. If neither
@@ -160,11 +160,13 @@ class ConvertStage:
                         input_path, path, ["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"],
                         self._input_tracks(config, channel), audio_profile=audio_profile,
                     )
-            else:
+            elif config.save_mix:
                 self.ffmpeg_adapter.convert_to_wav(
-                    input_path=str(input_path), output_path=str(audio_output), audio_profile=audio_profile,
+                    input_path=str(input_path), output_path=str(wav_paths["audio"]), audio_profile=audio_profile,
                 )
-            if split and config.channel_source != "tracks" and audio_profile != FFmpegAdapter.PROFILE_SPLIT_STEREO:
+            if split and config.channel_source != "tracks" and (
+                not config.save_mix or audio_profile != FFmpegAdapter.PROFILE_SPLIT_STEREO
+            ):
                 for key_suffix, _, channel in self._SPLIT_CHANNELS:
                     self.ffmpeg_adapter.encode(
                         input_path, wav_paths[f"audio{key_suffix}"],
@@ -217,6 +219,7 @@ class ConvertStage:
                 "format": "wav",
                 "audio_profile": audio_profile,
                 "channel_mode": config.channel_mode,
+                "save_mix": config.save_mix,
                 **track_settings(config),
                 **({"track_slots": tracks} if tracks is not None else {}),
                 "audio_format": audio_format.to_dict(),
@@ -229,6 +232,7 @@ class ConvertStage:
                 "channel_mode": config.channel_mode,
                 "my_channel": config.my_channel,
                 "one_on_one": config.one_on_one,
+                "save_mix": config.save_mix,
                 **track_settings(config),
                 "max_speakers": config.max_speakers,
                 "language": config.language,
@@ -288,13 +292,14 @@ class ConvertStage:
         job_dir = job.job_dir
         recorded = self._read_recorded_config(job_dir)
         audio_format = self._recorded_format(recorded)
+        save_mix = recorded.get("save_mix", True)
         identity = read_config(job_dir / JOB_FILE)
         if identity:
             modes = validate_storage(identity.get("storage"))
             split = (recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
                      or recorded.get("channel_mode") == "me-others")
             if modes["working"] == "discard":
-                for wav in self._wav_paths(job_dir, split).values():
+                for wav in self._wav_paths(job_dir, split, save_mix).values():
                     wav.unlink(missing_ok=True)
             write_json_atomic(job_dir / JOB_FILE, {**identity, "media_finalized": True})
             return
@@ -302,8 +307,8 @@ class ConvertStage:
             return
         split = (recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
                  or recorded.get("channel_mode") == "me-others")
-        wav_paths = self._wav_paths(job_dir, split)
-        archives = self._archive_targets(job_dir, audio_format, split)
+        wav_paths = self._wav_paths(job_dir, split, save_mix)
+        archives = self._archive_targets(job_dir, audio_format, split, save_mix)
         for key, wav in wav_paths.items():
             archive, _ = archives[key.replace("audio", "archive", 1)]
             if wav.exists() and archive.exists():
@@ -313,9 +318,11 @@ class ConvertStage:
                     extra={"stage": self.NAME},
                 )
 
-    def _wav_paths(self, job_dir: Path, split: bool) -> dict:
+    def _wav_paths(self, job_dir: Path, split: bool, save_mix: bool) -> dict:
         portable = (job_dir / JOB_FILE).is_file()
-        paths = {"audio": media_path(job_dir, "working", "wav") if portable else job_dir / self.NORMALIZED_WAV}
+        paths = {}
+        if save_mix:
+            paths["audio"] = media_path(job_dir, "working", "wav") if portable else job_dir / self.NORMALIZED_WAV
         if split:
             paths["audio_left"] = media_path(job_dir, "working", "wav", "_left") if portable else job_dir / self.NORMALIZED_LEFT_WAV
             paths["audio_right"] = media_path(job_dir, "working", "wav", "_right") if portable else job_dir / self.NORMALIZED_RIGHT_WAV
@@ -327,7 +334,7 @@ class ConvertStage:
         return (validate_storage(identity.get("storage"))["working"] != "discard"
                 if identity else audio_format.keeps_wav)
 
-    def _archive_targets(self, job_dir: Path, audio_format: AudioFormat, split: bool) -> dict:
+    def _archive_targets(self, job_dir: Path, audio_format: AudioFormat, split: bool, save_mix: bool) -> dict:
         """{artifact key: (archive path, split-stereo channel or None)}; empty when no archive."""
         identity = read_config(job_dir / JOB_FILE)
         if identity and validate_storage(identity.get("storage"))["archive"] == "discard":
@@ -335,7 +342,7 @@ class ConvertStage:
         if not identity and not audio_format.writes_archive:
             return {}
         ext = audio_format.extension
-        targets = {"archive": (archive_path(job_dir, ext), None)}
+        targets = {"archive": (archive_path(job_dir, ext), None)} if save_mix else {}
         if split:
             for key_suffix, file_suffix, channel in self._SPLIT_CHANNELS:
                 targets[f"archive{key_suffix}"] = (archive_path(job_dir, ext, file_suffix), channel)
@@ -406,9 +413,10 @@ class ConvertStage:
         audio_format = self._recorded_format(recorded)
         split = (recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
                  or recorded.get("channel_mode") == "me-others")
+        save_mix = recorded.get("save_mix", True)
 
-        paths = self._wav_paths(job_dir, split) if self._keeps_wav(job_dir, audio_format) else {}
-        for key, (path, _) in self._archive_targets(job_dir, audio_format, split).items():
+        paths = self._wav_paths(job_dir, split, save_mix) if self._keeps_wav(job_dir, audio_format) else {}
+        for key, (path, _) in self._archive_targets(job_dir, audio_format, split, save_mix).items():
             paths[key] = path
         paths["meta"] = job_dir / self.META_RUN_JSON
         return paths
@@ -438,6 +446,8 @@ class ConvertStage:
             return False
         if recorded.get("channel_mode", "mixed") != job.config.channel_mode:
             return False
+        if recorded.get("save_mix", True) != job.config.save_mix:
+            return False
         if job.config.channel_source == "tracks" and recorded.get("track_slots") != channel_tracks(job.config):
             return False
         meta = read_json(job_dir / self.META_RUN_JSON) or {}
@@ -459,7 +469,7 @@ class ConvertStage:
                 or job.config.force_stage == self.NAME or not self.is_cache_valid(job)):
             if job.config.channel_source == "tracks":
                 tracks = [job.config.my_track, job.config.others_track]
-                if job.config.mix_track:
+                if job.config.save_mix and job.config.mix_track:
                     tracks.append(job.config.mix_track)
                 self.ffmpeg_adapter.validate_track_input(job.input_path, tracks)
             else:

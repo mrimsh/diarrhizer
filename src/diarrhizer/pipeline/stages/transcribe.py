@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 #   In me-others mode both full-length channels are transcribed independently with one reusable adapter;
 #   transcript.json retains per-channel results and a chronological combined view (including overlap).
 #   Track-mode results also record the selected source_track; caches distinguish source layouts.
+#   Independent channels do not require a playback mix.
 #   Reusing a track transcript requires matching source_track for each internal slot.
 # @inputs: artifacts/audio/normalized.wav (or artifacts/audio/archive.<ext>)
 # @outputs: artifacts/asr/transcript.json, artifacts/asr/transcript.txt (readable paragraphs, no speakers)
@@ -176,17 +177,17 @@ class TranscribeStage:
 
         # The working WAV while it exists, else the archive copy a keep_wav=false
         # format left behind (ARTIFACTS:JOB_AUDIO).
-        audio_input = find_job_audio(job_dir) or job_dir / self.INPUT_WAV
         channel_inputs = ({channel: channel_audio(job_dir, channel) for channel in ("left", "right")}
                           if config.channel_mode == "me-others" else {})
+        audio_input = None if channel_inputs else find_job_audio(job_dir) or job_dir / self.INPUT_WAV
 
         # Build output paths
         transcript_output = job_dir / self.TRANSCRIPT_JSON
 
-        logger.info(f"[{self.NAME}] Transcribing: {audio_input}", extra={"stage": self.NAME})
+        logger.info(f"[{self.NAME}] Transcribing: {audio_input or 'separate channels'}", extra={"stage": self.NAME})
 
         # Check if input exists
-        if not audio_input.exists():
+        if audio_input is not None and not audio_input.exists():
             raise FileNotFoundError(
                 f"Audio file not found: {audio_input}. "
                 "Please run the convert stage first."
@@ -262,7 +263,7 @@ class TranscribeStage:
             "metadata": {
                 **channel_settings(config),
                 "cache_version": self.CACHE_VERSION,
-                "input_audio": str(audio_input),
+                "input_audio": str(audio_input) if audio_input is not None else None,
                 "output_path": str(transcript_output),
                 "device": device,
                 "language_setting": language,
@@ -349,7 +350,7 @@ class TranscribeStage:
         artifacts = self.get_artifact_paths(job_dir)
         if is_stale(
             outputs=list(self.get_output_paths(job_dir).values()),
-            inputs=[artifacts["input_audio"]],
+            inputs=[] if job.config.channel_mode == "me-others" else [artifacts["input_audio"]],
         ):
             return False
         data = read_json(artifacts["transcript"])
