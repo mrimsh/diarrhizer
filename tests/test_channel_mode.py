@@ -13,6 +13,7 @@ from diarrhizer.adapters.ffmpeg import FFmpegAdapter, resolve_ffmpeg_path
 from diarrhizer.audio_formats import ENV_AUDIO_FORMATS_FILE, find_job_audio
 from diarrhizer.pipeline.runner import run_pipeline
 from diarrhizer.pipeline.settings import read_job_settings
+from diarrhizer.projects import move_jobs
 from diarrhizer_gui.job_scan import job_mode, rediarize_plan, resume_plan, restart_plan, stage_done
 
 
@@ -331,15 +332,38 @@ def test_track_archives_and_changed_selection(multitrack_media, tmp_path, adapte
     job = Path(result['job_dir'])
     assert Diar.calls[0][0].stem == 'normalized_right'
     assert not list((job / 'audio').glob('*.wav'))
-    assert find_job_audio(job, '_left').suffix == '.flac'
+    assert find_job_audio(job, '_left').name == 'archive_track_1.flac'
     run_pipeline(job_dir=job, out_dir=tmp_path / 'out', from_stage='transcribe', force_stage='transcribe')
-    assert ASR.calls[-1].name == 'archive_right.flac'
+    assert ASR.calls[-1].name == 'archive_track_2.flac'
     with pytest.raises(ValueError, match='restarting from convert'):
         run_pipeline(job_dir=job, out_dir=tmp_path / 'out', from_stage='transcribe', my_track=3)
     run_pipeline(job_dir=job, out_dir=tmp_path / 'out', my_track=2, others_track=1)
     assert read_job_settings(job)['my_track'] == 2
+    assert find_job_audio(job, '_left').name == 'archive_track_2.flac'
+    assert find_job_audio(job, '_right').name == 'archive_track_1.flac'
     segments = read(job / 'merged/segments.json')['segments']
     assert {s['source_track'] for s in segments if s['speaker_id'] == 'Speaker_00'} == {2}
+
+
+def test_legacy_track_archives_keep_their_lr_names_on_resume(multitrack_media, tmp_path, adapters):
+    output = tmp_path / "out"
+    result = run_pipeline(input_path=multitrack_media, out_dir=output, device="cpu",
+                          channel_mode="me-others", channel_source="tracks", one_on_one=True,
+                          audio_format="flac")
+    job = Path(result["job_dir"])
+    meta_path = job / "meta/run.json"
+    meta = read(meta_path)
+    meta["config"].pop("archive_tracks")
+    for suffix in ("_left", "_right"):
+        track = meta["config"]["track_slots"][suffix.removeprefix("_")]
+        (job / f"audio/archive_track_{track}.flac").rename(job / f"audio/archive{suffix}.flac")
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    cached = run_pipeline(job_dir=job, out_dir=output)
+    assert all(stage["status"] == "cached" for stage in cached["stages"])
+    _, restart = restart_plan(job, "transcribe")
+    run_pipeline(**restart)
+    assert [path.name for path in ASR.calls[-2:]] == ["archive_left.flac", "archive_right.flac"]
 
 
 def test_track_slot_change_rebuilds_wavs_instead_of_relabelling_old_audio(multitrack_media, tmp_path, adapters):
@@ -363,7 +387,8 @@ def test_track_slot_change_rebuilds_wavs_instead_of_relabelling_old_audio(multit
 def test_only_two_flacs_remain_and_resume_without_mix(source_kind, request, tmp_path, adapters):
     if source_kind == "tracks":
         source = request.getfixturevalue("multitrack_media")
-        options = {"channel_source": "tracks", "mix_track": 99}
+        options = {"channel_source": "tracks", "my_track": 3, "others_track": 2, "my_channel": "right",
+                   "mix_track": 99}
     else:
         if not resolve_ffmpeg_path():
             pytest.skip("FFmpeg not installed")
@@ -387,12 +412,20 @@ def test_only_two_flacs_remain_and_resume_without_mix(source_kind, request, tmp_
 
     voices = {find_job_audio(job, suffix) for suffix in ("_left", "_right")}
     assert all(path is not None and path.suffix == ".flac" for path in voices)
+    suffixes = ("_track_2", "_track_3") if source_kind == "tracks" else ("_left", "_right")
+    assert [find_job_audio(job, slot).name for slot in ("_left", "_right")] == [
+        f"{job.name}{suffix}.flac" for suffix in suffixes
+    ]
     assert {path for path in (job / "audio").rglob("*") if path.is_file()} == voices
     assert find_job_audio(job) is None
     assert not Diar.calls
     cached = run_pipeline(job_dir=job, out_dir=output)
     assert all(stage["status"] == "cached" for stage in cached["stages"])
 
+    if source_kind == "tracks":
+        job = move_jobs(output, [job], rename=True, naming_template="Renamed")[job.resolve()]
+        voices = {job / "audio/archive" / f"Renamed{suffix}.flac" for suffix in suffixes}
+        assert {path for path in (job / "audio").rglob("*") if path.is_file()} == voices
     _, restart = restart_plan(job, "transcribe")
     run_pipeline(**restart)
     assert set(ASR.calls[-2:]) == voices

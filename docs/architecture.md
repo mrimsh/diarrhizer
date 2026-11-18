@@ -1,6 +1,6 @@
 # Architecture
 
-Current source version: **2.12**, shared by the CLI, desktop GUI and Windows launcher.
+Current source version: **2.13**, shared by the CLI, desktop GUI and Windows launcher.
 The [2.x roadmap](roadmap.md) describes the direction toward autonomous call logging, a separate
 call agent and optional integration skills; those capabilities remain planned.
 
@@ -240,7 +240,7 @@ out/
                           # completes when the storage format has keep_wav=false
       normalized_left.wav  # split-stereo or me-others: left channel, independent ASR in me-others
       normalized_right.wav # split-stereo or me-others: right channel, independent ASR in me-others
-      archive.<ext>       # non-wav storage formats only: archive copy (+ archive_left/right.<ext>)
+      archive.<ext>       # optional mix, alongside separated voice archives
     asr/
       transcript.json     # includes ASR config in metadata
       transcript.txt      # readable paragraphs, no speakers/timestamps (built from the same segments)
@@ -452,6 +452,10 @@ All channel/track choices are recorded for CLI/GUI resume. Mode/channel/track ch
 convert, which can reuse unchanged WAVs and ASR while recording the new layout. Cache checks
 distinguish mixed, channel diarization and model-free results. Archive lookup uses the selected
 channel suffix and never falls back to the mono mix, including portable named jobs after WAV cleanup.
+Track archives use the original one-based audio ordinal (`_track_1`, `_track_2`, etc.), even when
+the internal L/R slots are swapped. The mapping is recorded in `meta/run.json` as
+`config.archive_tracks` and survives job renames. Older track archives retain their L/R filenames
+and can be reused until conversion is run again. Stereo archives use `_left` and `_right`.
 
 In separated mode, `save_mix=false` skips the working and archive mix for both L/R and track
 sources. The two voice files are sufficient for conversion to count as complete and for ASR and
@@ -469,7 +473,8 @@ Profiles decide *what the pipeline processes*; storage formats
 (`src/diarrhizer/audio_formats.py`, `--audio-format`) decide *what the job keeps*.
 Processing always uses the lossless working WAV. A format other than `wav` makes
 convert also write an archive copy, `audio/archive.<ext>` (plus
-`archive_left/right.<ext>` for `split-stereo` or `me-others`; with `save_mix=false` only the
+`archive_left/right.<ext>` for L/R or `archive_track_<number>.<ext>` for separate tracks;
+with `save_mix=false` only the
 two channel copies are written). Each copy is encoded from the
 original input with the format's codec, `-q:a` or `-b:a`, sample rate, channel
 count and extra args, with `-vn`, and gets the same profile filters as the WAV.

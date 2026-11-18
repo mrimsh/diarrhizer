@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from diarrhizer.adapters.ffmpeg import FFmpegAdapter
-from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat, archive_path
+from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat, archive_path, archive_voice_suffix
 from diarrhizer.pipeline.cache import config_mismatch, is_stale, source_fingerprint
 from diarrhizer.utils import read_json, write_json_atomic
 from diarrhizer.artifacts import SCHEMA_VERSION, provenance
@@ -31,8 +31,9 @@ logger = logging.getLogger(__name__)
 #   the chosen mix track (or a mix of the two voices) is used only for playback, never for ASR.
 #   save_mix=false in me-others omits both the working and archive mixes for either source layout.
 #   Reuse requires the recorded slot-to-track mapping; old track artifacts without it are rebuilt.
+#   Track archives use _track_<ordinal>; existing archives keep their recorded names until conversion runs.
 #   config.audio_format (CONFIG:AUDIO_FORMATS) may add an archive copy of each of those files
-#   (audio/archive[_left|_right].<ext>), encoded from the original input with the same filters; with
+#   (audio/archive[<source suffix>].<ext>), encoded from the original input with the same filters; with
 #   keep_wav=false, finalize() drops the working WAVs once the whole job completed, leaving only archives.
 #   get_output_paths()/is_cache_valid() follow what the last run recorded in meta/run.json (profile, format,
 #   retention), so a job whose WAV was dropped stays cached. When only the storage format/retention changed,
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 #   Originals are copied, never moved; discard removes generated media only after successful completion.
 # @inputs: job.input_path, config.audio_profile, config.audio_format
 # @outputs: meta/run.json, optional artifacts/audio/normalized.wav and artifacts/audio/archive.<ext>, and for
-#   split-stereo also artifacts/audio/normalized_left.wav / normalized_right.wav (+ archive_left/right.<ext>)
+#   separated sources also two working WAVs and archives with source-specific suffixes
 # @sideEffects: Creates output directory structure, writes audio file(s) to disk, deletes superseded audio
 #   files, finalize() deletes working WAVs, logs progress via logging (INFO, extra={"stage": "convert"})
 # @errors: RuntimeError, FileNotFoundError; ValueError for invalid or missing voice tracks
@@ -101,11 +102,12 @@ class ConvertStage:
         audio_profile = config.audio_profile
         audio_format = config.audio_format
         split = audio_profile == FFmpegAdapter.PROFILE_SPLIT_STEREO or config.channel_mode == "me-others"
+        tracks = channel_tracks(config) if config.channel_source == "tracks" else None
 
         # Build output paths
         meta_output = job_dir / self.META_RUN_JSON
         wav_paths = self._wav_paths(job_dir, split, config.save_mix)
-        archive_targets = self._archive_targets(job_dir, audio_format, split, config.save_mix)
+        archive_targets = self._archive_targets(job_dir, audio_format, split, config.save_mix, tracks)
 
         # Whether to (re)run is decided by the pipeline runner (is_cache_valid
         # + force flags), not here - run() always does the work when called.
@@ -119,7 +121,6 @@ class ConvertStage:
         # changed since the last conversion, rewriting it would bump its mtime
         # and needlessly invalidate transcribe/diarize.
         recorded = self._read_recorded_config(job_dir)
-        tracks = channel_tracks(config) if config.channel_source == "tracks" else None
         fingerprint = source_fingerprint(input_path)
         forced = config.force or config.force_stage == self.NAME
         signal_unchanged = (
@@ -222,6 +223,7 @@ class ConvertStage:
                 "save_mix": config.save_mix,
                 **track_settings(config),
                 **({"track_slots": tracks} if tracks is not None else {}),
+                **({"archive_tracks": tracks} if tracks is not None and archive_targets else {}),
                 "audio_format": audio_format.to_dict(),
             },
             "start_time": start_time.isoformat(),
@@ -308,7 +310,7 @@ class ConvertStage:
         split = (recorded.get("audio_profile") == FFmpegAdapter.PROFILE_SPLIT_STEREO
                  or recorded.get("channel_mode") == "me-others")
         wav_paths = self._wav_paths(job_dir, split, save_mix)
-        archives = self._archive_targets(job_dir, audio_format, split, save_mix)
+        archives = self._archive_targets(job_dir, audio_format, split, save_mix, recorded.get("archive_tracks"))
         for key, wav in wav_paths.items():
             archive, _ = archives[key.replace("audio", "archive", 1)]
             if wav.exists() and archive.exists():
@@ -334,7 +336,8 @@ class ConvertStage:
         return (validate_storage(identity.get("storage"))["working"] != "discard"
                 if identity else audio_format.keeps_wav)
 
-    def _archive_targets(self, job_dir: Path, audio_format: AudioFormat, split: bool, save_mix: bool) -> dict:
+    def _archive_targets(self, job_dir: Path, audio_format: AudioFormat, split: bool, save_mix: bool,
+                         tracks: dict | None) -> dict:
         """{artifact key: (archive path, split-stereo channel or None)}; empty when no archive."""
         identity = read_config(job_dir / JOB_FILE)
         if identity and validate_storage(identity.get("storage"))["archive"] == "discard":
@@ -345,7 +348,8 @@ class ConvertStage:
         targets = {"archive": (archive_path(job_dir, ext), None)} if save_mix else {}
         if split:
             for key_suffix, file_suffix, channel in self._SPLIT_CHANNELS:
-                targets[f"archive{key_suffix}"] = (archive_path(job_dir, ext, file_suffix), channel)
+                suffix = archive_voice_suffix(file_suffix, tracks)
+                targets[f"archive{key_suffix}"] = (archive_path(job_dir, ext, suffix), channel)
         return targets
 
     def _remove_superseded_audio(self, job_dir: Path, keep: set) -> None:
@@ -416,7 +420,8 @@ class ConvertStage:
         save_mix = recorded.get("save_mix", True)
 
         paths = self._wav_paths(job_dir, split, save_mix) if self._keeps_wav(job_dir, audio_format) else {}
-        for key, (path, _) in self._archive_targets(job_dir, audio_format, split, save_mix).items():
+        archives = self._archive_targets(job_dir, audio_format, split, save_mix, recorded.get("archive_tracks"))
+        for key, (path, _) in archives.items():
             paths[key] = path
         paths["meta"] = job_dir / self.META_RUN_JSON
         return paths

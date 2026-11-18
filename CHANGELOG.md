@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.13 — 2026-11-18
+
+- Name voice archives from separate audio tracks by their original one-based numbers
+  (`_track_1`, `_track_2`, etc.). Keep `_left` and `_right` for stereo channels.
+- Preserve track suffixes when renaming jobs and keep existing archives readable on resume.
+
 ## 2.12 — 2026-11-18
 
 - Show duration, file size and audio track details for the selected file in New Job. Track

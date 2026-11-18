@@ -359,15 +359,23 @@ def resolve_audio_format(
 #   decode whichever copy the job kept. Used by the GUI job scanner too, so it only stats files.
 #   Portable jobs resolve their independent retention paths from job.json; legacy paths remain supported.
 #   A channel suffix resolves only that channel, including archive fallback; never returns the mix.
-# @inputs: job_dir
+#   New track archives use the source ordinal recorded for each slot in config.archive_tracks.
+#   Jobs without that field keep their original L/R archive names.
+# @inputs: job_dir, optional logical channel suffix and recorded archive track mapping
 # @outputs: Path to the audio to decode, or None when the job has no audio yet
-# @sideEffects: Filesystem stat/glob only
+# @sideEffects: Reads conversion metadata for channel archive lookup; stats/globs for media paths
 # @errors: None
 # @see: STAGE:CONVERT, STAGE:TRANSCRIBE, STAGE:DIARIZE, CONFIG:AUDIO_FORMATS
 def archive_path(job_dir: str | Path, extension: str, suffix: str = "") -> Path:
     """audio/archive<suffix>.<extension> inside job_dir (suffix e.g. "_left")."""
     from diarrhizer.projects import media_path
     return media_path(Path(job_dir), "archive", extension, suffix)
+
+
+def archive_voice_suffix(suffix: str, tracks: Mapping[str, int] | None) -> str:
+    """Translate an internal L/R slot to the archived track's one-based ordinal, if recorded."""
+    number = tracks.get(suffix.removeprefix("_")) if isinstance(tracks, Mapping) else None
+    return f"_track_{number}" if type(number) is int and number > 0 else suffix
 
 
 def find_job_audio(job_dir: str | Path, suffix: str = "") -> Path | None:
@@ -379,8 +387,14 @@ def find_job_audio(job_dir: str | Path, suffix: str = "") -> Path | None:
            else job_dir / f"audio/normalized{suffix}.wav")
     if wav.exists():
         return wav
-    candidates = job_dir.glob("audio/archive/*.*") if identity else job_dir.glob(f"audio/{ARCHIVE_STEM}{suffix}.*")
-    main_stem = media_path(job_dir, "archive", "wav", suffix).stem if identity else ARCHIVE_STEM + suffix
+    archive_suffix = suffix
+    if suffix in ("_left", "_right"):
+        recorded = read_config(job_dir / "meta" / "run.json").get("config")
+        if isinstance(recorded, dict):
+            archive_suffix = archive_voice_suffix(suffix, recorded.get("archive_tracks"))
+    candidates = (job_dir.glob("audio/archive/*.*") if identity else
+                  job_dir.glob(f"audio/{ARCHIVE_STEM}{archive_suffix}.*"))
+    main_stem = media_path(job_dir, "archive", "wav", archive_suffix).stem if identity else ARCHIVE_STEM + archive_suffix
     archives = sorted(
         (p for p in candidates if p.is_file() and p.stem == main_stem),
         key=lambda p: p.stat().st_mtime,

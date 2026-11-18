@@ -205,6 +205,7 @@ def rename_scope(directory: Path, name: str) -> Path:
 #   exports follow the new title. File/identity/manifest changes join the ordinary-error rollback.
 #   Explicit recorded_at edits recording time without changing processing created_at; optional template
 #   overrides support renaming in place as well as moving. Preview and execution share these overrides.
+#   Renaming an archive preserves the recorded source-track suffix.
 # @inputs: library root, selected job paths, explicit project/team (empty means its parent root)
 # @outputs: old-to-new directory mapping for jobs that changed location
 # @sideEffects: Creates destination scopes and lock files; renames job folders; updates internal run paths
@@ -304,12 +305,18 @@ def plan_job_moves(root: Path, jobs, *, project: str = "", team: str = "", renam
 
 def _renamed_files(job, title, identity):
     """Only app-owned media/exports; user notes, chats, summaries and external originals stay intact."""
+    from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat, archive_voice_suffix
+
     old_identity = read_config(job / JOB_FILE)
+    conversion = read_config(job / "meta" / "run.json").get("config")
+    if not isinstance(conversion, dict):
+        conversion = {}
+    archive_suffixes = {archive_voice_suffix(suffix, conversion.get("archive_tracks"))
+                        for suffix in ("_left", "_right")}
     files = {}
     storage = validate_storage(old_identity.get("storage")) if old_identity else dict(DEFAULT_STORAGE)
     if not old_identity:
-        from diarrhizer.audio_formats import WAV_FORMAT, AudioFormat
-        recorded = read_config(job / "meta" / "run.json").get("config", {}).get("audio_format")
+        recorded = conversion.get("audio_format")
         fmt = AudioFormat.from_dict(recorded) if isinstance(recorded, dict) else WAV_FORMAT
         storage["working"] = "original" if fmt.keeps_wav else "discard"
         storage["archive"] = "original" if fmt.writes_archive else "discard"
@@ -323,7 +330,9 @@ def _renamed_files(job, title, identity):
             if not file.is_file():
                 continue
             suffix = file.stem.removeprefix(old_stem)
-            if kind != "original" and suffix not in ("", "_left", "_right"):
+            if kind != "original" and not (file.stem.startswith(old_stem) and (
+                suffix in ("", "_left", "_right") or (kind == "archive" and suffix in archive_suffixes)
+            )):
                 continue
             suffix = "" if kind == "original" else suffix
             discarded = kind == "working" and storage[kind] == "discard"
