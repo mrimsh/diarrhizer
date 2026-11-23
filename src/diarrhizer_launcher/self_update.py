@@ -19,7 +19,7 @@ from .repository import REPOSITORY, _open
 from .system import CREATE_NO_WINDOW, child_env, download
 
 
-def _version(value):
+def version_numbers(value):
     if not isinstance(value, str) or not re.fullmatch(r"\d+\.\d+", value):
         raise ValueError("Релиз должен иметь версию MAJOR.MINOR.")
     return tuple(map(int, value.split(".")))
@@ -66,7 +66,7 @@ def latest_launcher(current_version: str) -> Release | None:
         raise ValueError("GitHub не вернул опубликованный стабильный релиз.")
     tag = data.get("tag_name", "")
     version = tag.removeprefix("v") if isinstance(tag, str) else ""
-    if _version(version) <= _version(current_version):
+    if version_numbers(version) <= version_numbers(current_version):
         return None
     assets = data.get("assets", [])
     if not isinstance(assets, list):

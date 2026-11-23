@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.14 — 2026-11-23
+
+- At startup, show the installed application version in the selected environment and the version
+  available on main. The standalone launcher also checks for a newer stable launcher release.
+  Updates start only when requested, and a failed version check leaves the GUI available.
+
 ## 2.13 — 2026-11-18
 
 - Name voice archives from separate audio tracks by their original one-based numbers

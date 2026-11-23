@@ -1,6 +1,6 @@
 # Windows launcher
 
-Current source version: **2.13** by **MRIMSH**. The setup window and rebuilt Windows executable file/product
+Current source version: **2.14** by **MRIMSH**. The setup window and rebuilt Windows executable file/product
 properties display the shared release version; Windows company metadata names MRIMSH.
 
 `Diarrhizer.exe` is the graphical entry point for setup and everyday use on Windows 10/11 x64.
@@ -9,6 +9,14 @@ Diarrhizer `.venv` nor a manually installed launcher dependency. The processing 
 a normal Python installation in one selected virtual environment. There is no separate main-GUI exe.
 
 ## First launch
+
+On startup the launcher shows the application version in the selected environment alongside the
+version on GitHub `main`. A newer version is marked **«доступно обновление»**. Opening another
+environment refreshes its installed version. The standalone exe also checks the latest stable
+release and displays its version next to **«Обновить лаунчер…»** when an upgrade is available.
+Both GitHub checks run in the background and only read version information. Use the corresponding
+update button to start an upgrade. If GitHub is unavailable, an existing ready environment can
+still launch, and the log shows the reason the check failed.
 
 ### Updating the launcher itself
 

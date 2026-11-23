@@ -1,6 +1,6 @@
 # Architecture
 
-Current source version: **2.13**, shared by the CLI, desktop GUI and Windows launcher.
+Current source version: **2.14**, shared by the CLI, desktop GUI and Windows launcher.
 The [2.x roadmap](roadmap.md) describes the direction toward autonomous call logging, a separate
 call agent and optional integration skills; those capabilities remain planned.
 

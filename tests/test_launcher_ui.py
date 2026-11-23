@@ -25,6 +25,22 @@ def ui(tmp_path):
     root.destroy()
 
 
+def test_version_notices_follow_selected_environment_and_compare_numerically(ui):
+    from types import SimpleNamespace
+
+    ui.installed_folder = ui.variables["venv"].get()
+    ui._version_result({"kind": "installed_version", "probe_id": ui.local_probe_id, "value": "2.9"})
+    ui._version_result({"kind": "app_version", "value": "2.10"})
+    assert "2.9" in ui.source_text.get() and "доступно обновление" in ui.source_text.get()
+    ui._version_result({"kind": "exe_version", "value": SimpleNamespace(version="2.14")})
+    assert "доступна версия 2.14" in ui.launcher_status.get()
+    ui.variables["venv"].set("another environment")
+    assert "2.9" not in ui.source_text.get() and "доступно обновление" not in ui.source_text.get()
+    ui._version_result({"kind": "app_version", "error": "offline"})
+    assert "проверка недоступна" in ui.source_text.get()
+    assert "offline" in ui.log.get("1.0", "end")
+
+
 def test_confirmation_decline_leaves_existing_environment_and_state_untouched(ui, monkeypatch):
     from pathlib import Path
 

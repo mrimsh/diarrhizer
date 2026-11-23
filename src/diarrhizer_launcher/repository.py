@@ -10,7 +10,7 @@ import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from .config import atomic_text, source_version
+from .config import atomic_text, parse_source_version, source_version
 from .system import open_https
 
 REPOSITORY = "mrimsh/diarrhizer"
@@ -29,11 +29,21 @@ def _open(url):
 # @description: Resolve main to one immutable SHA, download its archive over HTTPS and cache the validated
 #   source atomically. Extract only package source/requirements/metadata; reject traversal and symlinks.
 #   Network failures never silently fall back to the bundled version or modify an existing environment.
+#   Startup checks read only the small identity module from main without downloading an archive.
 # @inputs: local launcher home, progress callback and cancellation event
 # @outputs: cached application-source directory and GitHub commit SHA
 # @sideEffects: Public GitHub API/codeload requests and local source-cache writes; no Git or tokens needed
 # @errors: Network errors, invalid commit/archive/version, cancellation, download/expansion size limits
 # @see: LAUNCHER:SETUP, LAUNCHER:CONFIG
+def latest_application_version() -> str:
+    url = f"https://raw.githubusercontent.com/{REPOSITORY}/{BRANCH}/src/diarrhizer/__init__.py"
+    with _open(url) as response:
+        raw = response.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("Слишком большой файл версии приложения.")
+    return parse_source_version(raw.decode("utf-8-sig"))
+
+
 def latest_source(home: Path, emit, cancel) -> tuple[Path, str]:
     with _open(f"https://api.github.com/repos/{REPOSITORY}/commits/{BRANCH}") as response:
         metadata = json.loads(response.read(1024 * 1024))

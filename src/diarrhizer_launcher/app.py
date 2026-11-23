@@ -1,6 +1,7 @@
 """Independent Tk launcher; no Qt, torch or Diarrhizer imports."""
 
 import argparse
+import http.client
 import json
 import os
 import queue
@@ -32,15 +33,16 @@ from .launch import (
     start_gui,
     write_start_files,
 )
-from .repository import SOURCE_LABEL
+from .repository import SOURCE_LABEL, latest_application_version
 from .self_update import (
     discard_update,
     latest_launcher,
     prepare_update,
     start_replacement,
+    version_numbers,
 )
-from .setup import STEPS, SetupWorker, check_ready
-from .system import discover_pythons, gpu_description
+from .setup import STEPS, SetupWorker, check_ready, environment_python
+from .system import capture, discover_pythons, gpu_description
 
 
 # [SEMANTIC-BEGIN] LAUNCHER:UI
@@ -53,6 +55,7 @@ from .system import discover_pythons, gpu_description
 #   Title/header display the shared application release and sole author without loading the processing stack.
 #   Self-update downloads/verifies a release off-thread, then confirms restart before handing off
 #   replacement to a hidden helper. The single-instance lock is released before the new exe starts.
+#   Independent read-only startup probes compare the selected runtime with main and the exe with stable releases.
 # @inputs: one local state file, user paths/device/download choices
 # @outputs: setup progress/log, retry/repair controls, GUI/shortcut/start-folder actions
 # @sideEffects: Native dialogs, background setup/probes and user-requested shortcuts
@@ -126,7 +129,13 @@ class Launcher:
         self._path_row(form, 7, "Кэш моделей", "cache")
         self._path_row(form, 8, "Результаты обработки", "output")
         self._path_row(form, 9, "Настройки приложения", "config_dir")
-        self.source_text = tk.StringVar(value=f"Источник приложения: {SOURCE_LABEL} · версия определяется при загрузке")
+        self.installed_folder = None
+        self.installed_version = ""
+        self.installed_status = "не проверено"
+        self.local_probe_id = 0
+        self.remote_version = ""
+        self.remote_status = "проверяем…" if probe else "не проверено"
+        self.source_text = tk.StringVar()
         ttk.Label(form, textvariable=self.source_text,
                   wraplength=900).grid(row=11, column=0, columnspan=4, sticky="w", pady=(4, 0))
         ttk.Label(form, text="Зависимости: общие ограничения проекта + CPU / CUDA. Установка может занять несколько ГБ.\n"
@@ -159,6 +168,8 @@ class Launcher:
         self.update_button.pack(side="left")
         self.self_update_button = ttk.Button(update_actions, text="Обновить лаунчер…", command=self.update_launcher)
         self.self_update_button.pack(side="left", padx=8)
+        self.launcher_status = tk.StringVar(value=f"Лаунчер {__version__}")
+        ttk.Label(update_actions, textvariable=self.launcher_status).pack(side="left")
 
         self.log = ScrolledText(body, height=9, wrap="word", font=("Consolas", 9), state="disabled")
         self.log.grid(row=5, column=0, sticky="nsew")
@@ -187,6 +198,70 @@ class Launcher:
         root.after(1500, self._report_launcher_update)
         if probe:
             threading.Thread(target=self._discover, daemon=True).start()
+            self._check_installed()
+            self._version_probe("app_version", latest_application_version)
+            if getattr(sys, "frozen", False):
+                self.launcher_status.set(f"Лаунчер {__version__} · проверяем обновления…")
+                self._version_probe("exe_version", lambda: latest_launcher(__version__))
+
+    def _version_probe(self, kind, read, **context):
+        def check():
+            try:
+                value = read()
+                if kind == "app_version" or (kind == "installed_version" and value):
+                    version_numbers(value)
+                event = {"value": value}
+            except (OSError, ValueError, SyntaxError, RuntimeError, http.client.HTTPException,
+                    subprocess.SubprocessError) as exc:
+                event = {"error": str(exc)}
+            self.events.put({"kind": kind, **context, **event})
+        threading.Thread(target=check, daemon=True).start()
+
+    def _check_installed(self):
+        folder = self.variables["venv"].get().strip()
+        self.local_probe_id += 1
+        self.installed_folder = folder
+        self.installed_version = ""
+        self.installed_status = "проверяем…"
+        self._show_versions()
+
+        def read():
+            python = environment_python(folder)
+            if not folder or not python.is_file():
+                return ""
+            script = ("from importlib.util import find_spec; "
+                      "print(__import__('diarrhizer').__version__ if find_spec('diarrhizer') else '')")
+            return capture([str(python), "-I", "-c", script])
+        self._version_probe("installed_version", read, probe_id=self.local_probe_id)
+
+    def _show_versions(self):
+        selected = self.variables["venv"].get().strip() == self.installed_folder
+        local = self.installed_status if selected else "откройте среду"
+        newer = (selected and self.installed_version and self.remote_version
+                 and version_numbers(self.remote_version) > version_numbers(self.installed_version))
+        self.source_text.set(f"Приложение в среде: {local} · {SOURCE_LABEL}: {self.remote_version or self.remote_status}"
+                             + (" · доступно обновление" if newer else ""))
+
+    def _version_result(self, event):
+        kind = event["kind"]
+        if kind == "installed_version" and event["probe_id"] != self.local_probe_id:
+            return
+        failed = "error" in event
+        if failed:
+            self._append("Проверка версии (" + {"installed_version": "среда", "app_version": "main",
+                         "exe_version": "лаунчер"}[kind] + "): " + event["error"])
+        value = event.get("value")
+        if kind == "exe_version":
+            status = "проверка недоступна" if failed else (
+                f"доступна версия {value.version}" if value else "обновлений нет")
+            self.launcher_status.set(f"Лаунчер {__version__} · {status}")
+        elif kind == "app_version":
+            self.remote_version = value or ""
+            self.remote_status = "проверка недоступна"
+        else:
+            self.installed_version = value or ""
+            self.installed_status = value or ("версия неизвестна" if failed else "не установлено")
+        self._show_versions()
 
     def _path_row(self, parent, row, title, key, *, file=False):
         ttk.Label(parent, text=title).grid(row=row, column=0, sticky="w", padx=(0, 12))
@@ -219,6 +294,7 @@ class Launcher:
         self.scanning = True
         self.status.set("Чтение параметров выбранной среды…")
         defaults = self._settings()
+        self._check_installed()
         current = self.state
         self.refresh()
 
@@ -276,6 +352,7 @@ class Launcher:
                            for key, variable in self.variables.items()})
 
     def refresh(self):
+        self._show_versions()
         changed = self.state is None or self._settings() != self.state.settings
         idle = not self.busy and not self.scanning and not self.self_updating
         for control in self.controls:
@@ -465,7 +542,9 @@ class Launcher:
             except queue.Empty:
                 break
             kind = event["kind"]
-            if kind.startswith("launcher_"):
+            if kind in {"app_version", "exe_version", "installed_version"}:
+                self._version_result(event)
+            elif kind.startswith("launcher_"):
                 self._launcher_event(event)
                 if kind == "launcher_handoff" or self.closing:
                     return
@@ -485,7 +564,9 @@ class Launcher:
                     self.overall["value"] = len(STEPS) if self.available else 0
                 self.refresh()
             elif kind == "source":
-                self.source_text.set(f"{SOURCE_LABEL} · версия {event['version']} · коммит {event['revision'][:12]}")
+                self.remote_version = event["version"]
+                self._append(f"{SOURCE_LABEL} · версия {event['version']} · коммит {event['revision'][:12]}")
+                self._show_versions()
             elif kind == "log":
                 self._append(event["message"])
                 if self.state and self.state.log:
@@ -513,6 +594,7 @@ class Launcher:
                 # otherwise a retry would look like changed settings and lose its checkpoints.
                 for key, value in asdict(self.state.settings).items():
                     self.variables[key].set(value)
+                self._check_installed()
                 if kind == "done":
                     self.overall["value"] = len(STEPS)
                     self.stage.set("Настройка завершена")

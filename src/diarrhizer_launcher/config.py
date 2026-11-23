@@ -36,7 +36,11 @@ def source_version(source: Path) -> str:
     identity = source / "src/diarrhizer/__init__.py"
     if not identity.is_file():
         return ""
-    for node in ast.parse(identity.read_text(encoding="utf-8-sig")).body:
+    return parse_source_version(identity.read_text(encoding="utf-8-sig"))
+
+
+def parse_source_version(contents: str) -> str:
+    for node in ast.parse(contents).body:
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__version__" for t in node.targets):
             value = ast.literal_eval(node.value)
             if isinstance(value, str):
