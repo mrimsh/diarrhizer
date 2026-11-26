@@ -58,7 +58,7 @@ APP_TITLE = f"Diarrhizer {__version__}"
 #   the window title and a taskbar flash report progress and completion. Closing the window while a job
 #   runs asks first and kills the child. Environment checks run once at startup in the background
 #   (GUI:ENVIRONMENT_PROBE); the Doctor item shows a warning badge when a required check failed.
-#   Result changes are guarded before replacing/closing its editor. Queue allocation failures
+#   Result changes are guarded on sidebar navigation, replacing a result and closing its editor. Queue allocation failures
 #   become failed items; planning a restart has no filesystem side effects.
 #   Project/team settings are passed into allocation; queued descendants prevent scope renames.
 #   Batch job moves relocate live result/queue paths and refresh destination-team suggestions without
@@ -90,7 +90,7 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         self._build_screens()
 
-        self._nav.currentRowChanged.connect(self._stack.setCurrentIndex)
+        self._nav.currentRowChanged.connect(self._navigate)
 
         self._job_status = QPushButton()
         self._job_status.setObjectName("JobStatusButton")
@@ -181,13 +181,21 @@ class MainWindow(QMainWindow):
 
     def _select(self, row: int) -> None:
         if self._nav.currentRow() == row:
-            # Coming back from the Result screen: currentRowChanged won't fire.
-            self._stack.setCurrentIndex(row)
+            self._navigate(row)
         else:
             self._nav.setCurrentRow(row)
 
+    def _navigate(self, row: int) -> None:
+        if row < 0:
+            return
+        if self._stack.currentWidget() is self._result and not self._result.settle_edits("переход с экрана"):
+            self._nav.setCurrentRow(-1)
+            return
+        self._stack.setCurrentIndex(row)
+
     def _show_result(self, job_dir) -> None:
         if self._result.load(Path(job_dir)):
+            self._nav.setCurrentRow(-1)
             self._stack.setCurrentWidget(self._result)
 
     def _set_nav_label(self, key: str, text: str) -> None:

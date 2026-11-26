@@ -1,6 +1,6 @@
 # Architecture
 
-Current source version: **2.14**, shared by the CLI, desktop GUI and Windows launcher.
+Current source version: **2.15**, shared by the CLI, desktop GUI and Windows launcher.
 The [2.x roadmap](roadmap.md) describes the direction toward autonomous call logging, a separate
 call agent and optional integration skills; those capabilities remain planned.
 
@@ -80,8 +80,11 @@ Implemented high-level flow:
     -> artifacts/merged/segments.json
       |
       v
-(5) Export  
-    -> artifacts/export/result.md + result.json
+    Active transcript (merged segments or the saved edits/transcript.json)
+      |
+      v
+(5) Export
+    -> artifacts/export/result.md + result.txt + result.srt + result.json
 ```
 
 Supported inputs: various audio/video formats (`.mp3`, `.wav`, `.m4a`, `.mp4`, `.mkv`, `.webm`).  
@@ -726,8 +729,8 @@ export/result.md ──► SUMMARY:JOB ──► ADAPTER:LLM ──► provider 
   | `{{note}}` | the user's text for this run; `""` when none | `summarize_job(note=…)` |
   | `{{job_name}}` | input file name without extension | `meta/run.json` `input_path`, else the folder name |
   | `{{date}}` | `YYYY-MM-DD` of the job | folder name `<stem>_<YYYYMMDD>_<HHMMSS>`, else `meta/run.json` `start_time` |
-  | `{{duration}}` | `HH:MM:SS` up to the last phrase | `merged/segments.json` (largest `end`) |
-  | `{{speakers}}` | speakers in order of appearance, comma-separated | `merged/segments.json` + the names in `speakers.json` (an unnamed speaker keeps `Speaker_NN`) |
+  | `{{duration}}` | `HH:MM:SS` up to the last phrase | Active transcript segments (largest `end`) |
+  | `{{speakers}}` | speakers in order of appearance, comma-separated | Active transcript segments + the names in `speakers.json` (an unnamed speaker keeps `Speaker_NN`) |
   | `{{language}}` | language code | `meta/run.json` `pipeline_config.language`; for `auto` the detected one from `asr/transcript.json` |
 
   Syntax: `{{name}}`, spaces and tabs (not line breaks) inside the braces allowed; single braces and `{{` + a non-name (JSON) are never

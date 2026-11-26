@@ -21,7 +21,8 @@ from typing import Optional
 
 from diarrhizer.audio_formats import find_job_audio
 from diarrhizer.export.speakers import normalize_speaker_id
-from diarrhizer.artifacts import LOCK_DIR, job_write_lock, bundle_valid
+from diarrhizer.artifacts import LOCK_DIR, job_write_lock
+from diarrhizer.transcript import exports_current
 from diarrhizer.pipeline.runner import STAGE_SETTINGS
 from diarrhizer.pipeline.channels import CHANNEL_DEFAULTS
 from diarrhizer.pipeline.settings import RECORDED_RUN_KEYS, read_job_settings, set_aside_speaker_names
@@ -80,6 +81,10 @@ class JobSummary:
     def complete(self) -> bool:
         return self.result_path is not None
 
+    @property
+    def can_view_result(self) -> bool:
+        return self.complete or self.stage_done.get("merge", False)
+
 
 def _parse_job_date(job_id: str, job_dir: Path) -> datetime:
     """Parse the `_YYYYMMDD_HHMMSS` suffix generate_job_id() always appends.
@@ -120,6 +125,7 @@ def _read_meta(job_dir: Path) -> dict:
 #   Legacy exports remain readable. Hidden OS lock files are not jobs; deletion acquires the job lock.
 #   Scope marker files drive recursive project/team discovery; only actual job folders can be deleted.
 #   History displays/sorts explicit recording time when present, otherwise the legacy processing date.
+#   Merged jobs can open the editor even with a stale export or unresolved manual revision.
 # @inputs: output root and job directories
 # @outputs: stage state, history rows or removal of a selected job
 # @sideEffects: Reads artifacts; delete_job removes the selected directory
@@ -135,7 +141,10 @@ def stage_done(job_dir: Path) -> dict:
         config = _read_meta(job_dir).get("pipeline_config")
         if isinstance(config, dict) and config.get("save_mix") is False:
             done["convert"] = all(find_job_audio(job_dir, suffix) is not None for suffix in ("_left", "_right"))
-    done["export"] = export_path(job_dir, "md").is_file() and bundle_valid(job_dir / "export", "manifest.json")
+    try:
+        done["export"] = export_path(job_dir, "md").is_file() and exports_current(job_dir)
+    except (OSError, ValueError):
+        done["export"] = False
     return done
 
 
@@ -282,7 +291,8 @@ def scan_jobs(out_dir: Path) -> list:
             speakers = "Я + 1" if pipeline_config.get("one_on_one") else f"Я + {speakers}"
 
         result_path = export_path(job_dir, "md")
-        complete = result_path.exists() and bundle_valid(job_dir / "export", "manifest.json")
+        done = stage_done(job_dir)
+        complete = done["export"]
 
         summaries.append(
             JobSummary(
@@ -294,7 +304,7 @@ def scan_jobs(out_dir: Path) -> list:
                 language=str(pipeline_config.get("language", "—")),
                 speakers=speakers,
                 asr_model=str(pipeline_config.get("asr_model", "—")),
-                stage_done=stage_done(job_dir),
+                stage_done=done,
                 result_path=result_path if complete else None,
                 mode=job_mode(meta),
                 # Without a recorded input the convert stage never finished -

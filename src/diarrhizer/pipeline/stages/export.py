@@ -14,9 +14,9 @@ from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.export.srt_export import export_to_srt
 from diarrhizer.export.text_export import export_to_text
 from diarrhizer.pipeline.cache import is_stale
-from diarrhizer.pipeline.settings import read_segments
-from diarrhizer.utils import read_json, write_text_atomic
-from diarrhizer.artifacts import SCHEMA_VERSION, provenance, digest, write_bundle, recover_bundles, bundle_valid
+from diarrhizer.transcript import SOURCE, exports_current, load_transcript
+from diarrhizer.utils import read_json
+from diarrhizer.artifacts import SCHEMA_VERSION, provenance, digest, write_bundle, recover_bundles
 from diarrhizer.projects import export_path
 
 if TYPE_CHECKING:
@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 
 
 # [SEMANTIC-BEGIN] STAGE:EXPORT
-# @purpose: Export merged segments to every registered output format
-# @description: Reads merged/segments.json and renders it through each
+# @purpose: Export the same saved transcript version displayed by the result screen
+# @description: READ:CURRENT_TRANSCRIPT resolves the merged or manual segments for each
 #   Exporter in ExportStage.EXPORTERS (Markdown, plain text, SRT subtitles, JSON). Adding a
 #   format (VTT/HTML/DOCX/...) means appending an Exporter entry to that
 #   list - run() and get_output_paths()/get_artifact_paths()/is_cache_valid()
@@ -35,12 +35,11 @@ logger = logging.getLogger(__name__)
 #   Registered outputs are a recoverable cache group with a journal and a hash manifest published last.
 #   Portable jobs name exports after their fixed job title; legacy jobs retain result.*.
 #   Render errors leave the old group untouched; interrupted writes complete on retry. is_cache_valid()
-#   is False, and --force-stage export deletes every output, if even one
-#   format is missing or stale, so formats can never drift out of sync with
-#   segments.json or with each other. Export JSON records schema, provenance and upstream warnings.
+#   is False if a format is missing, the active transcript changed or its source conflicts.
+#   Export JSON and the manifest identify the merged source and the effective segment content.
 #   READ:MERGED_SEGMENTS recovers legacy reversed bounds in memory; exported JSON carries
 #   corrected bounds and alignment warnings while the saved merged source stays unchanged.
-# @inputs: artifacts/merged/segments.json
+# @inputs: merged/segments.json and optional edits/transcript.json
 # @outputs: one file per Exporter in EXPORTERS (result.md, result.txt, result.srt, result.json)
 # @sideEffects: Reads JSON files, writes export files to disk,
 #   logs progress via logging (INFO, extra={"stage": "export"})
@@ -69,7 +68,7 @@ class ExportStage:
     EXPORT_DIR = "export"
 
     # Input artifact path
-    INPUT_SEGMENTS = "merged/segments.json"
+    INPUT_SEGMENTS = SOURCE.as_posix()
 
     # Registered export formats. To add a format, append an Exporter here -
     # no other method in this class needs to change.
@@ -106,11 +105,12 @@ class ExportStage:
             )
 
         # Load input segments
-        with open(segments_input, "r", encoding="utf-8") as f:
-            segments_data = json.load(f)
+        source_text = segments_input.read_text(encoding="utf-8")
+        segments_data = json.loads(source_text)
 
         # Extract segments list
-        segments = read_segments(segments_input)
+        transcript = load_transcript(job_dir, merged=segments_data)
+        segments = transcript.segments
 
         # Get input path from config
         input_path = config.input_file
@@ -129,18 +129,20 @@ class ExportStage:
                 warning = f"Segment {index}: {seg['alignment_warning']}"
                 if warning not in warnings:
                     warnings.append(warning)
-        identity = digest(segments_input.read_text(encoding="utf-8"))
+        identity = {"source_sha256": digest(source_text),
+                    "transcript_sha256": transcript.current_sha256}
         for exporter in self.EXPORTERS:
             content = exporter.export_fn(segments, config, input_path)
             output_file = self.get_output_paths(job_dir)[exporter.name]
             if exporter.name == "json":
                 data = json.loads(content)
                 data["schema_version"] = SCHEMA_VERSION
-                data["metadata"].update(provenance=provenance(), source_sha256=identity, warnings=warnings)
+                data["metadata"].update(provenance=provenance(), **identity, warnings=warnings)
                 content = json.dumps(data, ensure_ascii=False, indent=2)
             files[output_file.name] = content
             outputs[exporter.name] = str(output_file)
-        write_bundle(job_dir / self.EXPORT_DIR, files, "manifest.json", {"source_sha256": identity})
+        write_bundle(job_dir / self.EXPORT_DIR, files, "manifest.json",
+                     {**identity, "merged_segments_sha256": transcript.source_sha256})
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
@@ -194,15 +196,13 @@ class ExportStage:
         and was rendered with the same speaker mapping as this run.
         """
         job_dir = job.job_dir
-        if not bundle_valid(job_dir / self.EXPORT_DIR, "manifest.json"):
-            return False
         artifacts = self.get_artifact_paths(job_dir)
         if is_stale(
             outputs=list(self.get_output_paths(job_dir).values()),
             inputs=[artifacts["segments"]],
         ):
             return False
-        return not self._speakers_mismatch(job)
+        return exports_current(job_dir) and not self._speakers_mismatch(job)
 
     def _speakers_mismatch(self, job: "JobContext") -> bool:
         data = read_json(export_path(job.job_dir, "json"))

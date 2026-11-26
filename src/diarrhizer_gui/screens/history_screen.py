@@ -119,12 +119,12 @@ class RowActions(QWidget):
         open_folder.clicked.connect(lambda: os.startfile(str(job.job_dir)))
         layout.addWidget(open_folder)
 
-        if job.complete:
+        if job.can_view_result:
             open_result = QPushButton("Результат")
             job_dir = job.job_dir
             open_result.clicked.connect(lambda: self.open_result_requested.emit(job_dir))
             layout.addWidget(open_result)
-        else:
+        if not job.complete:
             resume = QPushButton("Продолжить")
             resume.setEnabled(job.resumable and not busy)
             resume.setToolTip(
@@ -793,7 +793,7 @@ class HistoryScreen(QWidget):
     def _tree_double_click(self, item, _column):
         if item.data(0, Qt.ItemDataRole.UserRole + 1) == "job":
             directory = Path(item.data(0, Qt.ItemDataRole.UserRole))
-            if any(j.job_dir == directory and j.complete for j in self._jobs):
+            if any(j.job_dir == directory and j.can_view_result for j in self._jobs):
                 self.view_result_requested.emit(directory)
 
     def _edit_group(self):
@@ -810,7 +810,7 @@ class HistoryScreen(QWidget):
             QMessageBox.warning(self, "Параметры группы", str(exc))
 
     def _on_double_click(self, row: int, _column: int) -> None:
-        if 0 <= row < len(self._jobs) and self._jobs[row].complete:
+        if 0 <= row < len(self._jobs) and self._jobs[row].can_view_result:
             self.view_result_requested.emit(self._jobs[row].job_dir)
 
     def _resume(self, job: JobSummary) -> None:

@@ -1,6 +1,5 @@
 """Lightweight, shared readers for resuming CLI and GUI jobs."""
 
-import json
 import logging
 import math
 from pathlib import Path
@@ -8,7 +7,8 @@ from pathlib import Path
 from diarrhizer.audio_formats import AudioFormat
 from diarrhizer.asr_settings import compose_asr_prompt, validate_vad_options, VAD_ONSET, VAD_OFFSET, CHUNK_SIZE
 from diarrhizer.export.speakers import normalize_speaker_id
-from diarrhizer.utils import write_json_atomic
+from diarrhizer.transcript import read_segments as read_segments
+from diarrhizer.utils import read_object, write_json_atomic
 from diarrhizer.projects import export_path
 from diarrhizer.pipeline.channels import validate_channel_settings, TRACK_DEFAULTS
 
@@ -39,20 +39,6 @@ RECORDED_RUN_KEYS = (
 # @sideEffects: Reads job JSON only; never changes a queued job
 # @errors: ValueError for malformed JSON/schema, OSError for inaccessible files
 # @see: CONFIG:PIPELINE, PIPELINE:EXECUTE, GUI:JOB_PLANS
-def read_object(path: Path) -> dict:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {}
-    try:
-        value = json.loads(text)
-    except (ValueError, UnicodeError) as exc:
-        raise ValueError(f"Cannot read {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ValueError(f"{path}: expected a JSON object")
-    return value
-
-
 def _optional_object(path: Path) -> dict:
     """A broken derived artifact must not prevent rebuilding that artifact."""
     try:
@@ -142,47 +128,6 @@ def recorded_stage_names(job_dir: Path | None) -> tuple[str, ...]:
     return tuple(names)
 
 
-# [SEMANTIC-BEGIN] READ:MERGED_SEGMENTS
-# @purpose: Read saved results for GUI display and export, including legacy reversed intervals
-# @description: Finite non-negative end < start collapses to start in memory, preserving text,
-#   speakers and other fields with an alignment_warning containing the original bounds.
-#   Word times on a recovered segment become unknown; the source file is never rewritten.
-#   Null/non-numeric/non-finite/negative times and malformed schemas remain errors.
-# @inputs: path to merged/segments.json
-# @outputs: validated segment list with warnings on recovered intervals
-# @sideEffects: Reads JSON and logs recovery warnings; no filesystem writes
-# @errors: ValueError for malformed data (timestamp errors include index/bounds), OSError
-# @see: CONFIG:RESUME, GUI:RESULT_SCREEN, STAGE:EXPORT, MERGE:ASSIGN_SPEAKERS
-def read_segments(path: Path) -> list[dict]:
-    """Validate saved segments, recovering legacy reversed intervals only in memory."""
-    segments = read_object(path).get("segments", [])
-    if not isinstance(segments, list):
-        raise ValueError(f"{path}: segments must be a list")
-    for index, seg in enumerate(segments):
-        if not isinstance(seg, dict) or not isinstance(seg.get("text", ""), str):
-            raise ValueError(f"{path}: each segment must be an object with text")
-        start, end = seg.get("start", 0), seg.get("end", 0)
-        if not (type(start) in (int, float) and type(end) in (int, float)
-                and math.isfinite(start) and math.isfinite(end) and start >= 0 and end >= 0):
-            raise ValueError(
-                f"{path}: invalid segment timestamps (segment {index}, start={start!r}, end={end!r})"
-            )
-        if not isinstance(seg.get("speaker_id", "Speaker_00"), str):
-            raise ValueError(f"{path}: speaker_id must be text")
-        if end < start:
-            warning = (f"Reversed merged segment bounds (start={start!r}, end={end!r}); "
-                       "end set to start, timing uncertain; original text preserved")
-            previous = seg.get("alignment_warning")
-            if isinstance(previous, str) and previous:
-                warning = f"{previous}; {warning}"
-            seg = {**seg, "end": start, "alignment_warning": warning}
-            if isinstance(seg.get("words"), list):
-                seg["words"] = [{**word, "start": None, "end": None} if isinstance(word, dict) else word
-                                for word in seg["words"]]
-            segments[index] = seg
-            logging.getLogger(__name__).warning("%s: segment %d: %s", path, index, warning)
-    return segments
-# [SEMANTIC-END] READ:MERGED_SEGMENTS
 # [SEMANTIC-END] CONFIG:RESUME
 
 

@@ -53,13 +53,15 @@ from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.export.turns import format_timestamp, format_turn_line, group_turns, speaking_time
 from diarrhizer.utils import write_json_atomic
 from diarrhizer.artifacts import job_write_lock
-from diarrhizer.pipeline.settings import read_segments, read_object, read_job_settings
+from diarrhizer.pipeline.settings import read_object, read_job_settings
+from diarrhizer.transcript import exports_current, load_transcript, resolve_conflict, save_revision
 from diarrhizer.projects import export_path, job_context, participants, change_participant, resolve_input
 from diarrhizer_gui.job_queue import QueuedRun
 from diarrhizer_gui.job_scan import rediarize_plan
 from diarrhizer_gui.screens.new_job_screen import hf_token_present
 from diarrhizer_gui.screens.chat_dialog import ChatDialog
 from diarrhizer_gui.screens.summary_dialog import SummaryDialog
+from diarrhizer_gui.screens.transcript_editor import TranscriptEditor
 
 SPEAKER_COLORS = [
     "#a85520", "#2c6fbb", "#2f7d52", "#8e44ad", "#c0392b", "#16808a", "#7a6a1f", "#d35400",
@@ -146,7 +148,7 @@ def _read_json(path: Path) -> dict:
 
 
 # [SEMANTIC-BEGIN] GUI:REEXPORT
-# @purpose: Re-render a finished job's exports with new speaker names, in the GUI process
+# @purpose: Re-render the active transcript, optionally replacing speaker names, in the GUI process
 # @description: Runs run_pipeline() with only ExportStage (pure Python, no torch) and force_stage="export",
 #   restoring the shared recorded configuration and explicitly replacing names (an empty map clears them).
 #   Takes milliseconds, so the Result screen calls it directly instead of queueing a job.
@@ -155,7 +157,7 @@ def _read_json(path: Path) -> dict:
 # @sideEffects: Writes export files
 # @errors: FileNotFoundError (no merged/segments.json or no recorded input), RuntimeError, ValueError
 # @see: STAGE:EXPORT, PIPELINE:RUNNER
-def reexport(job_dir: Path, speakers: dict) -> dict:
+def reexport(job_dir: Path, speakers: dict | None = None) -> dict:
     from diarrhizer.pipeline.runner import run_pipeline
     from diarrhizer.pipeline.stages.export import ExportStage
 
@@ -163,8 +165,8 @@ def reexport(job_dir: Path, speakers: dict) -> dict:
         out_dir=job_dir.parent,
         job_dir=job_dir,
         stages=[ExportStage()],
-        speakers=speakers,
         force_stage="export",
+        **({"speakers": speakers} if speakers is not None else {}),
     )
 # [SEMANTIC-END] GUI:REEXPORT
 
@@ -236,8 +238,10 @@ class RediarizeDialog(QDialog):
 
 
 # [SEMANTIC-BEGIN] GUI:RESULT_SCREEN
-# @purpose: Display a validated transcript and safely edit speaker names
-# @description: Switching/reloading results and closing the window ask to save/discard/cancel dirty names.
+# @purpose: Display and edit the active transcript, its speaker assignments and global names.
+# @description: Draft edits share the existing player. Save writes the manual snapshot under the job
+#   lock and reports success only after every exporter completes. Navigation settles dirty edits.
+#   Conflicts require selecting a whole version. Failed exports can be retried after reopening.
 #   When the job omits its playback mix, the combined player is disabled; voice files remain separate.
 #   An unopened result has no dirty state; saves hold the per-job OS write lock through re-export.
 #   Team-scoped suggestions are explicit roster entries; typing/saving a speaker alone never enrolls a name.
@@ -250,7 +254,7 @@ class RediarizeDialog(QDialog):
 #   Diarization requests only enqueue work; the runner backs up names when the stage actually starts.
 # @inputs: job artifacts and user edits
 # @outputs: rendered transcript, saved mapping and exports, queued run requests
-# @sideEffects: Reads job files; explicit save rewrites speakers.json and exports
+# @sideEffects: Reads job files; explicit actions save names or a manual revision and regenerate exports
 # @errors: Disk/schema failures are reported in the screen or a dialog
 # @see: CONFIG:RESUME, GUI:REEXPORT, GUI:JOB_PLANS, GUI:MAIN_WINDOW
 class ResultScreen(QWidget):
@@ -261,6 +265,8 @@ class ResultScreen(QWidget):
         super().__init__()
         self._job_dir: Optional[Path] = None
         self._segments: list = []
+        self._version = None
+        self._export_pending = False
         self._names: dict = {}
         self._meta: dict = {}
         self._speaker_fields: dict = {}
@@ -379,6 +385,8 @@ class ResultScreen(QWidget):
         search_row.addWidget(self._match_label)
         search_row.addSpacing(12)
         search_row.addWidget(copy_button)
+        self._search_bar = QWidget()
+        self._search_bar.setLayout(search_row)
         QShortcut(QKeySequence.StandardKey.Find, self, self._focus_search)
 
         # --- transcript ---
@@ -391,6 +399,22 @@ class ResultScreen(QWidget):
         self._render_timer.setSingleShot(True)
         self._render_timer.setInterval(250)
         self._render_timer.timeout.connect(self._render_transcript)
+        self._edit_button = QPushButton("Редактировать транскрипцию")
+        self._edit_button.clicked.connect(self._start_edit)
+        self._edit_button.setEnabled(False)
+        actions_row.insertWidget(2, self._edit_button)
+        self._retry_button = QPushButton("Обновить экспорты")
+        self._retry_button.clicked.connect(self._retry_export)
+        self._retry_button.hide()
+        actions_row.insertWidget(3, self._retry_button)
+        self._editor = TranscriptEditor(self._player_position)
+        self._editor.save_requested.connect(self._save_edits)
+        self._editor.cancel_requested.connect(self._cancel_edits)
+        self._editor.play_requested.connect(self._play_from)
+        self._editor.hide()
+        self._view_controls = (speakers_title, self._speakers_scroll, self._speakers_hint,
+                               self._save_button, self._rediarize_button, self._edit_button,
+                               self._search_bar, self._transcript)
 
         # --- player ---
         self._play_button = QPushButton("▶")
@@ -423,8 +447,9 @@ class ResultScreen(QWidget):
         layout.addWidget(self._speakers_scroll)
         layout.addWidget(self._speakers_hint)
         layout.addLayout(actions_row)
-        layout.addLayout(search_row)
+        layout.addWidget(self._search_bar)
         layout.addWidget(self._transcript, stretch=1)
+        layout.addWidget(self._editor, stretch=1)
         layout.addWidget(self._player_bar)
         layout.addWidget(self._player_note)
         layout.addWidget(back_button, alignment=Qt.AlignmentFlag.AlignRight)
@@ -434,22 +459,34 @@ class ResultScreen(QWidget):
     def load(self, job_dir: Path) -> bool:
         if self._job_dir is not None and not self._names_settled("открытие результата"):
             return False
+        self._load_job(job_dir)
+        return True
+
+    def _load_job(self, job_dir: Path) -> None:
         self._render_timer.stop()
+        self._set_editing(False)
         self._job_dir = job_dir
         self._set_status("", "#565c6b")
 
         read_error = None
+        self._version = None
+        self._export_pending = False
         try:
-            self._segments = read_segments(job_dir / "merged" / "segments.json")
+            self._version = load_transcript(job_dir)
+            self._segments = [] if self._version.conflict else self._version.segments
+            self._export_pending = not self._version.conflict and not exports_current(job_dir, self._version)
         except (OSError, ValueError, UnicodeError) as exc:
             self._segments = []
             read_error = str(exc)
 
         self._names = {}
+        self._job_names = {}
         self._meta = {}
         try:
             self._meta = read_object(job_dir / "meta" / "run.json")
-            self._names = read_job_settings(job_dir, self._meta)["speakers"]
+            names = read_job_settings(job_dir, self._meta)["speakers"]
+            self._job_names = names
+            self._names = {sid: names[sid] for sid in unique_speakers(self._segments) if sid in names}
         except (OSError, ValueError, UnicodeError) as exc:
             self._set_status(f"Не удалось прочитать настройки задания: {exc}", "#c0392b")
         if not isinstance(self._meta.get("input_path"), str):
@@ -467,7 +504,11 @@ class ResultScreen(QWidget):
             else "Добавить разделение по спикерам к заданию «Только распознавание»"
         )
         self._rediarize_button.setEnabled((job_dir / "asr" / "transcript.json").exists())
-        self._summary_button.setEnabled(export_path(job_dir, "md").exists())
+        conflict = self._version is not None and self._version.conflict
+        self._edit_button.setText("Выбрать версию транскрипции…" if conflict else "Редактировать транскрипцию")
+        self._edit_button.setEnabled(conflict or bool(self._segments))
+        self._retry_button.setVisible(self._export_pending)
+        self._summary_button.setEnabled(not conflict and not self._export_pending and export_path(job_dir, "md").exists())
         self._chat_button.setEnabled(self._summary_button.isEnabled())
 
         self._rebuild_speaker_panel()
@@ -476,7 +517,14 @@ class ResultScreen(QWidget):
         self._load_audio()
 
         if read_error:
-            self._transcript.setPlainText(f"Не удалось прочитать merged/segments.json: {read_error}")
+            self._transcript.setPlainText(f"Не удалось прочитать транскрипцию: {read_error}")
+        elif conflict:
+            self._transcript.setPlainText(
+                "После повторной обработки исходные реплики изменились. Сохранены обе версии. "
+                "Нажмите «Выбрать версию транскрипции…», чтобы продолжить работу и обновить экспорты."
+            )
+        elif self._export_pending:
+            self._set_status("Экспорты требуют обновления.", "#a66a00")
         elif not self._status_label.text():
             warnings = sum(bool(seg.get("alignment_warning")) for seg in self._segments)
             if warnings:
@@ -484,13 +532,14 @@ class ResultScreen(QWidget):
                     f"Предупреждения о выравнивании в сегментах: {warnings}. "
                     "Текст сохранён; временные метки могут быть неточными.", "#a66a00",
                 )
-        return True
 
     def _subtitle(self) -> str:
         config = self._meta.get("pipeline_config") or {}
         if not isinstance(config, dict):
             config = {}
         parts = []
+        if self._version is not None and self._version.manual is not None and not self._version.conflict:
+            parts.append("ручная редакция")
         name = self._job_dir.name if self._job_dir else ""
         if self._segments:
             duration = max(float(seg.get("end") or 0) for seg in self._segments)
@@ -657,7 +706,8 @@ class ResultScreen(QWidget):
                 action.setEnabled((self._job_dir / "asr" / "transcript.json").exists())
                 action.triggered.connect(self._open_plain_text)
             else:
-                action.setEnabled(path.exists())
+                action.setEnabled(path.exists() and not self._export_pending and self._version is not None
+                                  and not self._version.conflict)
                 action.triggered.connect(lambda checked=False, p=path: self._open_file(p))
         self._open_menu.addSeparator()
         audio = find_job_audio(self._job_dir)
@@ -701,23 +751,155 @@ class ResultScreen(QWidget):
 
     # --- saving / re-running ---------------------------------------------------------
 
+    def _player_position(self) -> float | None:
+        if self._player is not None and not self._player_bar.isHidden():
+            return self._player.position() / 1000
+        return None
+
+    def _set_editing(self, enabled: bool) -> None:
+        for widget in self._view_controls:
+            widget.setVisible(not enabled)
+        self._editor.setVisible(enabled)
+        self._retry_button.setVisible(not enabled and self._export_pending)
+        if enabled:
+            self._summary_button.setEnabled(False)
+            self._chat_button.setEnabled(False)
+        elif self._editor.segments:
+            self._editor.clear()
+
+    def _start_edit(self):
+        if self._version is None:
+            return
+        if self._version.conflict:
+            self._choose_version()
+            return
+        if not self._names_settled("редактирование транскрипции"):
+            return
+        names = self._job_names
+        ids = dict.fromkeys([*unique_speakers(self._version.source), *unique_speakers(self._segments), *names])
+        # A previous "continue without saving" applies to the global name fields as well.
+        for sid, field in self._speaker_fields.items():
+            field.setText(self._names.get(sid, ""))
+        labels = {sid: f"{sid} · {names[sid]}" if sid in names else sid for sid in ids}
+        self._editor.begin(self._segments, labels, not self._player_bar.isHidden())
+        self._set_editing(True)
+
+    def _cancel_edits(self):
+        self._load_job(self._job_dir)
+
+    def _save_edits(self) -> bool:
+        if not self._editor.dirty and not self._export_pending:
+            self._cancel_edits()
+            return True
+        stage = "Сохранение ручной версии"
+        try:
+            with job_write_lock(self._job_dir):
+                if self._editor.dirty:
+                    self._version = save_revision(self._job_dir, self._version, list(self._editor.segments))
+                else:
+                    self._version = load_transcript(self._job_dir)
+                if not self._version.conflict:
+                    stage = "Обновление экспортов"
+                    self._export_pending = True
+                    reexport(self._job_dir)
+        except Exception as exc:
+            detail = f"{stage}: {exc}"
+            if self._export_pending and self._version.manual is not None:
+                detail += " Ручная версия доступна в папке задания."
+            self._set_status(detail, "#b23b35")
+            QMessageBox.warning(self, stage, str(exc))
+            return False
+        self._load_job(self._job_dir)
+        if self._version is None or self._export_pending:
+            return False
+        if self._version.conflict:
+            self._set_status("Правки сохранены. Выберите версию после повторной обработки.", "#a66a00")
+            return False
+        self._set_status("Изменения сохранены. Экспорты MD, TXT, SRT и JSON обновлены.", "#2f7d52")
+        return True
+
+    def _retry_export(self):
+        try:
+            reexport(self._job_dir)
+        except Exception as exc:
+            self._set_status(f"Обновление экспортов: {exc}", "#b23b35")
+            return
+        self.load(self._job_dir)
+
+    def _choose_version(self):
+        box = QMessageBox(self)
+        box.setWindowTitle("Конфликт версий транскрипции")
+        box.setText("Какую версию использовать для просмотра, редактирования и экспорта?")
+        saved = self._version.manual["segments"]
+        source_rows = self._version.source
+        box.setInformativeText(f"Реплик в ручной версии: {len(saved)}, в новой: {len(source_rows)}. "
+                               "При выборе новой исходной ручная копия сохранится в папке edits.")
+        details = []
+        for title, rows in (("Ручная версия", saved), ("Новая исходная версия", source_rows)):
+            details.append(title + "\n" + transcript_plain_text(rows, self._job_names))
+        box.setDetailedText("\n".join(details))
+        manual = box.addButton("Использовать ручную", QMessageBox.ButtonRole.AcceptRole)
+        source = box.addButton("Использовать новую исходную", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() not in (manual, source):
+            return
+        stage = "Сохранение выбора версии"
+        try:
+            with job_write_lock(self._job_dir):
+                resolve_conflict(self._job_dir, self._version, keep_manual=box.clickedButton() is manual)
+                stage = "Обновление экспортов"
+                reexport(self._job_dir)
+        except Exception as exc:
+            self._load_job(self._job_dir)
+            self._set_status(f"{stage}: {exc}", "#b23b35")
+            self._retry_button.setVisible(not self._version.conflict if self._version else False)
+            return
+        self._load_job(self._job_dir)
+
+    def settle_edits(self, action: str) -> bool:
+        if self._editor.isHidden() or not (self._editor.dirty or self._export_pending):
+            return True
+        box = QMessageBox(self)
+        box.setWindowTitle("Правки транскрипции")
+        box.setText(f"Сохранить изменения и обновить экспорты перед действием «{action}»?")
+        save = box.addButton("Сохранить", QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton("Отбросить", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Остаться в редакторе", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is save:
+            return self._save_edits()
+        if box.clickedButton() is discard:
+            self._cancel_edits()
+            return True
+        return False
+
     def _save_names(self) -> None:
         if self._job_dir is None:
             return
         names = self._current_names()
+        all_names = {sid: name for sid, name in self._job_names.items() if sid not in self._speaker_fields}
+        all_names.update(names)
         try:
             with job_write_lock(self._job_dir):
-                write_json_atomic(self._job_dir / "speakers.json", names)
-                reexport(self._job_dir, names)
+                write_json_atomic(self._job_dir / "speakers.json", all_names)
+                reexport(self._job_dir, all_names)
         except Exception as exc:  # show anything - the names stay on screen to retry
             QMessageBox.warning(self, "Не удалось сохранить", f"{type(exc).__name__}: {exc}")
             return
         self._names = names
+        self._job_names = all_names
+        self._export_pending = False
+        self._retry_button.hide()
+        self._summary_button.setEnabled(True)
+        self._chat_button.setEnabled(True)
         self._update_save_state()
         self._set_status("Имена сохранены, экспорт в MD/TXT/SRT/JSON обновлён.", "#2f7d52")
 
     def _names_settled(self, what: str) -> bool:
         """The model reads the saved result.md: names typed but not saved would be missing from it. False = stop."""
+        if not self.settle_edits(what):
+            return False
         if self._job_dir is None or not self._save_button.isEnabled():
             return True
         box = QMessageBox(self)

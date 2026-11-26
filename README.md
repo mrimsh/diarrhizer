@@ -1,4 +1,4 @@
-# Diarrhizer 2.14
+# Diarrhizer 2.15
 
 By MRIMSH
 
@@ -8,7 +8,7 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
 and a CLI (`python -m diarrhizer run …`).
 
-**2.14** is the shared application version for the CLI, desktop GUI and Windows launcher.
+**2.15** is the shared application version for the CLI, desktop GUI and Windows launcher.
 Check it with `python -m diarrhizer --version`; the GUI shows it in the window title and sidebar.
 The launcher downloads the current GitHub `main` application when setting up or updating an environment;
 the downloaded application's version can differ from the launcher's own build version.
@@ -236,6 +236,27 @@ python -m diarrhizer_gui.app
 
 Processing runs in a separate process: the window stays responsive, a crash inside CUDA/cuDNN
 cannot take the GUI down, and memory (including VRAM) is fully released after every job.
+
+### Editing a transcript
+
+On **Результат**, choose **Редактировать транскрипцию**. Select a row to edit its text or choose
+its speaker. **▶ Реплика** plays that interval. To assign only a few words to someone else, put the
+cursor at the boundary and choose **Разделить реплику**. Adjust the cut time in seconds. The dialog
+starts at the playback position when it is inside the row, otherwise at the midpoint. Split at the
+other boundary if necessary, then change the speaker of the isolated row. **Объединить реплики**
+joins the selected row with the next one and asks for the final speaker if they differ.
+
+**Сохранить изменения** saves the manual version as `edits/transcript.json` inside the job, then
+rebuilds MD, TXT, SRT and JSON. The editor keeps the draft on an error and identifies the failed step.
+If only export failed, the manual file already contains the edits. Retry saving, or reopen the result
+and choose **Обновить экспорты**. **Отменить изменения** returns to the last saved version.
+Leaving with unsaved edits offers save, discard and stay.
+
+The editor also opens older jobs directly from `merged/segments.json`. If a rerun changes those
+segments, open the result and choose which complete version to use. Keeping the manual version
+retains its edits. Choosing the new machine result archives the manual copy in `edits/transcript-<hash>.json`.
+Export-only reruns, new summaries and new dialogues use the selected version. Existing summaries and
+dialogue snapshots retain the text used when they were created.
 
 ### Projects, teams and source files
 

@@ -29,7 +29,8 @@ def format_timestamp(seconds: float | None) -> str:
 #   changes), so one reply is often spread over several lines with the same name. group_turns()
 #   joins consecutive segments whose speakers resolve to the same display name - which also merges
 #   two diarization ids mapped to one person within the same channel - and starts a new turn after a pause of
-#   TURN_GAP_SECONDS or, past TURN_SOFT_LIMIT characters, at the next sentence end.
+#   TURN_GAP_SECONDS or, past TURN_SOFT_LIMIT characters, at the next sentence end. An explicit
+#   manual split always starts a new turn, even when both sides have the same speaker.
 #   speaking_time() sums segment durations per display name for speaker summaries.
 #   result.json keeps the fine-grained segments; only md/txt and the GUI view use turns.
 # @inputs: merged segments (start, end, speaker_id, text), optional speakers mapping
@@ -55,6 +56,7 @@ def group_turns(
         last = turns[-1] if turns else None
         continues = (
             last is not None
+            and not seg.get("manual_break_before")
             and last["speaker_name"] == name
             and last_channel == channel
             and start - last["end"] < TURN_GAP_SECONDS

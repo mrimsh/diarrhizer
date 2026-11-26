@@ -13,7 +13,7 @@ from typing import Any
 #   does not make several files transactional or guarantee recovery after hardware/power failure.
 #   Preserve the supplied line endings so bundle hashes describe exact UTF-8 bytes on Windows too.
 # @inputs: text/JSON data and local paths
-# @outputs: complete files; read_json returns None for missing/corrupt files
+# @outputs: complete files; read_json tolerates corrupt files, read_object reports malformed critical data
 # @sideEffects: Reads/writes files; removes its temporary file on failure
 # @errors: OSError for write failures; TypeError for unsupported JSON values
 # @see: ARTIFACTS:BUNDLE, CONFIG:ENV
@@ -64,6 +64,20 @@ def read_json(path: str | Path) -> Any | None:
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeError):
         return None
+
+
+def read_object(path: Path) -> dict:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    try:
+        value = json.loads(text)
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError(f"Cannot read {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{path}: expected a JSON object")
+    return value
 
 
 def write_json_atomic(path: str | Path, data: Any) -> None:

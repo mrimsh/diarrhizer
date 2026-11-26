@@ -21,6 +21,7 @@ from diarrhizer.summary.providers import KIND_CODEX_CLI, Provider
 from diarrhizer.summary.templates import PromptTemplate
 from diarrhizer.utils import read_json
 from diarrhizer.projects import export_path
+from diarrhizer.transcript import MANUAL, exports_current, load_transcript
 from diarrhizer.artifacts import SCHEMA_VERSION, locked_job, digest, provenance, write_bundle, recover_bundles, bundle_valid
 
 logger = logging.getLogger("diarrhizer.summary")
@@ -57,8 +58,12 @@ def read_transcript(job_dir: str | Path) -> str:
         FileNotFoundError: the job has not been exported yet
         ValueError: the transcript is empty
     """
-    path = export_path(Path(job_dir), "md")
-    if not bundle_valid(Path(job_dir) / "export", "manifest.json"):
+    root = Path(job_dir)
+    path = export_path(root, "md")
+    version = load_transcript(root) if (root / MANUAL).exists() else None
+    if version and version.conflict:
+        raise ValueError("Исходные реплики изменились. Выберите версию на экране результатов.")
+    if not exports_current(root, version):
         raise ValueError("Export is incomplete or changed; run --from-stage export to recover it before sending")
     if not path.exists():
         raise FileNotFoundError(
@@ -115,9 +120,9 @@ def preview_prompt(
 
 # [SEMANTIC-BEGIN] SUMMARY:JOB
 # @purpose: Produce and store a summary of one job's transcript with a chosen template and provider
-# @description: Reads export/result.md as it is (speaker names included), builds the request from the template's
+# @description: Reads the published Markdown only when it matches the active transcript.
 #   Portable jobs read their job-title-named Markdown export through job.json instead.
-#   prompt (SUMMARY:WILDCARDS: {{transcript}}, {{note}} and the job's facts are filled in where the template
+#   The request uses the template prompt (SUMMARY:WILDCARDS: {{transcript}}, {{note}} and the job's facts are filled in where the template
 #   puts them; the transcript is appended when it does not; an optional note of the user for this run goes
 #   in the same way, with a warning - logged and returned - when the template has no {{note}}), asks the
 #   provider (ADAPTER:LLM) and writes the reply to

@@ -22,6 +22,7 @@ from typing import Callable
 from diarrhizer.export.speakers import resolve_speaker_name
 from diarrhizer.export.turns import format_timestamp
 from diarrhizer.utils import read_json
+from diarrhizer.transcript import MANUAL, load_transcript
 
 # `\{{` (an escaped literal "{{", no group) or `{{ name }}` (group 1 = name; spaces and tabs only, so a
 # wildcard never spans lines). A wildcard in the template is found once, left to right, and a value is never
@@ -54,7 +55,9 @@ class PromptContext:
 
     @cached_property
     def segments(self) -> list[dict]:
-        """merged/segments.json's phrases (start, end, speaker_id, text)."""
+        """Saved phrases (start, end, speaker_id, text), including manual assignments."""
+        if self.job_dir is not None and (self.job_dir / MANUAL).exists():
+            return load_transcript(self.job_dir).segments
         segments = self.read_job_json("merged/segments.json").get("segments")
         return [seg for seg in segments if isinstance(seg, dict)] if isinstance(segments, list) else []
 
@@ -143,7 +146,7 @@ def _language(ctx: PromptContext) -> str:
 # @description: name -> Wildcard(name, description, value function, a short Russian line for the GUI's list;
 #   find_wildcards() reads the references out of a prompt against it). The value functions take a PromptContext
 #   and return a string; job facts come from what the job already records (meta/run.json,
-#   merged/segments.json, speakers.json, asr/transcript.json, the folder name) and are "" when that is
+#   the active transcript, speakers.json, asr/transcript.json, the folder name) and are "" when that is
 #   missing. To add a wildcard, add an entry here and name it in README.md and docs/architecture.md.
 # @inputs: PromptContext
 # @outputs: str per wildcard

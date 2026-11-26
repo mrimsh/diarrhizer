@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.15 — 2026-11-26
+
+- Edit timed transcript segments on the result screen while listening to the recording. Split at the cursor, join adjacent segments and reassign individual speakers.
+- Save manual revisions in `edits/transcript.json` and rebuild Markdown, text, SRT and JSON without running recognition. New summaries use the published revision.
+- Choose the manual or machine version when reprocessing changes the source. Failed exports can be retried from the saved edits.
+
 ## 2.14 — 2026-11-23
 
 - At startup, show the installed application version in the selected environment and the version

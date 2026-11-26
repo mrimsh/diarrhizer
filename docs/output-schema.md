@@ -91,6 +91,7 @@ Legacy jobs default to `channel_source: "stereo"`, tracks 1/2 and auto playback 
 | `speakers` | object | Normalized speaker ID → display name mapping; empty when unnamed |
 | `provenance` | object | Python and installed package versions; no model revision guarantee |
 | `source_sha256` | string | SHA-256 of the UTF-8 merged source JSON text |
+| `transcript_sha256` | string | SHA-256 of the active segment list used for all export formats, including saved manual corrections |
 | `warnings` | array of strings | Application warnings from ASR and merge, including alignment fallback |
 
 #### `config` object
@@ -115,6 +116,7 @@ Array of transcribed segments, each containing:
 | `text` | string | Transcribed text for the segment |
 | `words` | array (optional) | Word-level details if available |
 | `alignment_warning` | string (optional) | Why the segment was retained unsplit to preserve text |
+| `manual_break_before` | boolean (optional) | A manual split starts a new turn here in Markdown, plain text and the result view |
 
 #### `words` array (optional)
 

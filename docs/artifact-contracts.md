@@ -26,6 +26,18 @@ records the budget per turn. These are diagnostics, not signatures or evidence o
 
 ## One writer per job
 
+The optional `edits/transcript.json` stores a full segment list and the SHA-256 of the canonical
+source segment list (`base_sha256`). A user who keeps that revision after a source change explicitly
+records `accepted_source_sha256`. Choosing the new source moves the manual file to a content-addressed
+archive in the same directory. Changing text, splitting or joining drops word alignment for those
+segments. Changing only the speaker retains word times and updates word speaker IDs.
+
+Export JSON and the manifest record `metadata.transcript_sha256` for the active segment list.
+The manifest also records `merged_segments_sha256` so that keeping a manual snapshot after a
+conflict requires publishing exports for the newly accepted source.
+Manual saves acquire the job lock across the revision write and export. If publication fails,
+summary readers reject stale Markdown, and export can be retried from the saved revision.
+
 Pipeline execution, summaries, chat mutations, speaker-name saving and job deletion acquire the same
 nonblocking OS file lock. A competing operation fails with `Job is busy … Retry after it finishes`;
 different jobs can run independently. The lock spans a model call to prevent a second request from
@@ -45,7 +57,7 @@ Markdown/metadata pair. All individual writes use a temporary file, flush/fsync 
 
 Pending or hash-mismatched bundles are not accepted as complete by cache checks, summary readers or
 history. Legacy exports/summaries without manifests remain readable. Hand-editing a manifested result
-makes it invalid; retain such edits separately before rebuilding exports. The source ASR is authoritative.
+makes it invalid. Save corrections through the result editor to include them on the next export.
 
 After an interrupted write:
 
