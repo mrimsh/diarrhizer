@@ -2,7 +2,7 @@
 
 ## Release version
 
-The current source version is **2.15** by **MRIMSH**. `src/diarrhizer/__init__.py` defines
+The current source version is **2.16** by **MRIMSH**. `src/diarrhizer/__init__.py` defines
 `__version__` for the CLI (`python -m diarrhizer --version`), GUI window/sidebar and Qt metadata,
 Windows launcher and provider client identity. Setuptools reads that same value when building
 package metadata; no processing libraries are imported to read the version. After changing it,
@@ -15,6 +15,11 @@ Include the bump in that same commit, update current-version documentation and t
 and show the full `MAJOR.MINOR` everywhere. Amending keeps one increment from the parent.
 Only an explicit major-version change resets the minor component. Recorded versions work in
 installed packages without Git; publishing a GitHub release remains a separate action.
+
+Prepend each entry to the root `CHANGELOG.md` with a heading such as `## 2.16 — 2026-11-26`.
+Write the main changes as bullets first. The launcher previews the first three. Use level-three
+or deeper subheadings for the full notes. Both viewers use this document in source checkouts,
+installed wheels and the standalone launcher. The final page is `## Ранние изменения`.
 
 The published 2.0 GitHub release uses the `chore(release): 2.0` marker commit for tag `v2.0`
 and the [2.0 changelog entry](../CHANGELOG.md#20--2026-11-06) as release notes.

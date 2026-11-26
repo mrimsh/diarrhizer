@@ -53,6 +53,10 @@ where = ["src"]
 [tool.setuptools.dynamic]
 version = {attr = "diarrhizer.__version__"}
 
+[tool.setuptools.data-files]
+# Match exactly this file when present. Older launchers omitted it from downloaded source trees.
+"share/diarrhizer" = ["CHANGELOG[.]md"]
+
 [tool.setuptools.package-dir]
 diarrhizer = "src/diarrhizer"
 diarrhizer_gui = "src/diarrhizer_gui"

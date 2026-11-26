@@ -1,4 +1,4 @@
-"""Independent Tk launcher; no Qt, torch or Diarrhizer imports."""
+"""Independent Tk launcher with offline release notes and environment setup."""
 
 import argparse
 import http.client
@@ -16,7 +16,9 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from diarrhizer import __author__, __version__
+from diarrhizer.changelog import UNAVAILABLE, load_history
 
+from .changelog_window import ChangelogWindow
 from .config import (
     LauncherLock,
     Settings,
@@ -56,6 +58,7 @@ from .system import capture, discover_pythons, gpu_description
 #   Self-update downloads/verifies a release off-thread, then confirms restart before handing off
 #   replacement to a hidden helper. The single-instance lock is released before the new exe starts.
 #   Independent read-only startup probes compare the selected runtime with main and the exe with stable releases.
+#   The latest local release and its history can be read before any probes or environment setup.
 # @inputs: one local state file, user paths/device/download choices
 # @outputs: setup progress/log, retry/repair controls, GUI/shortcut/start-folder actions
 # @sideEffects: Native dialogs, background setup/probes and user-requested shortcuts
@@ -87,14 +90,29 @@ class Launcher:
             style.theme_use("vista")
         style.configure("Title.TLabel", font=("Segoe UI", 19, "bold"))
         style.configure("TButton", padding=(9, 5))
-        body = ttk.Frame(root, padding=18)
-        body.pack(fill="both", expand=True)
+        body = self._scrollable_body(root)
         body.columnconfigure(0, weight=1)
         body.rowconfigure(5, weight=1)
-        ttk.Label(body, text=f"Лаунчер Diarrhizer {__version__} · {__author__}", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        header = ttk.Frame(body)
+        header.grid(row=0, column=0, rowspan=2, sticky="ew", pady=(0, 8))
+        header.columnconfigure(1, weight=1)
+        ttk.Label(header, text=f"Лаунчер Diarrhizer {__version__}", style="Title.TLabel").grid(row=0, column=0, sticky="sw")
+        ttk.Label(header, text=__author__).grid(row=1, column=0, sticky="nw")
         self.status = tk.StringVar(value="Поиск совместимого Python и проверка среды…" if probe
                                    else "Подготовьте окружение, затем откройте основной GUI.")
-        ttk.Label(body, textvariable=self.status, wraplength=920).grid(row=1, column=0, sticky="w", pady=(4, 12))
+        ttk.Label(header, textvariable=self.status, wraplength=280).grid(row=2, column=0, sticky="nw")
+        self.entries = load_history()
+        update = ttk.LabelFrame(header, text="Последнее обновление", padding=(9, 4))
+        update.grid(row=0, column=1, rowspan=3, sticky="ew", padx=(12, 0))
+        update.columnconfigure(0, weight=1)
+        self.history_version = tk.StringVar()
+        ttk.Label(update, textvariable=self.history_version, wraplength=350).grid(row=0, column=0, sticky="w")
+        self.history_button = ttk.Button(update, text="Вся история изменений", command=self._open_history)
+        self.history_button.grid(row=0, column=1, sticky="e")
+        highlights = self.entries[0].highlights() if self.entries else []
+        summary = ttk.Label(update, text="\n".join("• " + item for item in highlights), justify="left", wraplength=480)
+        summary.grid(row=1, column=0, columnspan=2, sticky="ew")
+        summary.bind("<Configure>", lambda event: summary.configure(wraplength=max(1, event.width)))
 
         form = ttk.LabelFrame(body, text="Параметры среды", padding=12)
         form.grid(row=2, column=0, sticky="ew")
@@ -171,7 +189,7 @@ class Launcher:
         self.launcher_status = tk.StringVar(value=f"Лаунчер {__version__}")
         ttk.Label(update_actions, textvariable=self.launcher_status).pack(side="left")
 
-        self.log = ScrolledText(body, height=9, wrap="word", font=("Consolas", 9), state="disabled")
+        self.log = ScrolledText(body, height=4, wrap="word", font=("Consolas", 9), state="disabled")
         self.log.grid(row=5, column=0, sticky="nsew")
         self.log_path = tk.StringVar(value="Журнал: " + (self.state.log if self.state and self.state.log
                                                        else str(state_path.parent / "logs")))
@@ -203,6 +221,37 @@ class Launcher:
             if getattr(sys, "frozen", False):
                 self.launcher_status.set(f"Лаунчер {__version__} · проверяем обновления…")
                 self._version_probe("exe_version", lambda: latest_launcher(__version__))
+
+    @staticmethod
+    def _scrollable_body(root):
+        # At Windows display scaling even the minimum-size form can be taller than the screen.
+        viewport = tk.Canvas(root, highlightthickness=0)
+        scroll = ttk.Scrollbar(root, orient="vertical", command=viewport.yview)
+        scroll.pack(side="right", fill="y")
+        viewport.pack(side="left", fill="both", expand=True)
+        viewport.configure(yscrollcommand=scroll.set)
+        body = ttk.Frame(viewport, padding=18)
+        content = viewport.create_window(0, 0, anchor="nw", window=body)
+
+        def resize(_):
+            width = viewport.winfo_width()
+            height = max(body.winfo_reqheight(), viewport.winfo_height())
+            viewport.itemconfigure(content, width=width, height=height)
+            viewport.configure(scrollregion=(0, 0, width, height))
+
+        def wheel(event):
+            if not isinstance(event.widget, (tk.Text, ttk.Combobox)):
+                viewport.yview_scroll(-int(event.delta / 120), "units")
+
+        viewport.bind("<Configure>", resize)
+        body.bind("<Configure>", resize)
+        root.bind("<MouseWheel>", wheel)
+        return body
+
+    def _open_history(self):
+        window = ChangelogWindow(self.root, self.entries)
+        window.grab_set()
+        return window
 
     def _version_probe(self, kind, read, **context):
         def check():
@@ -237,6 +286,10 @@ class Launcher:
     def _show_versions(self):
         selected = self.variables["venv"].get().strip() == self.installed_folder
         local = self.installed_status if selected else "откройте среду"
+        release = f"Запись: {self.entries[0].title}" if self.entries else UNAVAILABLE
+        if self.entries and selected and self.installed_version and self.installed_version != self.entries[0].version:
+            release += f"\nУстановленное приложение: {self.installed_version}"
+        self.history_version.set(release)
         newer = (selected and self.installed_version and self.remote_version
                  and version_numbers(self.remote_version) > version_numbers(self.installed_version))
         self.source_text.set(f"Приложение в среде: {local} · {SOURCE_LABEL}: {self.remote_version or self.remote_status}"
@@ -714,10 +767,27 @@ def main() -> int:
         if os.name == "nt":
             import ctypes
             ctypes.windll.kernel32.SetDllDirectoryW(None)
-        Launcher(root, state_path, application_source(), probe=not args.smoke_test)
+        launcher = Launcher(root, state_path, application_source(), probe=not args.smoke_test)
         if args.update_ack:
             root.after(100, lambda: atomic_text(args.update_ack, "ready"))
         if args.smoke_test:
+            root.update_idletasks()
+            history = root.nametowidget(launcher.history_button.invoke())
+            total = len(launcher.entries)
+            assert total and launcher.entries[0].version == __version__
+            assert launcher.entries[0].title in launcher.history_version.get()
+            assert history.newer.instate(["disabled"])
+            for _ in range(total - 1):
+                history.older.invoke()
+            assert history.older.instate(["disabled"])
+            assert "Ранние изменения" in history.browser.get("1.0", "end")
+            history.newer.invoke()
+            assert history.selector.current() == total - 2
+            history.selector.current(0)
+            history.selector.event_generate("<<ComboboxSelected>>")
+            assert history.page["text"] == f"1 / {total}"
+            assert launcher.entries[0].highlights()[0] in history.browser.get("1.0", "end")
+            history.destroy()
             root.after(800, root.destroy)
         root.mainloop()
         return 0

@@ -1,117 +1,200 @@
-# Changelog
+# История изменений Diarrhizer
+
+Для опубликованных выпусков указана дата публикации на GitHub (UTC). Для остальных версий 2.x указана дата коммита с этим номером, для текущей разработки — дата подготовки записи. Полные тексты опубликованных заметок приведены на страницах соответствующих версий.
+
+## 2.16 — 2026-11-26
+
+- Нажмите на версию в боковой панели, чтобы открыть историю изменений.
+- В лаунчере видны последние изменения ещё до настройки окружения.
+- Выберите версию из списка или листайте историю без подключения к интернету.
+
+При обновлении со стабильной версии 2.14 также станет доступен редактор расшифровки из 2.15. Он позволяет исправлять реплики во время прослушивания и пересобирать Markdown, TXT, SRT и JSON без повторного распознавания.
+
+Для первого запуска в Windows скачайте **Diarrhizer.exe** из файлов выпуска. Если в вашем лаунчере есть кнопка **«Обновить лаунчер…»**, используйте её для установки нового лаунчера. Кнопка **«Обновить приложение»** обновляет Diarrhizer в выбранном окружении.
 
 ## 2.15 — 2026-11-26
 
-- Edit timed transcript segments on the result screen while listening to the recording. Split at the cursor, join adjacent segments and reassign individual speakers.
-- Save manual revisions in `edits/transcript.json` and rebuild Markdown, text, SRT and JSON without running recognition. New summaries use the published revision.
-- Choose the manual or machine version when reprocessing changes the source. Failed exports can be retried from the saved edits.
+- Во время прослушивания записи можно исправить текст реплики, разделить её в позиции курсора, объединить соседние реплики и изменить говорящего.
+- Сохраните правки, чтобы заново получить Markdown, TXT, SRT и JSON без распознавания. Новые сводки используют опубликованную редакцию текста.
+- Если повторное распознавание изменило исходный текст, можно выбрать ручную или машинную версию. После сбоя экспорта правки доступны в `edits/transcript.json`.
 
 ## 2.14 — 2026-11-23
 
-- At startup, show the installed application version in the selected environment and the version
-  available on main. The standalone launcher also checks for a newer stable launcher release.
-  Updates start only when requested, and a failed version check leaves the GUI available.
+- При открытии лаунчер показывает версии приложения в выбранной среде и в ветке `main`. Для самого лаунчера видна доступная стабильная версия.
+- Установку запускает пользователь. Если проверка по сети завершилась ошибкой, рабочую среду всё равно можно открыть.
+
+### Опубликованные заметки
+
+При открытии лаунчер показывает версию Diarrhizer в выбранном окружении и доступную версию из ветки main. Рядом с кнопкой «Обновить лаунчер…» появляется номер нового стабильного релиза, если он доступен. Вы сами выбираете, когда установить обновление.
+
+Для первого запуска скачайте приложенный Diarrhizer.exe. Если в вашем лаунчере уже есть кнопка «Обновить лаунчер…», нажмите её для перехода на 2.14.
+
+[Страница выпуска Diarrhizer 2.14](https://github.com/mrimsh/diarrhizer/releases/tag/v2.14)
 
 ## 2.13 — 2026-11-18
 
-- Name voice archives from separate audio tracks by their original one-based numbers
-  (`_track_1`, `_track_2`, etc.). Keep `_left` and `_right` for stereo channels.
-- Preserve track suffixes when renaming jobs and keep existing archives readable on resume.
+- Архивы голосов из разных звуковых дорожек получили исходные номера, например `_track_1` и `_track_2`. Для левого и правого стереоканалов сохранены `_left` и `_right`.
+- При переименовании задания суффиксы сохраняются. Ранее созданные архивы можно использовать при продолжении обработки.
 
 ## 2.12 — 2026-11-18
 
-- Show duration, file size and audio track details for the selected file in New Job. Track
-  numbers match the me/others selectors and exclude video. Inspect metadata in the background
-  so a slow or failed preview does not block the form.
+- При выборе файла в «Новом задании» видны длительность, размер и состав звуковых дорожек. Их номера совпадают с выбором источников «я/остальные» и пропускают видеопотоки.
+- Медленный или недоступный предпросмотр больше не задерживает заполнение формы.
 
 ## 2.11 — 2026-11-18
 
-- Add a GUI option to omit the playback mix in me/others mode for both stereo L/R and separate
-  audio tracks. With FLAC archiving and WAV retention disabled, only the two voice files remain.
-- Remember the option when resuming or restarting conversion; recognition can be rerun using only
-  the separate voice archives.
+- В режиме «я/остальные» можно хранить только два голосовых архива FLAC. Общий микс для прослушивания и сохранение WAV отключаются в настройках задания.
+- Повторное распознавание работает по отдельным архивам. Продолжение задания и перезапуск конвертации учитывают выбор микса.
 
 ## 2.10 — 2026-11-18
 
-- In me/others mode, split long recognition chunks at timed pauses and replies from the other
-  source while retaining simultaneous speech. Keep replies from separate sources distinct even
-  when both speakers have the same display name.
-- Fix stage restarts: one-on-one runs need no HF token and retain names when channel settings
-  are unchanged. Rebuild extracted audio when track-to-channel mapping changes.
+- В режиме «я/остальные» длинные реплики разделяются по паузам и ответам собеседника. Одновременная речь и реплики из разных источников с одинаковыми именами сохраняются.
+- Перезапуск разговора один на один обходится без HF-токена и сохраняет имена участников при прежних настройках каналов. После изменения привязки дорожек звук извлекается заново.
 
 ## 2.9 — 2026-11-17
 
-- Update the standalone launcher from its interface using stable GitHub Release assets. Verify
-  SHA-256, size, x64 PE and version before confirmation; replace after shutdown with a backup and
-  restore the old executable if the new window fails to acknowledge startup. Preserve the state
-  path, environments and user data; retain a durable update log and support cancellation/retry.
+- Кнопка «Обновить лаунчер…» скачивает стабильный выпуск и предлагает перезапуск после проверки файла. Загрузку можно отменить или повторить.
+- Если новый лаунчер не откроется, восстановится предыдущий исполняемый файл. Настройки, модели и результаты сохраняются.
+- **Техническое изменение.** Перед заменой проверяются SHA-256, размер, формат Windows x64 и версия файла. Журнал обновления доступен после перезапуска.
+
+### Опубликованные заметки
+
+#### Новое: самообновление лаунчера
+
+Добавлена кнопка **«Обновить лаунчер…»**. Она проверяет последнюю опубликованную стабильную версию на GitHub Releases, скачивает `Diarrhizer.exe` и проверяет SHA-256, размер, формат Windows x64 и версии файла/продукта.
+
+После проверки лаунчер предлагает подтвердить установку и перезапуск. Отдельный Windows-helper ждёт завершения старого процесса, заменяет exe с резервной копией и запускает новую версию с тем же файлом настроек. Если новое окно не подтверждает успешный запуск, восстанавливается предыдущий exe. Есть отмена загрузки, журнал и уведомление о результате после перезапуска.
+
+Python-окружение, модели, результаты и сохранённые настройки при самообновлении не меняются. Git и подготовленная `.venv` для обновления самого лаунчера не нужны.
+
+#### Как перейти
+
+1. Один раз скачайте **Diarrhizer.exe** из вложений этого релиза и замените старый лаунчер, в котором кнопки самообновления ещё нет.
+2. Для обновления Diarrhizer используйте **«Обновить приложение»** — источник остаётся веткой `main`.
+3. При выходе следующего стабильного релиза используйте **«Обновить лаунчер…»** вместо ручной замены exe.
+
+Запускайте exe из папки, доступной для записи. Функция не запрашивает повышение привилегий. Ошибки сохраняются в `logs/launcher-update.log`; резервная копия exe остаётся рядом с файлом запуска.
+
+#### Версия и проверки
+
+- Версия повышена **2.8 → 2.9** в том же коммите, что и изменения. CLI, GUI, лаунчер, пакет и Windows FileVersion/ProductVersion используют общую версию 2.9.
+- 84 проверки лаунчера и диагностики прошли, включая настоящую Windows-замену, ожидание освобождения файла, перезапуск с Unicode-путями и откат при неудачном старте.
+- Проверены загрузка реального релизного exe, SHA-256, размер, Windows x64 PE и метаданные версии без выполнения скачанного файла.
+- Самостоятельный exe пересобран и прошёл проверку запуска без Python в PATH.
+
+Остальные возможности текущей версии, включая обработку отдельных дорожек «я/остальные», описаны в [CHANGELOG](https://github.com/mrimsh/diarrhizer/blob/v2.9/CHANGELOG.md).
+
+[Страница выпуска Diarrhizer 2.9](https://github.com/mrimsh/diarrhizer/releases/tag/v2.9)
 
 ## 2.8 — 2026-11-17
 
-- Support separate audio tracks for me/others in CLI and GUI, with one-based voice-track selection
-  and an optional playback-only joint mix; retain the stereo L/R mode and existing artifacts.
-- Preserve track selection through cache/resume/restart and exports; retain delayed stream starts
-  on a common timeline, validate missing/duplicate tracks before ASR, and keep the joint mix out of ASR.
+- В CLI и GUI для режима «я/остальные» можно выбрать отдельные звуковые дорожки по номерам. Общий микс используется только для прослушивания.
+- Выбор дорожек сохраняется при продолжении и перезапуске. Задержки начала дорожек учитываются на общей шкале времени, отсутствующие и повторно выбранные дорожки выявляются до распознавания.
 
 ## 2.7 — 2026-11-16
 
-- Add explicit me/others stereo processing in CLI and GUI: select the local channel, transcribe
-  full-length channels independently, diarize only other participants, and merge overlapping turns
-  by original timestamps. One-on-one calls use channel identity without a diarization model or HF token.
-- Preserve channel settings and channel-specific archives on resume/restart; reject mono/multiple
-  streams and incompatible partial mode changes, and keep split overlapping SRT cues chronological.
-- Add an opt-in `ru-call` ASR prompt profile and separate glossary contents in CLI, New Job and stage
-  restart. Preserve the custom prompt; record composed-prompt hashes and warn on tokenizer-budget overflow.
-- Apply real WhisperX VAD onset/offset and maximum chunk duration, validate ranges/hysteresis, and
-  preserve the settings through GUI queue, CLI/GUI resume and ASR cache version 4.
+- Для стереозаписи звонка можно указать свой канал. Каналы распознаются отдельно, в результате сохраняется одновременная речь. Для разговора один на один модель диаризации и HF-токен не нужны.
+- Настройки каналов и голосовые архивы сохраняются при перезапуске. Субтитры с перекрывающимися репликами идут в порядке начала.
+- Для русскоязычных звонков появился профиль `ru-call`. Можно задать словарь терминов вместе со своей подсказкой и увидеть предупреждение о превышении лимита токенов.
+- **Техническое изменение.** WhisperX получает заданные пороги начала и конца речи и максимальную длительность фрагмента. Эти параметры учитываются при продолжении и в кэше ASR.
 
 ## 2.6 — 2026-11-11
 
-- Use independent, case-sensitive date/time wildcards `YYYY`, `YY`, `MM`, `DD`, `HH`, `mm`, `SS`
-  with configurable order and literal separators in job and file names; `MM` is month, `mm` is minute.
-- Parse input filenames with the same date/time tokens through an optional format field;
-  preview suggestions before applying them, retaining automatic detection and manual date/time editing.
-- Preserve complete custom date/time templates when editing existing jobs and keep the date/time
-  controls readable in the rename dialog. Existing fixed date/time aliases remain supported.
+- Дату и время в именах заданий и файлов можно собрать из `YYYY`, `YY`, `MM`, `DD`, `HH`, `mm`, `SS` в нужном порядке. `MM` обозначает месяц, `mm` — минуты.
+- Такой же формат можно задать для чтения даты из имени исходного файла. Предложение видно до применения, доступна ручная правка.
+- При переименовании сохраняются полные пользовательские шаблоны и поддерживаются прежние обозначения даты и времени.
 
 ## 2.5 — 2026-11-11
 
-- Store recording date/time separately from processing time; propose conservative timestamps from
-  input filenames with per-file manual editing, filename reset and a Now button.
-- Edit an existing job's recording date/time and name in place with a shared preview and rollback;
-  preserve processing timestamps, transcript contents and external originals.
-- Support recording-time tokens `HH_MM_SS` / `{{time}}`, explicit CLI `--recorded-at`, and recording-time
-  history sorting. Keep the default naming template unchanged and preserve legacy-job compatibility.
+- Дата записи хранится отдельно от времени обработки. Приложение предлагает её по имени файла, а пользователь может изменить значение для каждого файла.
+- У готового задания можно изменить дату, время и имя с предпросмотром. При ошибке переименование откатывается, исходная запись и текст сохраняются.
+- Историю можно сортировать по времени записи. В CLI добавлен параметр `--recorded-at`, в шаблонах имени доступно время записи.
 
 ## 2.4 — 2026-11-11
 
-- Download current GitHub `main` source for launcher setup, repair and application updates, pinned
-  to an immutable commit with a local source cache; no Git installation or launcher rebuild per app version.
-- Show downloaded version/revision; preserve the working environment on download failure instead of
-  silently reinstalling an older bundled application. Launcher and downloaded application versions may differ.
+- При настройке, восстановлении и обновлении лаунчер скачивает исходники из ветки `main`. Для обновления приложения больше не нужны Git или новая сборка лаунчера.
+- В интерфейсе видны версия и коммит установки. При сбое загрузки рабочая среда остаётся доступной.
+- **Техническое изменение.** Загрузки привязаны к конкретному коммиту и кэшируются локально. Сборка включает доверенные сертификаты для HTTPS.
 
-## 2.3 — Unreleased
+### Опубликованные заметки
 
-- Open and re-export old results containing reversed segment intervals without losing transcript
-  text or speaker names. Recover bounds only in memory and show an alignment warning; source
-  job artifacts remain unchanged on opening.
+#### Что изменилось
 
-## 2.2 — Unreleased
+- Лаунчер скачивает актуальное состояние ветки **main** с GitHub при подготовке, восстановлении и обновлении приложения. Git и ручной `git pull` не нужны.
+- Каждая установка использует конкретный коммит. Версия и ревизия показываются в интерфейсе и журнале; исходники кэшируются локально.
+- Сетевая ошибка оставляет рабочее окружение доступным. Старая встроенная версия не устанавливается молча; загрузку можно повторить.
+- Добавлен актуальный набор доверенных CA-сертификатов для HTTPS. Проверка сертификатов и имён серверов остаётся включённой.
+- Включено исправление открытия и повторного экспорта старых результатов с обратным порядком временных границ: исходные артефакты не меняются при открытии.
+- Общая версия CLI, GUI, лаунчера и метаданных сборки — **2.4**.
 
-- Fix launcher updates after `git pull`: an exe in the checkout uses current local sources;
-  show the source path/version, verify the installed version, and support application-only updates
-  without reinstalling the CPU/CUDA stack.
+#### Как обновиться
 
-## 2.1 — Unreleased
+1. Скачайте **Diarrhizer.exe** из вложений этого релиза и замените старый лаунчер.
+2. Закройте основной GUI и откройте существующее окружение в новом лаунчере.
+3. Нажмите **«Обновить приложение»**, затем запустите GUI.
 
-- Require a minor version increment in every new commit, including documentation, tests and merges,
-  with the version bump in the same commit as the changes (see AGENTS.md).
-- Advance the shared application version to 2.1; CLI, GUI, launcher and newly built distribution
-  metadata use the complete recorded `MAJOR.MINOR` value.
+Лаунчер работает без подготовленной `.venv`. Обновление приложения не переустанавливает Torch/CUDA. Модели скачиваются отдельно в основном GUI.
+
+Источник обновлений — **ветка main**, включая изменения, ещё не опубликованные отдельным релизом. Версия скачанного приложения может отличаться от версии самого лаунчера. При исправной работе загрузчика новые версии приложения не требуют пересборки `.exe`.
+
+#### Проверено
+
+- 64 проверки лаунчера и диагностики; проверки синтаксиса/семантических тегов и стиля.
+- CLI и метаданные пакета 2.4; Windows FileVersion/ProductVersion 2.4.
+- Запуск самостоятельного `.exe` без Python в PATH.
+- Реальная загрузка GitHub и обновление отдельного тестового окружения без изменения версий Torch, torchaudio и PySide6.
+
+[Страница выпуска Diarrhizer 2.4](https://github.com/mrimsh/diarrhizer/releases/tag/v2.4)
+
+## 2.3 — 2026-11-11
+
+- Старые результаты с перепутанными началом и концом реплики снова открываются и экспортируются с текстом и именами говорящих. Приложение показывает предупреждение и исправляет границы в памяти.
+
+## 2.2 — 2026-11-11
+
+- Кнопка «Обновить приложение» обновляет код в существующей среде без повторной установки Torch/CUDA и загрузки моделей.
+- После `git pull` лаунчер находит исходники выбранного репозитория, показывает путь и версию и проверяет версию установленного пакета.
+
+### Опубликованные заметки
+
+#### Исправления
+
+- Лаунчер использует актуальные исходники после `git pull`, если запущен из папки репозитория или `dist`.
+- При выборе окружения внутри репозитория, например `.venvcuda`, внешний лаунчер также определяет этот репозиторий как источник приложения.
+- Добавлена кнопка **«Обновить приложение»**: обновление Diarrhizer без переустановки Torch/CUDA и загрузки моделей.
+- В интерфейсе и журнале видны источник и версия приложения; после установки проверяется совпадение версии кода и метаданных пакета.
+- Общая версия CLI, GUI, лаунчера и метаданных — **2.2**.
+
+#### Установка и обновление
+
+Скачайте **Diarrhizer.exe** из вложений релиза. Лаунчер запускается без подготовленной Python-среды.
+
+Для обновления существующей среды закройте основной GUI, откройте окружение в новом лаунчере и нажмите **«Обновить приложение»**, затем снова запустите GUI. Для получения кода после `git pull` проверьте, что в поле источника указан актуальный репозиторий.
+
+Самостоятельный `.exe` содержит исходники версии 2.2. За пределами репозитория и без выбранной среды внутри репозитория он использует эту встроенную копию. Библиотеки обработки устанавливаются мастером, модели загружаются отдельно в основном GUI.
+
+#### Проверка
+
+59 проверок лаунчера и диагностики прошли. Проверены обновление приложения без изменения версий Torch/torchaudio/PySide6 в тестовой среде и запуск GUI через лаунчер, ярлык и файл запуска. Пересобранный Windows x64 `.exe` прошёл проверку запуска без Python в PATH.
+
+[Страница выпуска Diarrhizer 2.2](https://github.com/mrimsh/diarrhizer/releases/tag/v2.2)
+
+## 2.1 — 2026-11-10
+
+- После выпуска 2.0 выбранные задания можно переносить между проектами и командами, в том числе перетаскиванием. Имена обновляются по шаблонам места назначения.
+- При сборке расшифровки исправляются перепутанные временные границы сегментов распознавания.
+- **Техническое изменение.** С этой версии каждый коммит получает следующий номер `MAJOR.MINOR`. CLI, GUI, лаунчер и метаданные сборки показывают его полностью.
 
 ## 2.0 — 2026-11-06
 
-### Unified application release
+- Появился самостоятельный мастер Windows для установки, запуска и восстановления приложения. Он умеет открывать и настраивать существующее окружение.
+- Задания можно организовать по проектам и командам, выбирать шаблоны имён, правила хранения аудио и использовать списки участников повторно.
+- Улучшено восстановление экспорта и сводок после сбоя. При проблемах с выравниванием сохраняется распознанный текст. Пакет, CLI, GUI и лаунчер получили общую версию.
+- **Технические изменения.** Добавлены проверки выравнивания, метрики качества диаризации с учётом одновременной речи и замеры скорости, RAM и VRAM на CPU и CUDA. Ниже сохранены подробности выпуска.
+
+### Опубликованные заметки
+
+#### Unified application release
 
 - Shared version **2.0** for the package, CLI, desktop GUI, Windows launcher and provider client identity.
 - CLI `--version` and versioned help; the GUI shows the version in its window title and sidebar,
@@ -122,14 +205,14 @@
 - Projects and teams, configurable job names and media retention, and reusable participant lists.
 - The stabilization, reliability and quality work below is included in this release.
 
-### Direction for 2.x
+#### Direction for 2.x
 
 Increasing autonomy in call logging and creation of useful artifacts. Planned work includes a separate
 agent that joins calls and runs capture, transcription, diarization and summarization, with optional
 skills to post messages to chats and prepare/execute task-tracker API requests. This is a development
-direction, not functionality shipped in 2.0. See the [roadmap](docs/roadmap.md).
+direction, not functionality shipped in 2.0. See the [roadmap](https://github.com/mrimsh/diarrhizer/blob/v2.0/docs/roadmap.md).
 
-### Quality C1: RAM/VRAM and performance (2026-11-04)
+#### Quality C1: RAM/VRAM and performance (2026-11-04)
 
 - Shared ASR/DER sampling of full native process-tree RSS/CPU, Windows private commit, system RAM
   and device-wide NVIDIA VRAM/utilization with identity, baseline, sampling coverage and explicit scope.
@@ -138,7 +221,7 @@ direction, not functionality shipped in 2.0. See the [roadmap](docs/roadmap.md).
 - Optional `bench` dependencies, supported constraints, Windows CI and native/stub regressions.
 - Recorded CPU/CUDA examples with ambient load and sampling limits; no accuracy/cache changes.
 
-### Quality C1: annotated DER (2026-11-04)
+#### Quality C1: annotated DER (2026-11-04)
 
 - Full duration-based DER using explicit RTTM/UEM, Hungarian speaker mapping and overlap included
   by default; reports false alarms, misses, confusion and additive overlap/non-overlap breakdowns.
@@ -148,7 +231,7 @@ direction, not functionality shipped in 2.0. See the [roadmap](docs/roadmap.md).
 - Regression coverage for analytical metrics, simultaneous speakers, corpus integrity and failed runs;
   documented measured results and limitations. No runtime dependencies or product cache changes.
 
-### Quality C1 continuation (2026-11-04)
+#### Quality C1 continuation (2026-11-04)
 
 - Validated legacy alignment weight-norm loading, exact tensor checks and model/revision provenance;
   genuine checkpoint mismatches retain ASR text with a failed status. ASR cache version is now 3.
@@ -158,7 +241,7 @@ direction, not functionality shipped in 2.0. See the [roadmap](docs/roadmap.md).
 - Measured CPU/CUDA ASR and two-speaker diarization; documented checkpoint evidence and quality limits.
 - Added local checkpoint/metric/corpus regressions and extended semantic checks to Python tools.
 
-### Stabilization A1–A5 (2026-11-03)
+#### Stabilization A1–A5 (2026-11-03)
 
 - Separate API key variables, shared-key diagnostics and safe provider renaming.
 - Applied ASR beam/prompt options, effective settings and alignment warnings.
@@ -166,7 +249,7 @@ direction, not functionality shipped in 2.0. See the [roadmap](docs/roadmap.md).
 - Shared CLI/GUI resume settings, source fingerprints and versioned ASR/merge caches.
 - Protected queued speaker changes, dirty name edits and JSON/filesystem error handling.
 
-### Reliability B1–B4 (2026-11-03)
+#### Reliability B1–B4 (2026-11-03)
 
 - Supported-stack install checks, Windows CI, doctor profiles and separate research environments.
 - Documentation/link checks and MIT license (MRIMSH).
@@ -177,8 +260,28 @@ direction, not functionality shipped in 2.0. See the [roadmap](docs/roadmap.md).
 - Pinned the validated PySide6 6.11.2 baseline and fixed the empty-result close/save prompt.
 - Synthetic Russian fixture generation and initial CPU/CUDA WER/CER/RTF measurements.
 
-## 0.1.0
+[Страница выпуска Diarrhizer 2.0](https://github.com/mrimsh/diarrhizer/releases/tag/v2.0)
 
-Initial local application: CLI and desktop GUI, pipeline, batch queue, playback, speaker names,
-summary templates/providers and persisted dialogues. This was the initial package baseline,
-before the unified CLI/GUI release 2.0.
+## 1.0 — 2026-08-22
+
+- Опубликован первый графический выпуск **Diarrhizer GUI v.1.0**. Из окна приложения можно запустить обработку, наблюдать за этапами, переименовать говорящих и заново экспортировать результат.
+- В интерфейсе доступны настройки распознавания и подготовки звука, HF-токена, пути к FFmpeg и каталога моделей.
+
+[Страница выпуска Diarrhizer GUI v.1.0](https://github.com/mrimsh/diarrhizer/releases/tag/Diarrhizer-GUI-v.1.0)
+
+## Ранние изменения
+
+До общей версии 2.0 в метаданных пакета использовалось обозначение `0.1.0`. Отдельная дата публикации этого пакета не подтверждена. Номер 1.0 относится к графическому выпуску. Промежуточные изменения ниже датированы по Git.
+
+- **Сентябрь — октябрь 2026.** История заданий получила сортировку и удаление, очередь — изменение порядка и снятие ожидающих заданий. Появились пакетная обработка файлов и папок, отмена, воспроизведение записей, продолжение и перезапуск отдельных этапов с правкой настроек.
+- **Сентябрь — октябрь 2026.** В результатах появились читаемый текст по репликам, текстовый экспорт и субтитры SRT. Распознавание без диаризации тоже формирует расшифровку. Можно выбирать форматы хранения аудио и сохранять свои модели распознавания.
+- **Октябрь 2026.** Появились сводки по шаблонам с переменными, заметками и предпросмотром запроса. Диалоги с языковой моделью сохраняются у задания. Добавлены выбор провайдера, вход через его инструменты, сведения о лимитах и стоимости.
+- **Исследования, октябрь 2026.** В отдельных прототипах проверяли захват звонков, потоковое распознавание и сводки во время разговора. В пользовательскую сборку эти прототипы не входили.
+- **19 августа 2026.** Опубликован **CLI MVP** без числового номера релиза. Команды `doctor` и `run` позволяли проверить окружение и обработать запись с помощью FFmpeg и WhisperX, сопоставить текст с говорящими и получить Markdown и JSON. Поддерживались имена участников, профили звука и запуск отдельных этапов.
+- **Февраль — август 2026.** Первые коммиты датированы 28 февраля. Добавлялись этапы обработки, повторное использование готовых результатов, параметры ASR и варианты установки для CPU и CUDA. К моменту CLI MVP моделью по умолчанию стала `large-v3`.
+
+### Опубликованные заметки CLI MVP
+
+**Full Changelog**: https://github.com/mrimsh/diarrhizer/commits/CLI_MVP
+
+[Страница выпуска CLI MVP](https://github.com/mrimsh/diarrhizer/releases/tag/CLI_MVP)

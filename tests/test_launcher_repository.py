@@ -23,7 +23,7 @@ def archive(extra=None):
             "src/diarrhizer_gui/app.py": "", "pyproject.toml": "", "README.md": "", "LICENSE": "",
             "requirements/constraints-stable.txt": "", "requirements/base.txt": "",
             "requirements/cpu.txt": "", "requirements/cuda-cu121.txt": "",
-            "recording.wav": "private", ".env": "do not extract", **(extra or {}),
+            "CHANGELOG.md": "release history", "recording.wav": "private", ".env": "do not extract", **(extra or {}),
         }.items():
             bundle.writestr("repo-" + SHA + "/" + name, value)
     return content.getvalue()
@@ -48,6 +48,7 @@ def test_download_pins_commit_caches_source_and_excludes_data(tmp_path, monkeypa
     assert revision == SHA
     assert urls[-1].endswith(SHA)
     assert (folder / "src/diarrhizer/__init__.py").read_text() == '__version__ = "2.10"'
+    assert (folder / "CHANGELOG.md").read_text() == "release history"
     assert not (folder / ".env").exists()
     assert not (folder / "recording.wav").exists()
     cached, _ = repository.latest_source(tmp_path, lambda _: None, threading.Event())
@@ -62,6 +63,17 @@ def test_archive_traversal_is_rejected_without_publishing_source(tmp_path, monke
         repository.latest_source(tmp_path, lambda _: None, threading.Event())
     assert not (tmp_path / "sources" / SHA).exists()
     assert not list(tmp_path.rglob("escape.py"))
+
+
+def test_existing_snapshot_gains_history_when_reopened_by_new_launcher(tmp_path, monkeypatch):
+    urls = responses(monkeypatch, archive())
+    folder, _ = repository.latest_source(tmp_path, lambda _: None, threading.Event())
+    (folder / "CHANGELOG.md").unlink()
+    (folder / "marker").write_text("keep")
+    reopened, _ = repository.latest_source(tmp_path, lambda _: None, threading.Event())
+    assert reopened == folder and (folder / "marker").is_file()
+    assert (folder / "CHANGELOG.md").read_text() == "release history"
+    assert urls[-1].endswith(SHA)
 
 
 def test_network_failure_preserves_ready_environment_and_does_not_install(tmp_path, monkeypatch):

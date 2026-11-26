@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # [SEMANTIC-BEGIN] LAUNCHER:BUILD
 # @purpose: Package a standalone Windows launcher that does not need installed Python or a venv
 # @description: One-file PyInstaller bundle includes Tk and a clean application source payload for
-#   regular pip installation. Only source, requirements and public package metadata are copied;
+#   regular pip installation. Source, requirements, changelog and public package metadata are copied;
 #   personal .env, recordings, caches and virtual environments never enter the payload.
 #   Windows file/product metadata uses the shared application version and sole author.
 # @inputs: build Python with requirements/launcher-build.txt installed
@@ -55,7 +55,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="payload-", dir=build) as temporary:
         payload = Path(temporary) / "application"
         payload.mkdir()
-        for name in ("pyproject.toml", "README.md", "LICENSE"):
+        for name in ("pyproject.toml", "README.md", "CHANGELOG.md", "LICENSE"):
             shutil.copy2(ROOT / name, payload / name)
         shutil.copytree(ROOT / "requirements", payload / "requirements")
         shutil.copytree(ROOT / "src", payload / "src",

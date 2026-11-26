@@ -27,7 +27,8 @@ def _open(url):
 # [SEMANTIC-BEGIN] LAUNCHER:REPOSITORY
 # @purpose: Install current repository code independently of the launcher's compiled source snapshot
 # @description: Resolve main to one immutable SHA, download its archive over HTTPS and cache the validated
-#   source atomically. Extract only package source/requirements/metadata; reject traversal and symlinks.
+#   source atomically. Include the root changelog with package source, requirements and metadata.
+#   Complete older cached snapshots with the changelog from their original immutable revision.
 #   Network failures never silently fall back to the bundled version or modify an existing environment.
 #   Startup checks read only the small identity module from main without downloading an archive.
 # @inputs: local launcher home, progress callback and cancellation event
@@ -54,7 +55,8 @@ def latest_source(home: Path, emit, cancel) -> tuple[Path, str]:
         raise RuntimeError("Загрузка исходников остановлена.")
     cache = home / "sources"
     target = cache / revision
-    if (target / ".download.json").is_file() and source_version(target):
+    cached = (target / ".download.json").is_file() and source_version(target)
+    if cached and (target / "CHANGELOG.md").is_file():
         return target, revision
     cache.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="download-", dir=cache) as temporary:
@@ -87,7 +89,7 @@ def latest_source(home: Path, emit, cancel) -> tuple[Path, str]:
                     raise ValueError("Небезопасный путь в архиве исходников.")
                 roots.add(parts[0])
                 relative = PurePosixPath(*parts[1:])
-                allowed = (str(relative) in {"pyproject.toml", "README.md", "LICENSE"}
+                allowed = (str(relative) in {"pyproject.toml", "README.md", "CHANGELOG.md", "LICENSE"}
                            or (relative.parts and relative.parts[0] == "src" and relative.suffix == ".py")
                            or (relative.parts and relative.parts[0] == "requirements" and relative.suffix == ".txt"))
                 if not allowed or item.is_dir():
@@ -108,6 +110,11 @@ def latest_source(home: Path, emit, cancel) -> tuple[Path, str]:
         version = source_version(source)
         if not version:
             raise ValueError("В архиве не указана версия приложения.")
+        if cached:
+            notes = source / "CHANGELOG.md"
+            if notes.is_file():
+                os.replace(notes, target / notes.name)
+            return target, revision
         atomic_text(source / ".download.json", json.dumps({"revision": revision, "version": version,
                                                            "archive_sha256": digest.hexdigest()}))
         if target.exists():

@@ -22,9 +22,11 @@ from PySide6.QtWidgets import (
 )
 
 from diarrhizer import __author__, __version__
+from diarrhizer.changelog import TITLE as CHANGELOG_TITLE
 from diarrhizer_gui.environment import EnvironmentProbe
 from diarrhizer_gui.job_queue import CANCELLED, DONE, FAILED, PENDING, RUNNING, JobQueue
 from diarrhizer_gui.pipeline_worker import PipelineWorker
+from diarrhizer_gui.screens.changelog_dialog import ChangelogDialog
 from diarrhizer_gui.screens.doctor_screen import DoctorScreen
 from diarrhizer_gui.screens.history_screen import HistoryScreen
 from diarrhizer_gui.screens.models_screen import ModelsScreen
@@ -63,7 +65,7 @@ APP_TITLE = f"Diarrhizer {__version__}"
 #   Project/team settings are passed into allocation; queued descendants prevent scope renames.
 #   Batch job moves relocate live result/queue paths and refresh destination-team suggestions without
 #   discarding unsaved speaker names or enrolling those names in the destination roster.
-#   The window title and sidebar retain the shared release version and sole application author.
+#   The sidebar version opens the offline release history; the title retains the shared version.
 # @inputs: user actions on the screens
 # @outputs: pipeline jobs, screen navigation
 # @sideEffects: Spawns/kills child processes; files dropped on the window are added to New Job
@@ -98,7 +100,15 @@ class MainWindow(QMainWindow):
         self._job_status.clicked.connect(self._show_monitor)
         self._job_status.hide()
 
-        credit = QLabel(f"{APP_TITLE}\nBy {__author__}")
+        self.version_button = QPushButton(APP_TITLE)
+        font = self.version_button.font()
+        font.setUnderline(True)
+        self.version_button.setFont(font)
+        self.version_button.setFlat(True)
+        self.version_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.version_button.setToolTip(CHANGELOG_TITLE)
+        self.version_button.clicked.connect(self._open_changelog)
+        credit = QLabel(f"By {__author__}")
         credit.setObjectName("CreditLabel")
         credit.setAlignment(Qt.AlignCenter)
         credit.setWordWrap(True)
@@ -110,6 +120,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.setSpacing(0)
         sidebar_layout.addWidget(self._nav, stretch=1)
         sidebar_layout.addWidget(self._job_status)
+        sidebar_layout.addWidget(self.version_button)
         sidebar_layout.addWidget(credit)
 
         central = QWidget()
@@ -125,6 +136,11 @@ class MainWindow(QMainWindow):
         self._nav.setCurrentRow(ROWS["new_job"])
         # After the window is up: the checks import torch/whisperx in a child.
         QTimer.singleShot(0, self._probe.run)
+
+    def _open_changelog(self):
+        dialog = ChangelogDialog(self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.open()
 
     def _build_screens(self) -> None:
         self._new_job = NewJobScreen(self._probe, is_busy=self._is_job_busy)
