@@ -288,16 +288,49 @@ def test_leaving_dirty_editor(qapp, job, monkeypatch, choice):
     assert (job / MANUAL).exists() == (choice == "Сохранить")
 
 
-def test_sidebar_and_back_respect_unsaved_edits(qapp, job, monkeypatch, ini_settings, summary_stores):
-    from PySide6.QtWidgets import QMessageBox
-
+@pytest.fixture
+def main_window(qapp, monkeypatch, ini_settings):
     from diarrhizer_gui.environment import EnvironmentProbe
-    from diarrhizer_gui.main_window import ROWS, MainWindow
+    from diarrhizer_gui.main_window import MainWindow
 
     for module in ("history_screen", "models_screen", "new_job_screen", "settings_screen", "summary_settings_screen"):
         monkeypatch.setattr(f"diarrhizer_gui.screens.{module}.QSettings", ini_settings[1])
     monkeypatch.setattr(EnvironmentProbe, "run", lambda *_: None)
     window = MainWindow()
+    yield window
+    window.deleteLater()
+
+
+@pytest.mark.parametrize("origin", ["history", "monitor"])
+def test_open_result_from_focused_page_shows_only_one_screen(qapp, main_window, job, origin):
+    from diarrhizer_gui.main_window import ROWS
+
+    window = main_window
+    window.show()
+    window.activateWindow()
+    window._nav.setCurrentRow(ROWS[origin])
+    page = window._stack.currentWidget()
+    field = window._history._path_field if origin == "history" else window._monitor._log
+    field.setFocus()
+    qapp.processEvents()
+    assert field.hasFocus()
+    page.view_result_requested.emit(job)
+
+    pages = [window._stack.widget(i) for i in range(window._stack.count())]
+    assert [p for p in pages if p.isVisible()] == [window._result]
+    assert window._nav.currentRow() == -1
+    window._result.back_requested.emit()
+    assert [p for p in pages if p.isVisible()] == [window._history]
+    window._nav.setCurrentRow(ROWS["new_job"])
+    assert [p for p in pages if p.isVisible()] == [window._new_job]
+
+
+def test_sidebar_and_back_respect_unsaved_edits(main_window, job, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from diarrhizer_gui.main_window import ROWS
+
+    window = main_window
     window._show_result(job)
     window._result._edit_button.click()
     window._result._editor.text_field.setPlainText("Черновик")
@@ -310,4 +343,3 @@ def test_sidebar_and_back_respect_unsaved_edits(qapp, job, monkeypatch, ini_sett
     window._result.back_requested.emit()
     assert window._stack.currentWidget() is window._history
     assert not (job / MANUAL).exists()
-    window.deleteLater()

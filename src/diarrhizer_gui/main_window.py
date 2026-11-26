@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -66,6 +66,7 @@ APP_TITLE = f"Diarrhizer {__version__}"
 #   Batch job moves relocate live result/queue paths and refresh destination-team suggestions without
 #   discarding unsaved speaker names or enrolling those names in the destination roster.
 #   The sidebar version opens the offline release history; the title retains the shared version.
+#   Opening a result transfers focus before clearing the sidebar selection, keeping exactly one page visible.
 # @inputs: user actions on the screens
 # @outputs: pipeline jobs, screen navigation
 # @sideEffects: Spawns/kills child processes; files dropped on the window are added to New Job
@@ -183,8 +184,7 @@ class MainWindow(QMainWindow):
             self._nav.addItem(item)
             self._stack.addWidget(screens[key])
 
-        # Not a nav destination - reached from History, Monitor or a finished
-        # job; the nav row selection is left wherever it was.
+        # Results are reached from History or Monitor and have no sidebar row.
         self._stack.addWidget(self._result)
 
     # --- navigation ----------------------------------------------------------
@@ -211,8 +211,11 @@ class MainWindow(QMainWindow):
 
     def _show_result(self, job_dir) -> None:
         if self._result.load(Path(job_dir)):
-            self._nav.setCurrentRow(-1)
-            self._stack.setCurrentWidget(self._result)
+            # Hiding the focused page can move focus to the sidebar. Its automatic
+            # row selection must not switch pages again inside Qt's stack transition.
+            with QSignalBlocker(self._nav):
+                self._stack.setCurrentWidget(self._result)
+                self._nav.setCurrentRow(-1)
 
     def _set_nav_label(self, key: str, text: str) -> None:
         self._nav.item(ROWS[key]).setText(text)
