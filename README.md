@@ -1,4 +1,4 @@
-# Diarrhizer 2.17
+# Diarrhizer 2.18
 
 By MRIMSH
 
@@ -8,7 +8,7 @@ input audio/video file → FFmpeg → WhisperX (ASR + alignment) → speaker dia
 Two front ends share one pipeline: a desktop GUI (`python -m diarrhizer_gui.app`, see [GUI](#gui))
 and a CLI (`python -m diarrhizer run …`).
 
-**2.17** is the shared application version for the CLI, desktop GUI and Windows launcher.
+**2.18** is the shared application version for the CLI, desktop GUI and Windows launcher.
 Check it with `python -m diarrhizer --version`; the GUI shows it in the window title and sidebar.
 Click the sidebar version to browse the local release notes. The launcher's **Последнее обновление**
 shows highlights and opens the same paged history before environment setup.
@@ -243,8 +243,8 @@ cannot take the GUI down, and memory (including VRAM) is fully released after ev
 
 On **Результат**, choose **Редактировать транскрипцию**. Select a row to edit its text or choose
 its speaker. **▶ Реплика** plays that interval. To assign only a few words to someone else, put the
-cursor at the boundary and choose **Разделить реплику**. Adjust the cut time in seconds. The dialog
-starts at the playback position when it is inside the row, otherwise at the midpoint. Split at the
+cursor at the boundary and choose **Разделить реплику**. The editor divides the duration in proportion
+to the number of characters on each side of the cursor, including spaces. Split at the
 other boundary if necessary, then change the speaker of the isolated row. **Объединить реплики**
 joins the selected row with the next one and asks for the final speaker if they differ.
 

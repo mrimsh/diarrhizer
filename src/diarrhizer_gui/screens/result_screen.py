@@ -407,7 +407,7 @@ class ResultScreen(QWidget):
         self._retry_button.clicked.connect(self._retry_export)
         self._retry_button.hide()
         actions_row.insertWidget(3, self._retry_button)
-        self._editor = TranscriptEditor(self._player_position)
+        self._editor = TranscriptEditor()
         self._editor.save_requested.connect(self._save_edits)
         self._editor.cancel_requested.connect(self._cancel_edits)
         self._editor.play_requested.connect(self._play_from)
@@ -750,11 +750,6 @@ class ResultScreen(QWidget):
         self._set_status("Текст скопирован в буфер обмена.", "#2f7d52")
 
     # --- saving / re-running ---------------------------------------------------------
-
-    def _player_position(self) -> float | None:
-        if self._player is not None and not self._player_bar.isHidden():
-            return self._player.position() / 1000
-        return None
 
     def _set_editing(self, enabled: bool) -> None:
         for widget in self._view_controls:

@@ -175,7 +175,8 @@ def resolve_conflict(job: Path, opened: Transcript, *, keep_manual: bool) -> Tra
 # @purpose: Edit individual segments while preserving unaffected segments and real overlapping speech.
 # @description: Text or boundary changes invalidate word alignments. A speaker-only change keeps word
 #   times and updates their IDs. Splits retain an explicit paragraph break in readable exports.
-# @inputs: segment dictionaries, cursor offset and time, or two adjacent segments and a speaker
+# @inputs: segment dictionaries, cursor offset and optional time override, or two adjacent segments and a speaker
+#   With no override, the cursor's fraction of the full text determines the same fraction of the duration.
 # @outputs: replacement dictionaries; input segments are never mutated
 # @errors: ValueError for an empty split, invalid cut time or missing speaker choice
 # @see: READ:MERGED_SEGMENTS, EXPORT:SPEAKER_TURNS, GUI:TRANSCRIPT_EDITOR
@@ -196,11 +197,13 @@ def change_speaker(segment: dict, speaker: str) -> dict:
     return updated
 
 
-def split_segment(segment: dict, cursor: int, at: float) -> tuple[dict, dict]:
+def split_segment(segment: dict, cursor: int, at: float | None = None) -> tuple[dict, dict]:
     text = segment.get("text", "")
     left, right = text[:cursor].rstrip(), text[cursor:].lstrip()
     if not 0 < cursor < len(text) or not left.strip() or not right.strip():
         raise ValueError("Поставьте курсор между двумя частями текста реплики.")
+    if at is None:
+        at = segment["start"] + (segment["end"] - segment["start"]) * (cursor / len(text))
     if not segment["start"] < at < segment["end"]:
         raise ValueError("Момент разреза должен быть строго внутри реплики.")
     return ({**change_text(segment, left), "end": at},

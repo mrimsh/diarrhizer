@@ -36,18 +36,17 @@ def _time(seconds):
 # @purpose: Edit a result's individual timed segments with the recording available for reference.
 # @description: Only the selected row owns input widgets. Draft edits replace individual dictionaries.
 #   Cursor positions come from the Qt document, including Unicode characters outside the BMP.
-# @inputs: saved segment list, job speakers and a callable returning the player's position in seconds
+# @inputs: saved segment list, job speakers and the character offset for proportional splitting
 # @outputs: draft segments and requests to play, save or discard
-# @sideEffects: Qt dialogs for split time and final speaker; no file writes
+# @sideEffects: Qt dialog for final speaker and validation warnings; no file writes
 # @see: TRANSCRIPT:EDIT, GUI:RESULT_SCREEN, TRANSCRIPT:REVISION
 class TranscriptEditor(QWidget):
     save_requested = Signal()
     cancel_requested = Signal()
     play_requested = Signal(float, float)
 
-    def __init__(self, player_position):
+    def __init__(self):
         super().__init__()
-        self.player_position = player_position
         self.segments = []
         self.original = []
         self.speakers = {}
@@ -157,25 +156,15 @@ class TranscriptEditor(QWidget):
         cursor.clearSelection()
         cursor.setPosition(0, QTextCursor.MoveMode.KeepAnchor)
         offset = len(cursor.selectedText())
-        start, end = seg["start"], seg["end"]
-        initial = self.player_position()
-        if initial is None or not start < initial < end:
-            initial = (start + end) / 2
         try:
-            split_segment(seg, offset, initial)
-            at, ok = QInputDialog.getDouble(self, "Разделить реплику",
-                                            f"Момент разреза в секундах ({_time(start)} – {_time(end)})",
-                                            initial, start, end, 6)
-            if not ok:
-                return
-            left, right = split_segment(seg, offset, at)
+            left, right = split_segment(seg, offset)
         except ValueError as exc:
             QMessageBox.warning(self, "Разделить реплику", str(exc))
             return
         self.segments[row] = left
         # An overlapping voice may start between the two halves.
         next_row = row + 1
-        while next_row < len(self.segments) and self.segments[next_row]["start"] < at:
+        while next_row < len(self.segments) and self.segments[next_row]["start"] < right["start"]:
             next_row += 1
         self.segments.insert(next_row, right)
         self._populate(next_row)

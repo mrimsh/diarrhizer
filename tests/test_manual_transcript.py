@@ -133,15 +133,12 @@ def test_gui_edit_play_split_reassign_merge_save_and_reopen(qapp, job, monkeypat
     cursor = editor.text_field.textCursor()
     cursor.setPosition(4)  # after the emoji in UTF-16
     editor.text_field.setTextCursor(cursor)
-    def choose_cut(_parent, _title, _label, initial, start, end, _decimals):
-        assert (initial, start, end) == (2.125, 0, 4)
-        return 2.25, True
-    monkeypatch.setattr(QInputDialog, "getDouble", choose_cut)
+    monkeypatch.setattr(QInputDialog, "getDouble", lambda *args: pytest.fail("unexpected time dialog"))
     editor.split.click()
     assert editor.table.currentRow() == 1
     assert [s["text"] for s in editor.segments] == ["Да🙂", "Теперь", "Второй", "Конец"]
     editor.play.click()
-    assert played == [2250, "play"] and screen._stop_at_ms == 4000
+    assert played == [1200, "play"] and screen._stop_at_ms == 4000
     screen._player = None
     editor.speaker_field.setCurrentIndex(editor.speaker_field.findData("Speaker_01"))
     assert [s["speaker_id"] for s in editor.segments][:2] == ["Speaker_00", "Speaker_01"]
@@ -170,7 +167,7 @@ def test_gui_edit_play_split_reassign_merge_save_and_reopen(qapp, job, monkeypat
         assert "Первый ответ" not in rendered
     rows = read_json(job / "export/result.json")["segments"]
     assert [(s["start"], s["end"], s["speaker_name"]) for s in rows] == [
-        (0, 2.25, "Speaker_00"), (2.25, 6, "Анна"), (6, 7, "Speaker_00")]
+        (0, 1.2, "Speaker_00"), (1.2, 6, "Анна"), (6, 7, "Speaker_00")]
     assert [s["text"] for s in rows] == ["Да🙂", "Теперь Второй", "Конец"]
     assert PromptContext("", job_dir=job).segments == reopened._segments
     prompts = []
