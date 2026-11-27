@@ -10,7 +10,7 @@ from diarrhizer.export.speakers import normalize_speaker_id
 from diarrhizer.transcript import read_segments as read_segments
 from diarrhizer.utils import read_object, write_json_atomic
 from diarrhizer.projects import export_path
-from diarrhizer.pipeline.channels import validate_channel_settings, TRACK_DEFAULTS
+from diarrhizer.pipeline.channels import default_channel_speakers, validate_channel_settings, TRACK_DEFAULTS
 
 FULL_STAGES = ("convert", "transcribe", "diarize", "merge", "export")
 RECORDED_RUN_KEYS = (
@@ -30,6 +30,7 @@ RECORDED_RUN_KEYS = (
 #   artifacts are read best-effort so they can still be rebuilt.
 #   The full saved audio format survives removal/renaming of a personal profile. Speaker names
 #   prefer speakers.json (including an explicit empty map), then the last export's mapping.
+#   Built-in names for separated voices fill missing entries in either map, even after a reset.
 #   ASR profiles, glossary contents and real VAD controls survive resume; missing legacy keys use defaults.
 #   Portable jobs resolve their named export through job.json; legacy result.json remains supported.
 #   Channel layout, local channel and one-on-one choice survive CLI/GUI resume unchanged.
@@ -71,8 +72,9 @@ def read_job_settings(job_dir: Path, meta: dict | None = None, *, include_speake
             valid = isinstance(value, str) or (key in nullable and value is None)
         if not valid:
             raise ValueError(f"{job_dir}/meta/run.json: invalid {key}")
-    validate_channel_settings(settings.get("channel_mode", "mixed"), settings.get("my_channel", "left"),
-                              settings.get("one_on_one", False),
+    channel_mode = settings.get("channel_mode", "mixed")
+    one_on_one = settings.get("one_on_one", False)
+    validate_channel_settings(channel_mode, settings.get("my_channel", "left"), one_on_one,
                               save_mix=settings.get("save_mix", True),
                               **{key: settings.get(key, default) for key, default in TRACK_DEFAULTS.items()})
     compose_asr_prompt(settings.get("asr_profile", "default"), settings.get("asr_initial_prompt"),
@@ -109,8 +111,11 @@ def read_job_settings(job_dir: Path, meta: dict | None = None, *, include_speake
         names = export_meta.get("speakers", {}) if isinstance(export_meta, dict) else {}
     if not isinstance(names, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in names.items()):
         raise ValueError(f"{job_dir}: speaker names must be a string-to-string mapping")
-    settings["speakers"] = {normalize_speaker_id(k): v.strip() for k, v in names.items()
-                            if v.strip() and v.strip() != normalize_speaker_id(k)}
+    settings["speakers"] = {
+        **default_channel_speakers(channel_mode, one_on_one),
+        **{normalize_speaker_id(k): v.strip() for k, v in names.items()
+           if v.strip() and v.strip() != normalize_speaker_id(k)},
+    }
     return settings
 
 

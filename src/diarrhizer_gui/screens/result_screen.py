@@ -242,6 +242,7 @@ class RediarizeDialog(QDialog):
 # @description: Draft edits share the existing player. Save writes the manual snapshot under the job
 #   lock and reports success only after every exporter completes. Navigation settles dirty edits.
 #   Conflicts require selecting a whole version. Failed exports can be retried after reopening.
+#   Display built-in and saved names only for speakers with turns in this result.
 #   When the job omits its playback mix, the combined player is disabled; voice files remain separate.
 #   An unopened result has no dirty state; saves hold the per-job OS write lock through re-export.
 #   Team-scoped suggestions are explicit roster entries; typing/saving a speaker alone never enrolls a name.

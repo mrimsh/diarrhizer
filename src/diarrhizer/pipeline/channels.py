@@ -33,10 +33,10 @@ def channel_tracks(config) -> dict:
             "right" if config.my_channel == "left" else "left": config.others_track}
 
 
-def default_channel_speakers(config) -> dict:
-    if config.channel_mode != "me-others":
+def default_channel_speakers(channel_mode: str, one_on_one: bool) -> dict:
+    if channel_mode != "me-others":
         return {}
-    return {"Speaker_00": "Я", **({"Speaker_01": "Собеседник"} if config.one_on_one else {})}
+    return {"Speaker_00": "Я", **({"Speaker_01": "Собеседник"} if one_on_one else {})}
 
 
 def validate_channel_settings(channel_mode: str, my_channel: str, one_on_one: bool,

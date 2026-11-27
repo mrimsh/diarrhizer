@@ -1,6 +1,6 @@
 # Architecture
 
-Current source version: **2.18**, shared by the CLI, desktop GUI and Windows launcher.
+Current source version: **2.19**, shared by the CLI, desktop GUI and Windows launcher.
 The [2.x roadmap](roadmap.md) describes the direction toward autonomous call logging, a separate
 call agent and optional integration skills; those capabilities remain planned.
 
@@ -343,6 +343,8 @@ explicit overrides, then recorded settings, then `PipelineConfig` defaults. Omis
 `None` differ: `None` clears nullable settings; `{}` clears names. An explicit stage list wins over
 the recorded list. The saved audio-format object wins over a renamed/deleted personal profile.
 Names prefer `speakers.json` (including an empty map), then `export/result.json.metadata.speakers`.
+The names inferred from separated sources (`Я` and, for one-on-one, `Собеседник`) fill any missing
+entries in both exports and the GUI. An empty map after diarization still suppresses stale custom names.
 Malformed critical metadata is an error; broken optional derived artifacts can still be rebuilt.
 
 `meta/run.json.source_fingerprint` contains the resolved path, size, `mtime_ns` and SHA-256 of the

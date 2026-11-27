@@ -11,7 +11,7 @@ import pytest
 
 from diarrhizer.adapters.ffmpeg import FFmpegAdapter, resolve_ffmpeg_path
 from diarrhizer.audio_formats import ENV_AUDIO_FORMATS_FILE, find_job_audio
-from diarrhizer.pipeline.runner import run_pipeline
+from diarrhizer.pipeline.runner import new_job_dir, run_pipeline
 from diarrhizer.pipeline.settings import read_job_settings
 from diarrhizer.projects import move_jobs
 from diarrhizer_gui.job_scan import job_mode, rediarize_plan, resume_plan, restart_plan, stage_done
@@ -364,6 +364,30 @@ def test_legacy_track_archives_keep_their_lr_names_on_resume(multitrack_media, t
     _, restart = restart_plan(job, "transcribe")
     run_pipeline(**restart)
     assert [path.name for path in ASR.calls[-2:]] == ["archive_left.flac", "archive_right.flac"]
+
+
+def test_first_gui_result_shows_local_name_after_track_diarization(qapp, multitrack_media, tmp_path,
+                                                               adapters, monkeypatch):
+    from diarrhizer_gui.child_tasks import build_stages
+    from diarrhizer_gui.screens.result_screen import ResultScreen
+
+    monkeypatch.setenv("HF_TOKEN", "test-only")
+    output = tmp_path / "out"
+    job = new_job_dir(output, multitrack_media, naming_template="Call")
+    run_pipeline(input_path=multitrack_media, out_dir=output, job_dir=job, device="cpu",
+                 stages=build_stages("me_others"), channel_mode="me-others",
+                 channel_source="tracks", my_channel="right", save_mix=False,
+                 min_speakers=2, max_speakers=2)
+
+    screen = ResultScreen()
+    assert screen.load(job)
+    assert screen._speaker_fields["Speaker_00"].text() == "Я"
+    assert "Я:" in screen._transcript.toPlainText()
+    assert not screen._save_button.isEnabled()
+    (job / "speakers.json").write_text(json.dumps({"Speaker_00": "Мария"}), encoding="utf-8")
+    assert screen.load(job)
+    assert screen._speaker_fields["Speaker_00"].text() == "Мария"
+    screen.close()
 
 
 def test_track_slot_change_rebuilds_wavs_instead_of_relabelling_old_audio(multitrack_media, tmp_path, adapters):

@@ -186,7 +186,7 @@ class PipelineConfig:
                                   self.channel_source, self.my_track, self.others_track, self.mix_track,
                                   save_mix=self.save_mix)
         if self.channel_mode == "me-others":
-            self.speakers = {**default_channel_speakers(self), **(self.speakers or {})}
+            self.speakers = {**default_channel_speakers(self.channel_mode, self.one_on_one), **(self.speakers or {})}
         compose_asr_prompt(self.asr_profile, self.asr_initial_prompt, self.asr_glossary)
         validate_vad_options(self.asr_vad_onset, self.asr_vad_offset, self.asr_chunk_size)
 
@@ -787,7 +787,7 @@ def _run_pipeline(
             if stage_name == "diarize" and not keep_channel_speakers:
                 set_aside_speaker_names(job_dir)
                 if not preserve_speakers:
-                    config.speakers = default_channel_speakers(config) or None
+                    config.speakers = default_channel_speakers(config.channel_mode, config.one_on_one) or None
 
             # If forcing, delete this stage's own outputs first to avoid partial
             # state. Deliberately uses get_output_paths(), not get_artifact_paths():
