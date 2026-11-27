@@ -30,27 +30,35 @@ def _open(url):
 #   source atomically. Include the root changelog with package source, requirements and metadata.
 #   Complete older cached snapshots with the changelog from their original immutable revision.
 #   Network failures never silently fall back to the bundled version or modify an existing environment.
-#   Startup checks read only the small identity module from main without downloading an archive.
+#   Version checks read the identity module and commit message for the same immutable revision.
 # @inputs: local launcher home, progress callback and cancellation event
 # @outputs: cached application-source directory and GitHub commit SHA
 # @sideEffects: Public GitHub API/codeload requests and local source-cache writes; no Git or tokens needed
 # @errors: Network errors, invalid commit/archive/version, cancellation, download/expansion size limits
 # @see: LAUNCHER:SETUP, LAUNCHER:CONFIG
-def latest_application_version() -> str:
-    url = f"https://raw.githubusercontent.com/{REPOSITORY}/{BRANCH}/src/diarrhizer/__init__.py"
+def _head_commit():
+    with _open(f"https://api.github.com/repos/{REPOSITORY}/commits/{BRANCH}") as response:
+        metadata = json.loads(response.read(1024 * 1024))
+    revision = metadata.get("sha") if isinstance(metadata, dict) else None
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("GitHub не вернул корректный идентификатор коммита.")
+    commit = metadata.get("commit")
+    message = commit.get("message") if isinstance(commit, dict) else None
+    return revision, message.strip() if isinstance(message, str) else ""
+
+
+def latest_application_info() -> tuple[str, str, str]:
+    revision, message = _head_commit()
+    url = f"https://raw.githubusercontent.com/{REPOSITORY}/{revision}/src/diarrhizer/__init__.py"
     with _open(url) as response:
         raw = response.read(65537)
     if len(raw) > 65536:
         raise ValueError("Слишком большой файл версии приложения.")
-    return parse_source_version(raw.decode("utf-8-sig"))
+    return parse_source_version(raw.decode("utf-8-sig")), revision, message
 
 
 def latest_source(home: Path, emit, cancel) -> tuple[Path, str]:
-    with _open(f"https://api.github.com/repos/{REPOSITORY}/commits/{BRANCH}") as response:
-        metadata = json.loads(response.read(1024 * 1024))
-    revision = metadata.get("sha", "")
-    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
-        raise ValueError("GitHub не вернул корректный идентификатор коммита.")
+    revision, _ = _head_commit()
     if cancel.is_set():
         raise RuntimeError("Загрузка исходников остановлена.")
     cache = home / "sources"

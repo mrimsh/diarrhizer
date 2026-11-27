@@ -1,6 +1,6 @@
 # Windows launcher
 
-Current source version: **2.19** by **MRIMSH**. The setup window and rebuilt Windows executable file/product
+Current source version: **2.20** by **MRIMSH**. The setup window and rebuilt Windows executable file/product
 properties display the shared release version; Windows company metadata names MRIMSH.
 
 `Diarrhizer.exe` is the graphical entry point for setup and everyday use on Windows 10/11 x64.
@@ -10,17 +10,17 @@ a normal Python installation in one selected virtual environment. There is no se
 
 ## First launch
 
-**Последнее обновление** shows the newest entry in the launcher's bundled changelog.
-**Вся история изменений** opens one version per page. Use the version selector or the
-newer/older buttons to browse offline, even on first launch. When the detected installed
-application version differs, both versions are labelled in the update block.
+**Последний коммит приложения · main** shows the version and commit ID from GitHub.
+**Сообщение коммита…** opens the full commit message. **История в этой сборке** opens the
+offline copy of the repository changelog included when this launcher was built.
 
 Launchers built before 2.16 filtered the changelog out of downloaded application sources.
 If the GUI reports that its changelog is missing after such an installation, open the
 environment with a launcher that includes release history and select **Обновить приложение**.
 
-On startup the launcher shows the application version in the selected environment alongside the
-version on GitHub `main`. A newer version is marked **«доступно обновление»**. Opening another
+At startup and once an hour the launcher checks versions. Available application and launcher
+updates appear in bold on a yellow background. The application row compares the selected
+environment with GitHub `main` and marks a newer version **«доступно обновление»**. Opening another
 environment refreshes its installed version. The standalone exe also checks the latest stable
 release and displays its version next to **«Обновить лаунчер…»** when an upgrade is available.
 Both GitHub checks run in the background and only read version information. Use the corresponding

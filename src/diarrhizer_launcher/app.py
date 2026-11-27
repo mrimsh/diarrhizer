@@ -16,7 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from diarrhizer import __author__, __version__
-from diarrhizer.changelog import UNAVAILABLE, load_history
+from diarrhizer.changelog import load_history
 
 from .changelog_window import ChangelogWindow
 from .config import (
@@ -35,7 +35,7 @@ from .launch import (
     start_gui,
     write_start_files,
 )
-from .repository import SOURCE_LABEL, latest_application_version
+from .repository import SOURCE_LABEL, latest_application_info
 from .self_update import (
     discard_update,
     latest_launcher,
@@ -57,7 +57,7 @@ from .system import capture, discover_pythons, gpu_description
 #   Title/header display the shared application release and sole author without loading the processing stack.
 #   Self-update downloads/verifies a release off-thread, then confirms restart before handing off
 #   replacement to a hidden helper. The single-instance lock is released before the new exe starts.
-#   Independent read-only startup probes compare the selected runtime with main and the exe with stable releases.
+#   Startup and hourly probes highlight available updates and identify the commit behind the main version.
 #   The latest local release and its history can be read before any probes or environment setup.
 # @inputs: one local state file, user paths/device/download choices
 # @outputs: setup progress/log, retry/repair controls, GUI/shortcut/start-folder actions
@@ -89,6 +89,7 @@ class Launcher:
         if "vista" in style.theme_names():
             style.theme_use("vista")
         style.configure("Title.TLabel", font=("Segoe UI", 19, "bold"))
+        style.configure("Update.TLabel", font=("Segoe UI", 10, "bold"), foreground="#211900", background="#ffe680")
         style.configure("TButton", padding=(9, 5))
         body = self._scrollable_body(root)
         body.columnconfigure(0, weight=1)
@@ -102,17 +103,18 @@ class Launcher:
                                    else "Подготовьте окружение, затем откройте основной GUI.")
         ttk.Label(header, textvariable=self.status, wraplength=280).grid(row=2, column=0, sticky="nw")
         self.entries = load_history()
-        update = ttk.LabelFrame(header, text="Последнее обновление", padding=(9, 4))
+        update = ttk.LabelFrame(header, text="Последний коммит приложения · main", padding=(9, 4))
         update.grid(row=0, column=1, rowspan=3, sticky="ew", padx=(12, 0))
         update.columnconfigure(0, weight=1)
         self.history_version = tk.StringVar()
         ttk.Label(update, textvariable=self.history_version, wraplength=350).grid(row=0, column=0, sticky="w")
-        self.history_button = ttk.Button(update, text="Вся история изменений", command=self._open_history)
+        self.history_button = ttk.Button(update, text="История в этой сборке", command=self._open_history)
         self.history_button.grid(row=0, column=1, sticky="e")
-        highlights = self.entries[0].highlights() if self.entries else []
-        summary = ttk.Label(update, text="\n".join("• " + item for item in highlights), justify="left", wraplength=480)
-        summary.grid(row=1, column=0, columnspan=2, sticky="ew")
-        summary.bind("<Configure>", lambda event: summary.configure(wraplength=max(1, event.width)))
+        self.commit_message = ""
+        self.commit_revision = ""
+        self.commit_button = ttk.Button(update, text="Сообщение коммита…", state="disabled",
+                                       command=self._open_commit)
+        self.commit_button.grid(row=1, column=0, sticky="w")
 
         form = ttk.LabelFrame(body, text="Параметры среды", padding=12)
         form.grid(row=2, column=0, sticky="ew")
@@ -154,8 +156,8 @@ class Launcher:
         self.remote_version = ""
         self.remote_status = "проверяем…" if probe else "не проверено"
         self.source_text = tk.StringVar()
-        ttk.Label(form, textvariable=self.source_text,
-                  wraplength=900).grid(row=11, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self.app_label = ttk.Label(form, textvariable=self.source_text, wraplength=900)
+        self.app_label.grid(row=11, column=0, columnspan=4, sticky="w", pady=(4, 0))
         ttk.Label(form, text="Зависимости: общие ограничения проекта + CPU / CUDA. Установка может занять несколько ГБ.\n"
                   "Модели — отдельно в GUI: tiny ≈80 МБ, base ≈150 МБ, large-v3 ≈3,1 ГБ; выравнивание и диаризация — дополнительно.",
                   wraplength=900).grid(row=10, column=0, columnspan=4, sticky="w", pady=(8, 0))
@@ -187,7 +189,8 @@ class Launcher:
         self.self_update_button = ttk.Button(update_actions, text="Обновить лаунчер…", command=self.update_launcher)
         self.self_update_button.pack(side="left", padx=8)
         self.launcher_status = tk.StringVar(value=f"Лаунчер {__version__}")
-        ttk.Label(update_actions, textvariable=self.launcher_status).pack(side="left")
+        self.launcher_label = ttk.Label(update_actions, textvariable=self.launcher_status)
+        self.launcher_label.pack(side="left")
 
         self.log = ScrolledText(body, height=4, wrap="word", font=("Consolas", 9), state="disabled")
         self.log.grid(row=5, column=0, sticky="nsew")
@@ -214,13 +217,33 @@ class Launcher:
         self.refresh()
         root.after(100, self.poll)
         root.after(1500, self._report_launcher_update)
+        self.history_version.set("Проверяем…" if probe else "Нет данных о коммите")
         if probe:
             threading.Thread(target=self._discover, daemon=True).start()
-            self._check_installed()
-            self._version_probe("app_version", latest_application_version)
             if getattr(sys, "frozen", False):
                 self.launcher_status.set(f"Лаунчер {__version__} · проверяем обновления…")
-                self._version_probe("exe_version", lambda: latest_launcher(__version__))
+            self._refresh_update_info()
+
+    def _refresh_update_info(self):
+        if self.closing:
+            return
+        self.root.after(60 * 60 * 1000, self._refresh_update_info)
+        if not self.busy:
+            self._check_installed()
+        self._version_probe("app_version", latest_application_info)
+        if getattr(sys, "frozen", False):
+            self._version_probe("exe_version", lambda: latest_launcher(__version__))
+
+    def _open_commit(self):
+        window = tk.Toplevel(self.root)
+        window.title(self.history_version.get())
+        window.transient(self.root)
+        body = ScrolledText(window, wrap="word", width=76, height=15)
+        body.pack(fill="both", expand=True)
+        body.insert("1.0", self.commit_message)
+        body.configure(state="disabled")
+        ttk.Button(window, text="Закрыть", command=window.destroy).pack(pady=5)
+        return window
 
     @staticmethod
     def _scrollable_body(root):
@@ -257,9 +280,12 @@ class Launcher:
         def check():
             try:
                 value = read()
-                if kind == "app_version" or (kind == "installed_version" and value):
+                event = {}
+                if kind == "app_version":
+                    value, event["revision"], event["message"] = value
+                if kind in {"installed_version", "app_version"} and value:
                     version_numbers(value)
-                event = {"value": value}
+                event["value"] = value
             except (OSError, ValueError, SyntaxError, RuntimeError, http.client.HTTPException,
                     subprocess.SubprocessError) as exc:
                 event = {"error": str(exc)}
@@ -286,14 +312,11 @@ class Launcher:
     def _show_versions(self):
         selected = self.variables["venv"].get().strip() == self.installed_folder
         local = self.installed_status if selected else "откройте среду"
-        release = f"Запись: {self.entries[0].title}" if self.entries else UNAVAILABLE
-        if self.entries and selected and self.installed_version and self.installed_version != self.entries[0].version:
-            release += f"\nУстановленное приложение: {self.installed_version}"
-        self.history_version.set(release)
         newer = (selected and self.installed_version and self.remote_version
                  and version_numbers(self.remote_version) > version_numbers(self.installed_version))
         self.source_text.set(f"Приложение в среде: {local} · {SOURCE_LABEL}: {self.remote_version or self.remote_status}"
                              + (" · доступно обновление" if newer else ""))
+        self.app_label.configure(style="Update.TLabel" if newer else "TLabel")
 
     def _version_result(self, event):
         kind = event["kind"]
@@ -308,13 +331,22 @@ class Launcher:
             status = "проверка недоступна" if failed else (
                 f"доступна версия {value.version}" if value else "обновлений нет")
             self.launcher_status.set(f"Лаунчер {__version__} · {status}")
+            self.launcher_label.configure(style="Update.TLabel" if value else "TLabel")
         elif kind == "app_version":
             self.remote_version = value or ""
             self.remote_status = "проверка недоступна"
+            self._set_commit(value, event.get("revision", ""), event.get("message", ""))
         else:
             self.installed_version = value or ""
             self.installed_status = value or ("версия неизвестна" if failed else "не установлено")
         self._show_versions()
+
+    def _set_commit(self, version, revision, message):
+        self.commit_revision = revision
+        self.commit_message = message
+        title = f"Diarrhizer {version} · {revision[:12]}" if revision else "Нет данных о коммите"
+        self.history_version.set(title)
+        self.commit_button.configure(state="normal" if message else "disabled")
 
     def _path_row(self, parent, row, title, key, *, file=False):
         ttk.Label(parent, text=title).grid(row=row, column=0, sticky="w", padx=(0, 12))
@@ -617,6 +649,8 @@ class Launcher:
                     self.overall["value"] = len(STEPS) if self.available else 0
                 self.refresh()
             elif kind == "source":
+                if event["revision"] != self.commit_revision:
+                    self._set_commit(event["version"], event["revision"], "")
                 self.remote_version = event["version"]
                 self._append(f"{SOURCE_LABEL} · версия {event['version']} · коммит {event['revision'][:12]}")
                 self._show_versions()
@@ -775,7 +809,7 @@ def main() -> int:
             history = root.nametowidget(launcher.history_button.invoke())
             total = len(launcher.entries)
             assert total and launcher.entries[0].version == __version__
-            assert launcher.entries[0].title in launcher.history_version.get()
+            assert launcher.commit_button.instate(["disabled"])
             assert history.newer.instate(["disabled"])
             for _ in range(total - 1):
                 history.older.invoke()

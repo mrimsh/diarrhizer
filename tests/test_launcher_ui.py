@@ -30,18 +30,37 @@ def test_version_notices_follow_selected_environment_and_compare_numerically(ui)
 
     ui.installed_folder = ui.variables["venv"].get()
     ui._version_result({"kind": "installed_version", "probe_id": ui.local_probe_id, "value": "2.9"})
-    assert f"Запись: {ui.entries[0].title}" in ui.history_version.get()
-    assert "Установленное приложение: 2.9" in ui.history_version.get()
-    ui._version_result({"kind": "app_version", "value": "2.10"})
+    ui._version_result({"kind": "app_version", "value": "2.10", "revision": "a" * 40, "message": "Subject\n\nBody"})
+    assert ui.history_version.get() == "Diarrhizer 2.10 · aaaaaaaaaaaa"
+    dialog = ui.root.nametowidget(ui.commit_button.invoke())
+    body = next(child for child in dialog.winfo_children() if isinstance(child, tk.Frame))
+    assert body.winfo_children()[-1].get("1.0", "end-1c") == "Subject\n\nBody"
+    dialog.destroy()
+    assert ui.app_label["style"] == "Update.TLabel"
     assert "2.9" in ui.source_text.get() and "доступно обновление" in ui.source_text.get()
     ui._version_result({"kind": "exe_version", "value": SimpleNamespace(version="2.14")})
     assert "доступна версия 2.14" in ui.launcher_status.get()
     ui.variables["venv"].set("another environment")
-    assert "Установленное приложение: 2.9" not in ui.history_version.get()
+    assert ui.launcher_label["style"] == "Update.TLabel"
+    assert ui.app_label["style"] == "TLabel"
     assert "2.9" not in ui.source_text.get() and "доступно обновление" not in ui.source_text.get()
     ui._version_result({"kind": "app_version", "error": "offline"})
     assert "проверка недоступна" in ui.source_text.get()
     assert "offline" in ui.log.get("1.0", "end")
+    assert ui.commit_button.instate(["disabled"])
+
+
+def test_hourly_check_rearms_and_checks_both_channels(ui, monkeypatch):
+    timers, probes = [], []
+    monkeypatch.setattr("sys.frozen", True, raising=False)
+    monkeypatch.setattr(ui.root, "after", lambda ms, fn: timers.append((ms, fn)))
+    monkeypatch.setattr(ui, "_version_probe", lambda kind, *args, **kwargs: probes.append(kind))
+    ui._refresh_update_info()
+    delay, tick = timers.pop()
+    assert delay == 3600000
+    tick()
+    assert probes == ["installed_version", "app_version", "exe_version"] * 2
+    assert timers == [(delay, tick)]
 
 
 def test_confirmation_decline_leaves_existing_environment_and_state_untouched(ui, monkeypatch):
